@@ -1625,21 +1625,71 @@ function getConditionLabel() {
 }
 
 function generateDescription() {
-  const info = state.gameInfo;
+  const info = state.gameInfo || {};
   const condLabel = getConditionLabel();
-  const lines = [
-    `Up for sale: ${info.title} for ${info.platform}!`,
-    '',
-    info.summary,
-    '',
-    `📦 Condition: ${condLabel}`,
-    `🗂️ Case/Box: ${state.hasCase ? 'Included ✓' : 'Not included'}`,
-    `📖 Manual: ${state.hasManual ? 'Included ✓' : 'Not included'}`,
-  ];
-  if (state.extras.length > 0) lines.push(`🎁 Extras: ${state.extras.join(', ')}`);
-  const notes = document.getElementById('notes-input').value.trim();
-  if (notes) lines.push('', `📝 Notes: ${notes}`);
-  lines.push('', 'Ships fast! Happy to answer any questions. 🎮');
+  const title = info.title || 'Game';
+  const platform = info.platform || '';
+  const year = info.year || '';
+  const genre = info.genre || '';
+  const developer = info.developer || '';
+  const summary = info.summary || '';
+
+  // Condition details
+  const condDetails = {
+    new:      'This item is brand new and factory sealed — never opened.',
+    like_new: 'This item is in like-new condition — opened but unplayed, looks and works perfectly.',
+    good:     'This item is in good condition with only light wear. Fully functional with no issues.',
+    fair:     'This item shows visible wear from regular use but works great.',
+    poor:     'This item has heavy wear but is still fully functional.'
+  };
+
+  const lines = [];
+
+  // Title line
+  lines.push(`🎮 ${title}${platform ? ' — ' + platform : ''}`);
+  if (year || genre) {
+    const meta = [year, genre].filter(Boolean).join(' · ');
+    lines.push(meta);
+  }
+  lines.push('');
+
+  // Summary / description
+  if (summary) {
+    lines.push(summary);
+    lines.push('');
+  }
+
+  // Condition section
+  lines.push('━━━ CONDITION ━━━');
+  lines.push(`${condLabel}${condDetails[state.condition] ? ' — ' + condDetails[state.condition] : ''}`);
+  lines.push('');
+
+  // What's included
+  lines.push('━━━ WHAT\'S INCLUDED ━━━');
+  lines.push(`📀 Game disc/cartridge: ✓`);
+  lines.push(`🗂️  Case/Box: ${state.hasCase ? '✓ Included' : '✕ Not included'}`);
+  lines.push(`📖 Manual/Booklet: ${state.hasManual === null ? 'Not specified' : state.hasManual ? '✓ Included' : '✕ Not included'}`);
+  if (state.extras && state.extras.length > 0) {
+    state.extras.forEach(e => lines.push(`🎁 ${e}: ✓ Included`));
+  }
+  lines.push('');
+
+  // Additional notes
+  const notes = document.getElementById('notes-input') ? document.getElementById('notes-input').value.trim() : '';
+  if (notes) {
+    lines.push('━━━ SELLER NOTES ━━━');
+    lines.push(notes);
+    lines.push('');
+  }
+
+  // Developer credit
+  if (developer) {
+    lines.push(`Developed by: ${developer}`);
+  }
+
+  lines.push('');
+  lines.push('Ships fast in protective packaging! Feel free to ask questions. 🎮');
+
   return lines.join('\n');
 }
 
