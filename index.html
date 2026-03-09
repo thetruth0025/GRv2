@@ -803,15 +803,16 @@
     <div class="apikey-card">
       <div class="apikey-icon">🔑</div>
       <h2>Enter Your API Key</h2>
-      <p>Gaming Identified uses the Claude AI API to identify your games.<br>You need a free Anthropic API key to use it.</p>
-      <a href="https://console.anthropic.com/account/keys" target="_blank" style="text-align:center;font-size:0.88rem;">Get a free API key at console.anthropic.com →</a>
+      <p>To <strong>scan games by photo</strong>, Gaming Identified uses the Claude AI API.<br>Enter your Anthropic API key below — it's saved on this device and never asked again.</p>
+      <a href="https://console.anthropic.com/account/keys" target="_blank" style="text-align:center;font-size:0.88rem;">Get a free key at console.anthropic.com →</a>
+      <p style="font-size:0.82rem;color:var(--green);text-align:center;">💡 No API key? Use the manual search instead — it's completely free.</p>
       <div class="apikey-input-row">
         <input type="password" id="apikey-input" placeholder="sk-ant-..." autocomplete="off" autocorrect="off" spellcheck="false" />
         <button id="toggle-key-vis" onclick="toggleKeyVisibility()">👁</button>
       </div>
       <div id="apikey-error"></div>
       <button class="btn-primary" onclick="submitApiKey()">Save & Continue</button>
-      <p class="apikey-note">Your key is saved only on this device and never shared. You can change it anytime via the ⚙️ button.</p>
+      <p class="apikey-note">Your key is saved on this device permanently and won't be asked again. Change it anytime via ⚙️.</p>
     </div>
   </div>
 
@@ -835,7 +836,7 @@
     <div class="step-header">
       <div class="step-icon">📸</div>
       <h2>Capture Your Game</h2>
-      <p>Take photos of the front, back, and cartridge/disc. More photos help identify the game.</p>
+      <p>Take photos of the front, back, and disc. More photos = better accuracy. <span style="color:var(--accent2);font-size:0.85em;">(Requires API key)</span><br>Or skip to <strong>Search by Title</strong> below — free, no key needed.</p>
     </div>
 
     <div id="install-banner">
@@ -878,6 +879,11 @@
     <button class="btn-primary mt-16" id="btn-identify" disabled onclick="goToIdentify()">
       Identify Game →
     </button>
+
+    <div class="divider" style="margin-top:16px">or</div>
+    <button class="btn-secondary" style="width:100%;margin-top:0" onclick="skipToTitleSearch()">
+      🔤 Search by Title Instead — Free, No Key Needed
+    </button>
   </div>
 
   <!-- ══════════════════════════════ STEP 1: IDENTIFY ══════════════════════════════ -->
@@ -898,7 +904,7 @@
     <div id="error-identify" class="error-banner" style="display:none"></div>
 
     <div id="manual-entry" class="manual-entry" style="display:none">
-      <h3>Enter Game Info</h3>
+      <h3>Search by Title <span style="font-size:0.75rem;color:var(--green);font-weight:400;">✓ Free — no API key needed</span></h3>
       <input class="input-field" id="manual-title" type="text" placeholder="Game title (e.g. The Legend of Zelda)" />
       <select class="input-field" id="manual-platform">
         <option value="">Select platform...</option>
@@ -1177,6 +1183,22 @@ function goBack() {
   goToStep(state.step - 1);
 }
 
+function skipToTitleSearch() {
+  stopCamera();
+  goToStep(1);
+  // Hide loading/errors, show manual entry directly
+  document.getElementById('loading-state').style.display = 'none';
+  document.getElementById('error-identify').style.display = 'none';
+  document.getElementById('game-card').style.display = 'none';
+  document.getElementById('manual-entry').style.display = 'flex';
+  document.getElementById('btn-to-details').disabled = true;
+  // Focus the title input for quick typing
+  setTimeout(function() {
+    var el = document.getElementById('manual-title');
+    if (el) el.focus();
+  }, 150);
+}
+
 // ═══════════════════════════════════════════
 //  STEP 0 — CAMERA
 // ═══════════════════════════════════════════
@@ -1392,40 +1414,60 @@ If you cannot identify a game, set title to "Unknown Game" and confidence to "lo
 }
 
 async function fetchAndShowPrice(gameInfo) {
-  showLoading('Searching Mercari sold listings...', 'Checking recent prices...');
+  showLoading('Checking game prices...');
   let priceData = null;
+
   try {
-    const data = await callClaude({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1000,
-      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      messages: [{
-        role: 'user',
-        content: `Search Mercari for recently sold listings of "${gameInfo.title}" for ${gameInfo.platform}.
-Find actual sold prices from mercari.com listings.
-Respond ONLY with a JSON object (no markdown):
-{
-  "averagePrice": number (average sold price in USD, e.g. 24.99),
-  "priceRange": "e.g. $18 - $35",
-  "sampleCount": number,
-  "source": "Mercari sold listings"
-}
-If no Mercari data, use eBay sold or PriceCharting.com and note the source. If no data at all, averagePrice: null.`
-      }]
-    });
-    const text = data.content.map(b => b.type === 'text' ? b.text : '').join('\n');
-    priceData = parseJSON(text);
+    // PriceCharting free API — no key needed
+    const query = encodeURIComponent(gameInfo.title);
+    const pcRes = await fetch('https://www.pricecharting.com/api/products?q=' + query + '&status=price');
+    if (pcRes.ok) {
+      const pcData = await pcRes.json();
+      const products = pcData.products || [];
+      // Match by platform if possible
+      const platLower = (gameInfo.platform || '').toLowerCase();
+      let best = products.find(p => p['console-name'] && p['console-name'].toLowerCase().includes(platLower.split(' ')[0]));
+      if (!best) best = products[0];
+      if (best && best['loose-price']) {
+        const avg = best['loose-price'] / 100;
+        const cib = best['cib-price'] ? best['cib-price'] / 100 : null;
+        priceData = {
+          averagePrice: avg,
+          priceRange: cib ? ('$' + avg.toFixed(2) + ' loose / $' + cib.toFixed(2) + ' CIB') : null,
+          sampleCount: null,
+          source: 'PriceCharting.com'
+        };
+      }
+    }
   } catch(e) {
-    console.warn('Price fetch failed', e);
+    console.warn('PriceCharting fetch failed', e);
   }
 
-  state.gameInfo = {
-    ...gameInfo,
-    estimatedValue: priceData?.averagePrice != null ? `$${Number(priceData.averagePrice).toFixed(2)}` : null,
-    priceRange: priceData?.priceRange || null,
-    priceSampleCount: priceData?.sampleCount || null,
-    priceSource: priceData?.source || null,
-  };
+  // If we have a Claude key, try to get Mercari-specific price as well
+  if (!priceData && getApiKey()) {
+    try {
+      const data = await callClaude({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 500,
+        tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+        messages: [{
+          role: 'user',
+          content: 'Search Mercari sold listings for "' + gameInfo.title + '" ' + gameInfo.platform + '. Respond ONLY with JSON: {"averagePrice": number_or_null, "priceRange": "string", "sampleCount": number, "source": "Mercari sold listings"}'
+        }]
+      });
+      const text = data.content.map(function(b) { return b.type === 'text' ? b.text : ''; }).join('\n');
+      priceData = parseJSON(text);
+    } catch(e) {
+      console.warn('Claude price fetch failed', e);
+    }
+  }
+
+  state.gameInfo = Object.assign({}, gameInfo, {
+    estimatedValue: priceData && priceData.averagePrice != null ? '$' + Number(priceData.averagePrice).toFixed(2) : null,
+    priceRange: priceData ? priceData.priceRange || null : null,
+    priceSampleCount: priceData ? priceData.sampleCount || null : null,
+    priceSource: priceData ? priceData.source || null : null,
+  });
 
   hideLoading();
   renderGameCard(state.gameInfo);
@@ -1440,30 +1482,62 @@ async function doManualSearch() {
   document.getElementById('error-identify').style.display = 'none';
 
   try {
-    const data = await callClaude({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1000,
-      messages: [{
-        role: 'user',
-        content: `I'm selling a video game. Title: "${title}", Platform: "${platform || 'unknown'}".
-Respond ONLY with a valid JSON object (no markdown):
-{
-  "title": "exact game title",
-  "platform": "gaming platform",
-  "year": "release year",
-  "genre": "game genre",
-  "developer": "developer name",
-  "summary": "2-3 sentence description",
-  "confidence": "high/medium/low"
-}`
-      }]
-    });
-    const parsed = parseJSON(data.content[0].text);
+    // Use RAWG free public API — no key required
+    const query = encodeURIComponent(title);
+    const url = 'https://api.rawg.io/api/games?search=' + query + '&page_size=5&key=';
+    const res = await fetch(url);
+    const data = await res.json();
+    const results = data.results || [];
+
+    // Try to match platform if provided
+    let match = results[0];
+    if (platform && results.length > 1) {
+      const platLower = platform.toLowerCase();
+      const platMap = {
+        'ps5':'playstation5','ps4':'playstation4','ps3':'playstation3',
+        'ps2':'playstation2','ps1':'playstation','xbox one':'xbox-one',
+        'xbox 360':'xbox360','xbox series x':'xbox-series-x','switch':'nintendo-switch',
+        'wii u':'wii-u','wii':'wii','3ds':'3ds','ds':'nintendo-ds','pc':'pc',
+        'game boy':'gameboy','game boy advance':'gameboy-advance'
+      };
+      const slug = platMap[platLower] || platLower.replace(/\s+/g,'-');
+      const platformMatch = results.find(g =>
+        g.platforms && g.platforms.some(p => p.platform.slug.includes(slug))
+      );
+      if (platformMatch) match = platformMatch;
+    }
+
+    if (!match) throw new Error('Not found');
+
+    // Get detailed info for the matched game
+    const detailRes = await fetch('https://api.rawg.io/api/games/' + match.id + '?key=');
+    const detail = await detailRes.json();
+
+    const genres = (detail.genres || []).map(g => g.name).join(', ') || 'Unknown';
+    const devs = (detail.developers || []).map(d => d.name).join(', ') || 'Unknown';
+    const year = (detail.released || '').slice(0,4) || 'Unknown';
+    const rawDescription = detail.description_raw || detail.description || '';
+    // Clean HTML tags and take first 3 sentences
+    const cleanDesc = rawDescription.replace(/<[^>]+>/g,'').replace(/\n+/g,' ').trim();
+    const sentences = cleanDesc.match(/[^.!?]+[.!?]+/g) || [];
+    const summary = sentences.slice(0,3).join(' ').trim() || 'A great video game.';
+
+    const gameInfo = {
+      title: detail.name || title,
+      platform: platform || (detail.platforms && detail.platforms[0] ? detail.platforms[0].platform.name : 'Unknown'),
+      year: year,
+      genre: genres,
+      developer: devs,
+      summary: summary,
+      confidence: 'high'
+    };
+
     document.getElementById('manual-entry').style.display = 'none';
-    await fetchAndShowPrice(parsed);
+    await fetchAndShowPrice(gameInfo);
+
   } catch(e) {
     hideLoading();
-    showIdentifyError('Could not fetch game info. Try a different title.');
+    showIdentifyError('Could not find that game. Try checking the spelling or use the camera to scan it.');
   }
 }
 
@@ -1634,101 +1708,101 @@ function generateDescription() {
   const developer = info.developer || '';
   const summary = info.summary || '';
 
-  // Condition details
   const condDetails = {
-    new:      'This item is brand new and factory sealed — never opened.',
-    like_new: 'This item is in like-new condition — opened but unplayed, looks and works perfectly.',
-    good:     'This item is in good condition with only light wear. Fully functional with no issues.',
-    fair:     'This item shows visible wear from regular use but works great.',
-    poor:     'This item has heavy wear but is still fully functional.'
+    new:      'Brand new and factory sealed — never opened.',
+    like_new: 'Like-new — opened but unplayed, looks and works perfectly.',
+    good:     'Good condition with only light wear. Fully functional.',
+    fair:     'Visible wear from regular use but works great.',
+    poor:     'Heavy wear but still fully functional.'
   };
 
   const lines = [];
 
-  // Title line
-  lines.push(`🎮 ${title}${platform ? ' — ' + platform : ''}`);
+  lines.push("\uD83C\uDFAE " + title + (platform ? " \u2014 " + platform : ""));
   if (year || genre) {
-    const meta = [year, genre].filter(Boolean).join(' · ');
-    lines.push(meta);
+    lines.push([year, genre].filter(Boolean).join(' · '));
   }
   lines.push('');
 
-  // Summary / description
   if (summary) {
     lines.push(summary);
     lines.push('');
   }
 
-  // Condition section
-  lines.push('━━━ CONDITION ━━━');
-  lines.push(`${condLabel}${condDetails[state.condition] ? ' — ' + condDetails[state.condition] : ''}`);
+  lines.push('--- CONDITION ---');
+  const condDetail = condDetails[state.condition] || '';
+  lines.push(condLabel + (condDetail ? ' — ' + condDetail : ''));
   lines.push('');
 
-  // What's included
-  lines.push('━━━ WHAT\'S INCLUDED ━━━');
-  lines.push(`📀 Game disc/cartridge: ✓`);
-  lines.push(`🗂️  Case/Box: ${state.hasCase ? '✓ Included' : '✕ Not included'}`);
-  lines.push(`📖 Manual/Booklet: ${state.hasManual === null ? 'Not specified' : state.hasManual ? '✓ Included' : '✕ Not included'}`);
+  lines.push("--- WHAT'S INCLUDED ---");
+  lines.push('Game disc/cartridge: Included');
+  lines.push('Case/Box: ' + (state.hasCase ? 'Included' : 'Not included'));
+  lines.push('Manual/Booklet: ' + (state.hasManual === null ? 'Not specified' : state.hasManual ? 'Included' : 'Not included'));
   if (state.extras && state.extras.length > 0) {
-    state.extras.forEach(e => lines.push(`🎁 ${e}: ✓ Included`));
+    state.extras.forEach(function(e) { lines.push(e + ': Included'); });
   }
   lines.push('');
 
-  // Additional notes
-  const notes = document.getElementById('notes-input') ? document.getElementById('notes-input').value.trim() : '';
+  const notesEl = document.getElementById('notes-input');
+  const notes = notesEl ? notesEl.value.trim() : '';
   if (notes) {
-    lines.push('━━━ SELLER NOTES ━━━');
+    lines.push('--- SELLER NOTES ---');
     lines.push(notes);
     lines.push('');
   }
 
-  // Developer credit
   if (developer) {
-    lines.push(`Developed by: ${developer}`);
+    lines.push('Developed by: ' + developer);
+    lines.push('');
   }
 
-  lines.push('');
-  lines.push('Ships fast in protective packaging! Feel free to ask questions. 🎮');
+  lines.push('Ships fast in protective packaging! Feel free to ask any questions.');
 
   return lines.join('\n');
 }
 
 function buildPreview() {
-  const info = state.gameInfo;
+  const info = state.gameInfo || {};
   const condLabel = getConditionLabel();
   const price = document.getElementById('price-input').value;
 
   // Photos
   const photosEl = document.getElementById('preview-photos');
   photosEl.innerHTML = '';
-  state.photos.forEach(src => {
+  state.photos.forEach(function(src) {
     const img = document.createElement('img');
     img.src = src; img.className = 'preview-photo';
     photosEl.appendChild(img);
   });
 
-  document.getElementById('preview-title').textContent = info.title;
+  document.getElementById('preview-title').textContent = info.title || 'Unknown Game';
   document.getElementById('preview-meta').innerHTML =
-    `<span class="meta-tag">${info.platform}</span><span class="meta-tag">${condLabel}</span>`;
-  document.getElementById('preview-price').textContent = price ? `$${Number(price).toFixed(2)}` : '—';
+    '<span class="meta-tag">' + (info.platform || 'Unknown Platform') + '</span>' +
+    '<span class="meta-tag">' + condLabel + '</span>';
+  document.getElementById('preview-price').textContent = price ? '$' + Number(price).toFixed(2) : '—';
 
   // Included badges
   const incl = document.getElementById('preview-included');
   incl.innerHTML = '';
-  const addBadge = (label, yes) => {
+  function addBadge(label, yes) {
     const span = document.createElement('span');
     span.className = 'include-badge ' + (yes ? 'yes' : 'no');
     span.textContent = (yes ? '✓ ' : '✕ ') + label;
     incl.appendChild(span);
-  };
+  }
   addBadge('Case', state.hasCase);
   addBadge('Manual', state.hasManual);
-  state.extras.forEach(e => addBadge(e, true));
+  state.extras.forEach(function(e) { addBadge(e, true); });
 
   // Description
-  const desc = generateDescription();
-  document.getElementById('preview-description').textContent = desc;
-  document.getElementById('steps-price').textContent = price ? `$${Number(price).toFixed(2)}` : 'your price';
+  try {
+    const desc = generateDescription();
+    document.getElementById('preview-description').textContent = desc;
+  } catch(e) {
+    console.error('generateDescription error:', e);
+    document.getElementById('preview-description').textContent = 'Error generating description. Please try again.';
+  }
+  document.getElementById('steps-price').textContent = price ? '$' + Number(price).toFixed(2) : 'your price';
 }
 
 function copyDescription() {
@@ -1820,10 +1894,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-// Initialize
-if (!getApiKey()) {
-  showApiKeyScreen();
-}
+// Initialize — never auto-prompt for key; only ask when needed
 goToStep(0);
 </script>
 </body>
