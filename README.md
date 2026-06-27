@@ -97,7 +97,11 @@ Options:
 - **Case sensitive** — match the exact capitalization (off by default).
 - **Whole word only** — only match complete words (won't change `foobar` when
   finding `foo`).
-- **Also export PDF** — produce a PDF in addition to the edited `.vsdx`.
+- **Also export PDF (LibreOffice)** — *off by default.* Produces a PDF via
+  LibreOffice. Note: LibreOffice does not evaluate Visio page-number fields, so
+  a "Sheet X of Y" title block renders as "Sheet 0 of Y". For correct sheet
+  numbers and best fidelity, open the edited `.vsdx` and **export the PDF from
+  Visio** (File → Export → PDF).
 - **Save copy as next revision (REVx → next)** — name the copy as the next
   revision letter instead of `*_edited` (on by default; see *Revisions* above).
 - **...and update the REV box in the drawing** — also bump the `REVx` letter box

@@ -34,7 +34,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "1.4 (run-aware match + file dropdown)"
+__version__ = "1.5 (run-aware match; PDF optional)"
 
 import argparse
 import os
@@ -672,7 +672,9 @@ def launch_gui() -> int:
             opts.pack(fill="x", **pad)
             self.case_var = tk.BooleanVar(value=False)
             self.word_var = tk.BooleanVar(value=False)
-            self.pdf_var = tk.BooleanVar(value=True)
+            # PDF export (LibreOffice) is off by default: export from Visio for
+            # correct sheet numbers and full fidelity.
+            self.pdf_var = tk.BooleanVar(value=False)
             self.rev_var = tk.BooleanVar(value=True)
             self.revtext_var = tk.BooleanVar(value=True)
 
@@ -685,7 +687,8 @@ def launch_gui() -> int:
                 opt_row1, text="Whole word only", variable=self.word_var
             ).pack(side="left", padx=8, pady=6)
             ttk.Checkbutton(
-                opt_row1, text="Also export PDF", variable=self.pdf_var
+                opt_row1, text="Also export PDF (LibreOffice)",
+                variable=self.pdf_var,
             ).pack(side="left", padx=8, pady=6)
 
             opt_row2 = ttk.Frame(opts)
