@@ -389,7 +389,12 @@ def convert_to_pdf(
             soffice,
             f"-env:UserInstallation={Path(profile_dir).as_uri()}",
             "--headless",
+            "--invisible",
+            "--nodefault",
             "--norestore",
+            "--nolockcheck",
+            "--nofirststartwizard",
+            "--nologo",
             "--convert-to",
             "pdf",
             "--outdir",
@@ -669,10 +674,10 @@ def launch_gui() -> int:
             # --- Log -------------------------------------------------------
             logf = ttk.LabelFrame(root, text="Status")
             logf.pack(fill="both", expand=True, **pad)
-            self.log = scrolledtext.ScrolledText(
+            self.log_box = scrolledtext.ScrolledText(
                 logf, height=8, state="disabled", wrap="word"
             )
-            self.log.pack(fill="both", expand=True, padx=6, pady=6)
+            self.log_box.pack(fill="both", expand=True, padx=6, pady=6)
 
             self.on_mode_change()
             self._sync_rev_options()
@@ -858,10 +863,10 @@ def launch_gui() -> int:
 
         # -- helpers --------------------------------------------------------
         def _log(self, msg: str):
-            self.log.configure(state="normal")
-            self.log.insert("end", msg + "\n")
-            self.log.see("end")
-            self.log.configure(state="disabled")
+            self.log_box.configure(state="normal")
+            self.log_box.insert("end", msg + "\n")
+            self.log_box.see("end")
+            self.log_box.configure(state="disabled")
 
         def log(self, msg: str):
             # Safe to call from worker thread.
@@ -1015,6 +1020,11 @@ def launch_gui() -> int:
                 )
                 if last_output is not None:
                     self._reveal(str(last_output))
+            except Exception as exc:  # noqa: BLE001 - never kill the thread
+                self.log(f"UNEXPECTED ERROR: {exc}")
+                self.root.after(
+                    0, lambda e=exc: messagebox.showerror("Error", str(e))
+                )
             finally:
                 self.root.after(0, self._set_busy, False)
 
@@ -1032,7 +1042,7 @@ def launch_gui() -> int:
                 pass
 
     root = tk.Tk()
-    App(root)
+    root._app_ref = App(root)  # keep a reference (also handy for testing)
     root.mainloop()
     return 0
 
