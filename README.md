@@ -110,6 +110,25 @@ Options:
 - **...and update the REV box in the drawing** — also bump the `REVx` letter box
   inside the drawing to match the new file name (on by default).
 
+### Excel: find & edit BOM rows
+
+For Excel bill-of-materials sheets, you can edit a part's whole row, not just
+its number. Put the part number in a **Find** box, then click
+**Excel: find & edit rows...**. The tool:
+
+1. Finds the column headed **P/N** / **Part Number** (also `P/n`, etc.) in each
+   loaded `.xlsx`, and locates every row whose part number matches a Find value.
+2. Shows that row's other fields under their headers — **Manufacturer**,
+   **Unit Cost**, **Description**, **Qty** (or Quantity), **Notes** (or
+   Comments) — pre-filled with the current values.
+3. Lets you change any of them. When you click **Save edits**, those changes are
+   staged.
+
+On **Replace & Convert**, the staged changes are written to that part number's
+row in **every** Excel file that contains it (and on every matching row).
+Fields you leave unchanged are not touched, numbers stay numeric, and the P/N
+itself is changed by your normal Find → Replace rule.
+
 ---
 
 ## Command-line use (optional / scriptable)

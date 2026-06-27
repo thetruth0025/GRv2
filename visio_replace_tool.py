@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "1.7 (Excel support + multi-select)"
+__version__ = "1.8 (Excel BOM row editor)"
 
 import argparse
 import os
@@ -502,6 +502,9 @@ def _cell_text(attrs: str, content: str, shared: List[str]) -> Optional[str]:
     if t == "str":
         v = re.search(r"<v>(.*?)</v>", content, re.DOTALL)
         return _xml_unescape(v.group(1)) if v else None
+    if t == "n":  # plain number (no string table)
+        v = re.search(r"<v>(.*?)</v>", content, re.DOTALL)
+        return v.group(1) if v else None
     return None
 
 
@@ -555,18 +558,24 @@ def _find_rev_cell(zin, names, shared, old_letter):
     return None, "not_found"
 
 
+def _cell_content_xml(ref: str, style: str, text: str) -> str:
+    """Build a <c> element: numeric values stay numbers, else inline string."""
+    if re.fullmatch(r"-?\d+(\.\d+)?", text.strip()):
+        return f'<c r="{ref}"{style}><v>{text.strip()}</v></c>'
+    return (f'<c r="{ref}"{style} t="inlineStr"><is><t>'
+            f'{xml_escape(text)}</t></is></c>')
+
+
 def _set_cell_text(xml_text: str, ref: str, text: str) -> Tuple[str, bool]:
-    """Force one cell to an inline string with ``text`` (keeps its style)."""
+    """Set one cell's value (keeps its style; keeps numbers numeric)."""
     cell_re = re.compile(
         r'<c r="' + re.escape(ref) + r'"([^>]*?)(?:/>|>.*?</c>)', re.DOTALL
     )
 
     def repl(m: re.Match) -> str:
-        attrs = m.group(1)
-        sm = re.search(r'\bs="(\d+)"', attrs)
+        sm = re.search(r'\bs="(\d+)"', m.group(1))
         style = f' s="{sm.group(1)}"' if sm else ""
-        return (f'<c r="{ref}"{style} t="inlineStr"><is><t>'
-                f'{xml_escape(text)}</t></is></c>')
+        return _cell_content_xml(ref, style, text)
 
     new, n = cell_re.subn(repl, xml_text, count=1)
     return new, n > 0
@@ -576,16 +585,23 @@ def replace_text_in_xlsx(
     in_path, out_path, pairs,
     case_sensitive=True, whole_word=False,
     revision=None, update_drawing_rev=False,
+    cell_edits=None,
 ) -> dict:
-    """Find/replace (and optional revision bump) for an .xlsx workbook."""
+    """Find/replace (and optional revision bump + cell edits) for a workbook.
+
+    ``cell_edits`` is an optional {worksheet_part_name: {cell_ref: new_text}}
+    mapping for setting specific cells (used by the BOM row editor).
+    """
     in_path = Path(in_path)
     out_path = Path(out_path)
     if not zipfile.is_zipfile(in_path):
         raise ValueError(f"'{in_path.name}' is not a valid .xlsx file.")
 
     compiled = _compile_pairs(pairs, case_sensitive, whole_word)
+    cell_edits = cell_edits or {}
     by_part: dict[str, int] = {}
     total = 0
+    cells_changed = 0
     rev_status = "na"
     target = None
     do_rev = bool(revision and update_drawing_rev)
@@ -614,6 +630,9 @@ def replace_text_in_xlsx(
                         if count:
                             by_part[item.filename] = count
                             total += count
+                    for ref, value in cell_edits.get(item.filename, {}).items():
+                        new_text = _set_or_insert_cell(new_text, ref, value)
+                        cells_changed += 1
                     if target and item.filename == target[0]:
                         new_text, changed = _set_cell_text(
                             new_text, target[1], revision[1]
@@ -624,7 +643,198 @@ def replace_text_in_xlsx(
                         data = new_text.encode("utf-8")
                 zout.writestr(item.filename, data)
 
-    return {"total": total, "by_part": by_part, "rev_drawing": rev_status}
+    return {"total": total, "by_part": by_part, "rev_drawing": rev_status,
+            "cells_changed": cells_changed}
+
+
+# ---------------------------------------------------------------------------
+# Excel BOM rows: find a part number's row and read/edit its other columns
+# ---------------------------------------------------------------------------
+#
+# In a bill-of-materials sheet, the part number lives in a "P/N" / "Part Number"
+# column and the rest of the row holds Manufacturer, Unit Cost, etc. We locate
+# the header row, map columns to those fields, and find rows whose P/N matches.
+
+# Canonical field -> accepted header spellings (normalized: lowercase, alnum).
+_BOM_FIELDS = {
+    "Part Number": {"pn", "partnumber", "partno", "partnum", "part"},
+    "Manufacturer": {"manufacturer", "mfg", "mfr", "manuf", "make", "vendor"},
+    "Unit Cost": {"unitcost", "cost", "price", "unitprice", "ucost"},
+    "Description": {"description", "desc", "descr"},
+    "Qty": {"qty", "quantity", "qnty"},
+    "Notes": {"notes", "note", "comments", "comment", "remarks"},
+}
+# Order for display (Part Number first).
+BOM_FIELD_ORDER = ["Part Number", "Manufacturer", "Unit Cost",
+                   "Description", "Qty", "Notes"]
+
+
+def _norm_header(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _canonical_field(text: str) -> Optional[str]:
+    n = _norm_header(text)
+    if not n:
+        return None
+    for field, variants in _BOM_FIELDS.items():
+        if n in variants:
+            return field
+    return None
+
+
+def _col_num(letters: str) -> int:
+    n = 0
+    for ch in letters:
+        n = n * 26 + (ord(ch) - 64)
+    return n
+
+
+def _col_letters(col: int) -> str:
+    s = ""
+    while col > 0:
+        col, r = divmod(col - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def _set_or_insert_cell(xml_text: str, ref: str, text: str) -> str:
+    """Set a cell's text; if the cell/row doesn't exist, insert it in order."""
+    new, ok = _set_cell_text(xml_text, ref, text)
+    if ok:
+        return new
+    pos = _parse_cell_ref(ref)
+    if pos is None:
+        return xml_text
+    col, row = pos
+    cell_xml = _cell_content_xml(ref, "", text)
+
+    row_re = re.compile(r'(<row r="%d"[^>]*>)(.*?)(</row>)' % row, re.DOTALL)
+    rm = row_re.search(xml_text)
+    if rm:
+        inner = rm.group(2)
+        insert_at = len(inner)
+        for cm in re.finditer(r'<c r="([A-Z]+)\d+"', inner):
+            if _col_num(cm.group(1)) > col:
+                insert_at = cm.start()
+                break
+        new_inner = inner[:insert_at] + cell_xml + inner[insert_at:]
+        return (xml_text[:rm.start()] + rm.group(1) + new_inner
+                + rm.group(3) + xml_text[rm.end():])
+
+    sd = re.search(r'(<sheetData[^>]*>)(.*?)(</sheetData>)', xml_text, re.DOTALL)
+    if not sd:
+        return xml_text
+    inner = sd.group(2)
+    row_xml = f'<row r="{row}">{cell_xml}</row>'
+    insert_at = len(inner)
+    for rm2 in re.finditer(r'<row r="(\d+)"', inner):
+        if int(rm2.group(1)) > row:
+            insert_at = rm2.start()
+            break
+    new_inner = inner[:insert_at] + row_xml + inner[insert_at:]
+    return (xml_text[:sd.start()] + sd.group(1) + new_inner
+            + sd.group(3) + xml_text[sd.end():])
+
+
+def _read_sheet_cells(sheet_xml: str, shared: List[str]):
+    """Return {(col,row): (ref, text)} for all non-empty cells in a sheet."""
+    cells = {}
+    for cm in _XLSX_CELL.finditer(sheet_xml):
+        ref, attrs, content = cm.group(1), cm.group(2), cm.group(3)
+        pos = _parse_cell_ref(ref)
+        if pos is None:
+            continue
+        cells[pos] = (ref, _cell_text(attrs, content, shared))
+    return cells
+
+
+def _find_bom_header(cells):
+    """Find the header row; return (row, {col: canonical_field})."""
+    rows: dict = {}
+    for (col, row), (ref, txt) in cells.items():
+        rows.setdefault(row, {})[col] = txt
+    for row in sorted(rows):
+        colmap, has_pn = {}, False
+        for col, txt in rows[row].items():
+            if not txt:
+                continue
+            cf = _canonical_field(txt)
+            if cf:
+                colmap[col] = cf
+                if cf == "Part Number":
+                    has_pn = True
+        if has_pn:
+            return row, colmap
+    return None, {}
+
+
+def excel_scan_rows(path, part_numbers, case_sensitive=False):
+    """Find rows whose P/N matches; return per-row field data + cell refs.
+
+    Each match: {file, sheet, part, row, matched, fields:{field:(ref,value)}}.
+    """
+    matches = []
+    norm_targets = [(p, p if case_sensitive else p.lower()) for p in part_numbers
+                    if p]
+    with zipfile.ZipFile(path) as z:
+        shared = _read_shared_strings(z)
+        for name in z.namelist():
+            if not _WORKSHEET_RE.search(name.lower()):
+                continue
+            sheet_xml = z.read(name).decode("utf-8", "replace")
+            cells = _read_sheet_cells(sheet_xml, shared)
+            hrow, colmap = _find_bom_header(cells)
+            if hrow is None:
+                continue
+            pn_cols = [c for c, f in colmap.items() if f == "Part Number"]
+            if not pn_cols:
+                continue
+            pn_col = pn_cols[0]
+            rows: dict = {}
+            for (col, row), (ref, txt) in cells.items():
+                rows.setdefault(row, {})[col] = (ref, txt)
+            for row in sorted(rows):
+                if row <= hrow:
+                    continue
+                pn_cell = rows[row].get(pn_col)
+                if not pn_cell or not pn_cell[1]:
+                    continue
+                pnval = pn_cell[1].strip()
+                cmp_val = pnval if case_sensitive else pnval.lower()
+                hit = next((orig for orig, t in norm_targets if t == cmp_val),
+                           None)
+                if hit is None:
+                    continue
+                fields = {}
+                for col, cf in colmap.items():
+                    cell = rows[row].get(col)
+                    ref = cell[0] if cell else f"{_col_letters(col)}{row}"
+                    val = cell[1] if cell and cell[1] is not None else ""
+                    fields[cf] = (ref, val)
+                matches.append({"file": str(path), "sheet": name,
+                                "part": pnval, "row": row, "matched": hit,
+                                "fields": fields})
+    return matches
+
+
+def build_excel_cell_edits(path, bom_edits, case_sensitive=False) -> dict:
+    """Map staged BOM field edits to actual cell refs for one file.
+
+    bom_edits: {part_number: {canonical_field: new_value}}.
+    Returns {worksheet_part_name: {cell_ref: new_value}} for every matching row.
+    """
+    edits: dict = {}
+    if not bom_edits:
+        return edits
+    matches = excel_scan_rows(path, list(bom_edits.keys()), case_sensitive)
+    for m in matches:
+        for field, new_value in bom_edits.get(m["matched"], {}).items():
+            cell = m["fields"].get(field)
+            if cell is None:
+                continue  # that column doesn't exist in this sheet
+            edits.setdefault(m["sheet"], {})[cell[0]] = new_value
+    return edits
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +864,7 @@ def replace_text_in_file(
     in_path, out_path, pairs,
     case_sensitive=True, whole_word=False,
     revision=None, update_drawing_rev=False,
+    cell_edits=None,
 ) -> dict:
     """Dispatch to the Visio or Excel engine based on the file type."""
     fmt = detect_format(in_path)
@@ -666,6 +877,7 @@ def replace_text_in_file(
         return replace_text_in_xlsx(
             in_path, out_path, pairs, case_sensitive, whole_word,
             revision=revision, update_drawing_rev=update_drawing_rev,
+            cell_edits=cell_edits,
         )
     raise ValueError(
         f"Unsupported file type '{Path(in_path).suffix}'. "
@@ -899,6 +1111,8 @@ def launch_gui() -> int:
             # all_var True => applies to every file; otherwise file_vars holds a
             # BooleanVar per file path for multi-select targeting.
             self.rule_rows: List[dict] = []
+            # Staged Excel row edits: {part_number: {canonical_field: value}}.
+            self.bom_edits: dict = {}
 
             pad = {"padx": 10, "pady": 6}
 
@@ -960,9 +1174,17 @@ def launch_gui() -> int:
             self.pairs_frame.pack(fill="x", padx=6, pady=6)
             self._header_row()
             self.add_pair()
+            rule_btns = ttk.Frame(mid)
+            rule_btns.pack(fill="x", padx=8, pady=(0, 8))
             ttk.Button(
-                mid, text="+ Add another rule", command=self.add_pair
-            ).pack(anchor="w", padx=8, pady=(0, 8))
+                rule_btns, text="+ Add another rule", command=self.add_pair
+            ).pack(side="left")
+            ttk.Button(
+                rule_btns, text="Excel: find & edit rows...",
+                command=self.open_bom_editor,
+            ).pack(side="left", padx=8)
+            self.bom_status = ttk.Label(rule_btns, text="")
+            self.bom_status.pack(side="left", padx=8)
 
             # --- 3. Options ------------------------------------------------
             opts = ttk.LabelFrame(root, text="3.  Options")
@@ -1221,11 +1443,138 @@ def launch_gui() -> int:
                         pairs.append((find, rule["repl"].get()))
             return pairs
 
+        # -- Excel BOM row editor ------------------------------------------
+        def _find_values(self) -> List[str]:
+            seen = []
+            for rule in self.rule_rows:
+                f = rule["find"].get().strip()
+                if f and f not in seen:
+                    seen.append(f)
+            return seen
+
+        def open_bom_editor(self):
+            parts = self._find_values()
+            if not parts:
+                messagebox.showinfo(
+                    "No Find values",
+                    "Type the part number(s) into the Find box(es) first.",
+                )
+                return
+            excel_files = [f for f in self.files
+                           if detect_format(f) == "xlsx"]
+            if not excel_files:
+                messagebox.showinfo(
+                    "No Excel files", "Add at least one .xlsx file first."
+                )
+                return
+
+            found: dict = {}            # part -> {field: value}
+            files_with: dict = {}       # part -> set(files)
+            rows_with: dict = {}        # part -> count
+            cs = self.case_var.get()
+            for f in excel_files:
+                try:
+                    matches = excel_scan_rows(f, parts, cs)
+                except Exception:  # noqa: BLE001
+                    matches = []
+                for mt in matches:
+                    p = mt["matched"]
+                    files_with.setdefault(p, set()).add(f)
+                    rows_with[p] = rows_with.get(p, 0) + 1
+                    if p not in found:
+                        found[p] = {
+                            fld: val for fld, (ref, val) in mt["fields"].items()
+                        }
+            if not found:
+                messagebox.showinfo(
+                    "No rows found",
+                    "None of the Find value(s) were located in a P/N / "
+                    "Part Number column of the Excel files.",
+                )
+                return
+
+            self._build_bom_window(found, files_with, rows_with)
+
+        def _build_bom_window(self, found, files_with, rows_with):
+            win = tk.Toplevel(self.root)
+            win.title("Find & edit Excel rows")
+            win.geometry("680x520")
+            win.transient(self.root)
+            win.grab_set()
+
+            ttk.Label(
+                win, wraplength=640, justify="left",
+                text="Edit any field below to a new value. Changes are applied "
+                "to that part number's row in EVERY Excel file that contains "
+                "it. Fields you leave unchanged are not touched.",
+            ).pack(fill="x", padx=10, pady=8)
+
+            canvas = tk.Canvas(win, highlightthickness=0)
+            sb = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+            inner = ttk.Frame(canvas)
+            inner.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+            )
+            canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=sb.set)
+            canvas.pack(side="left", fill="both", expand=True, padx=(10, 0))
+            sb.pack(side="left", fill="y", padx=(0, 10))
+
+            entries: dict = {}
+            for part in found:
+                lf = ttk.LabelFrame(
+                    inner,
+                    text=f"P/N: {part}    (in {len(files_with[part])} file(s), "
+                    f"{rows_with[part]} row(s))",
+                )
+                lf.pack(fill="x", padx=6, pady=6)
+                entries[part] = {}
+                for field in BOM_FIELD_ORDER:
+                    if field == "Part Number":
+                        continue
+                    val = found[part].get(field, "")
+                    rowf = ttk.Frame(lf)
+                    rowf.pack(fill="x", padx=6, pady=2)
+                    ttk.Label(rowf, text=field + ":", width=14).pack(side="left")
+                    e = ttk.Entry(rowf)
+                    e.insert(0, val)
+                    e.pack(side="left", fill="x", expand=True)
+                    entries[part][field] = (e, val)
+
+            def apply():
+                edits = {}
+                for part, flds in entries.items():
+                    changed = {f: e.get() for f, (e, orig) in flds.items()
+                               if e.get() != orig}
+                    if changed:
+                        edits[part] = changed
+                self.bom_edits = edits
+                n = sum(len(v) for v in edits.values())
+                self.bom_status.configure(
+                    text=(f"{n} row edit(s) staged" if n else "")
+                )
+                self.log(
+                    f"Staged {n} Excel field edit(s) across "
+                    f"{len(edits)} part number(s)."
+                    if n else "No Excel field edits staged."
+                )
+                win.destroy()
+
+            btns = ttk.Frame(win)
+            btns.pack(fill="x", padx=10, pady=10)
+            ttk.Button(btns, text="Save edits", command=apply).pack(
+                side="right"
+            )
+            ttk.Button(btns, text="Cancel", command=win.destroy).pack(
+                side="right", padx=6
+            )
+
         # -- run ------------------------------------------------------------
         def run(self):
             if not self.files:
                 messagebox.showwarning(
-                    "No files", "Please add at least one .vsdx file."
+                    "No files", "Please add at least one file."
                 )
                 return
             missing = [f for f in self.files if not Path(f).exists()]
@@ -1254,12 +1603,13 @@ def launch_gui() -> int:
                     {f: self.pairs_for_file(f) for f in self.files},
                     self.case_var.get(), self.word_var.get(),
                     self.pdf_var.get(), bump_rev, self.revtext_var.get(),
+                    dict(self.bom_edits),
                 ),
                 daemon=True,
             ).start()
 
         def _worker(self, files, pairs_by_file, case_sensitive, whole_word,
-                    make_pdf, bump_rev, update_rev_text):
+                    make_pdf, bump_rev, update_rev_text, bom_edits):
             total_repl = 0
             done = 0
             errors = 0
@@ -1270,6 +1620,17 @@ def launch_gui() -> int:
                     # Key by the original string used to build the dict (path
                     # separators differ between tkinter and Path on Windows).
                     pairs = pairs_by_file.get(f, [])
+
+                    # Excel row edits that land in this file (by cell ref).
+                    cell_edits = None
+                    if bom_edits and detect_format(f) == "xlsx":
+                        try:
+                            cell_edits = build_excel_cell_edits(
+                                f, bom_edits, case_sensitive
+                            )
+                        except Exception:  # noqa: BLE001
+                            cell_edits = None
+                    has_edits = bool(cell_edits)
 
                     # Decide the copy's name and whether to bump the revision.
                     revision = None
@@ -1290,7 +1651,7 @@ def launch_gui() -> int:
                             revision = (old, new)
                         out_vsdx = Path(out_vsdx)
                     else:
-                        if not pairs:
+                        if not pairs and not has_edits:
                             self.log(
                                 f"- {src.name}: skipped (no rule targets this "
                                 "file)"
@@ -1307,15 +1668,21 @@ def launch_gui() -> int:
                             whole_word=whole_word,
                             revision=revision,
                             update_drawing_rev=update_rev_text,
+                            cell_edits=cell_edits,
                         )
                         total_repl += report["total"]
                         msg = (
                             f"+ {src.name}: {report['total']} replacement(s) "
                             f"-> {out_vsdx.name}"
                         )
-                        if report["total"] == 0 and pairs:
+                        if report["total"] == 0 and pairs and not has_edits:
                             msg += "  (no matches found)"
                         self.log(msg)
+                        if report.get("cells_changed"):
+                            self.log(
+                                f"    {report['cells_changed']} row cell(s) "
+                                "updated"
+                            )
                         if revision:
                             rd = report["rev_drawing"]
                             note = {
