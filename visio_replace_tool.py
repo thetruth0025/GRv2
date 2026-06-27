@@ -184,12 +184,20 @@ def _cell_value(shape_el, ns: str, name: str) -> Optional[float]:
     return None
 
 
+def _is_rev_label(text: str) -> bool:
+    """True for a revision label box: REV, Rev, REV., Revision, Revision: ..."""
+    norm = text.strip().strip(".:").strip().upper()
+    return norm in ("REV", "REVISION")
+
+
 def _choose_rev_candidate(page_xml: str, old_letter: str) -> Optional[int]:
     """Pick which single-letter box (in document order) is THE revision.
 
-    Uses the position of the "REV" label box and chooses the matching letter
-    box closest to it. Returns the index among same-letter boxes, or None if
-    it can't be determined confidently.
+    The revision letter sits next to a "REV"/"Revision" label in the title
+    block (lower-right of the front page). We pick the matching letter box
+    closest to such a label; if that can't be resolved, we fall back to the
+    box nearest the lower-right corner. Returns the index among same-letter
+    boxes, or None if it can't be determined.
     """
     try:
         root = ET.fromstring(page_xml)
@@ -198,13 +206,13 @@ def _choose_rev_candidate(page_xml: str, old_letter: str) -> Optional[int]:
     ns = root.tag[: root.tag.index("}") + 1] if root.tag.startswith("{") else ""
 
     candidates = []  # (pinx, piny) for single-letter boxes == old_letter
-    rev_labels = []  # (pinx, piny) for boxes whose text is "REV"
+    rev_labels = []  # (pinx, piny) for REV/Revision label boxes
     for sh in root.iter(ns + "Shape"):
         text_el = sh.find(ns + "Text")
         if text_el is None:
             continue
         norm = "".join(text_el.itertext()).strip()
-        if norm.upper() == "REV":
+        if _is_rev_label(norm):
             rev_labels.append(
                 (_cell_value(sh, ns, "PinX"), _cell_value(sh, ns, "PinY"))
             )
@@ -213,19 +221,30 @@ def _choose_rev_candidate(page_xml: str, old_letter: str) -> Optional[int]:
                 (_cell_value(sh, ns, "PinX"), _cell_value(sh, ns, "PinY"))
             )
 
-    if not rev_labels:
-        return None  # no REV label -> can't tell which letter is the revision
+    # Primary: the matching letter box closest to a REV/Revision label.
+    if rev_labels:
+        best_idx, best_dist = None, None
+        for i, (px, py) in enumerate(candidates):
+            if px is None or py is None:
+                continue
+            for rx, ry in rev_labels:
+                if rx is None or ry is None:
+                    continue
+                dist = (px - rx) ** 2 + (py - ry) ** 2
+                if best_dist is None or dist < best_dist:
+                    best_dist, best_idx = dist, i
+        if best_idx is not None:
+            return best_idx
 
-    best_idx, best_dist = None, None
+    # Fallback: the candidate nearest the lower-right corner of the page
+    # (large X, small Y in Visio coordinates), where the title block lives.
+    best_idx, best_score = None, None
     for i, (px, py) in enumerate(candidates):
         if px is None or py is None:
             continue
-        for rx, ry in rev_labels:
-            if rx is None or ry is None:
-                continue
-            dist = (px - rx) ** 2 + (py - ry) ** 2
-            if best_dist is None or dist < best_dist:
-                best_dist, best_idx = dist, i
+        score = px - py
+        if best_score is None or score > best_score:
+            best_score, best_idx = score, i
     return best_idx
 
 
