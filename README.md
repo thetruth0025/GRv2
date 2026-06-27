@@ -32,7 +32,25 @@ No `pip install` is required — the app uses only the Python standard library.
 
 ---
 
-## Run the app (GUI)
+## Easiest ways to launch (Windows)
+
+You have three options, from simplest to most self-contained:
+
+1. **Download a ready-made `.exe` (no Python needed).**
+   In the GitHub repo, open the **Actions** tab → the latest **"Build Windows
+   EXE"** run → under **Artifacts**, download **`VisioTextReplacer-windows`**.
+   Unzip it and double-click `VisioTextReplacer.exe`. (PDF export still needs
+   LibreOffice installed.)
+
+2. **Double-click `run_visio_tool.bat`** (needs Python installed). It launches
+   the app without touching the command line. If Python is missing it tells you
+   where to get it.
+
+3. **Build your own `.exe` once** by double-clicking **`build_exe.bat`** (needs
+   Python). It installs PyInstaller and produces `dist\VisioTextReplacer.exe`,
+   which you can then move/share and run on its own.
+
+## Run the app (GUI, any OS)
 
 ```bash
 python visio_replace_tool.py

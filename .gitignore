@@ -8,3 +8,8 @@ venv/
 # Tool output
 *_edited.vsdx
 *_edited.pdf
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
