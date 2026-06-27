@@ -34,7 +34,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "1.5 (run-aware match; PDF optional)"
+__version__ = "1.6 (Windows path fix)"
 
 import argparse
 import os
@@ -924,8 +924,11 @@ def launch_gui() -> int:
             errors = 0
             last_output = None
             try:
-                for src in (Path(f) for f in files):
-                    pairs = pairs_by_file.get(str(src), [])
+                for f in files:
+                    src = Path(f)
+                    # Key by the original string used to build the dict (path
+                    # separators differ between tkinter and Path on Windows).
+                    pairs = pairs_by_file.get(f, [])
 
                     # Decide the copy's name and whether to bump the revision.
                     revision = None
