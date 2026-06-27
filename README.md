@@ -11,7 +11,24 @@ Workflow:
 2. **Enter** one or more *Find* → *Replace with* rules. Each rule can target
    **all files** or just **specific files** in the batch.
 3. Click **Replace & Convert**.
-4. Get an edited `*_edited.vsdx` (and `*_edited.pdf`) next to each original.
+4. Get a **next-revision copy** of each file (and a PDF) next to each original.
+   Your originals are never modified.
+
+### Revisions
+
+The tool works on **copies**, never the originals. By default it names each copy
+as the **next revision letter**, read from the file name:
+
+- `Floor Plan REVA.vsdx` → `Floor Plan REVB.vsdx` (A→B→C … major changes only).
+- It also updates the revision **inside the drawing**: the single-letter box
+  (e.g. `A`) that sits next to a `REV` label on page 1 is bumped to match. Other
+  stray single letters (grid/zone labels around the border) are left alone — the
+  right box is found by its closeness to the `REV` label.
+- Already at `REVZ`? That file is skipped with a warning (no next letter).
+- No `REVx` in the file name? The copy falls back to `*_edited.vsdx`.
+
+Both behaviors are checkboxes you can turn off (rename only, or no revision bump
+at all).
 
 The find/replace edits the Visio file directly (it's a ZIP of XML parts) and only
 touches the visible text inside shapes — geometry, colors, themes, connectors and
@@ -81,6 +98,10 @@ Options:
 - **Whole word only** — only match complete words (won't change `foobar` when
   finding `foo`).
 - **Also export PDF** — produce a PDF in addition to the edited `.vsdx`.
+- **Save copy as next revision (REVx → next)** — name the copy as the next
+  revision letter instead of `*_edited` (on by default; see *Revisions* above).
+- **...and update the REV box in the drawing** — also bump the `REVx` letter box
+  inside the drawing to match the new file name (on by default).
 
 ---
 
@@ -102,6 +123,10 @@ python visio_replace_tool.py drawing.vsdx \
 python visio_replace_tool.py one.vsdx two.vsdx three.vsdx \
     --find "Old Server" --replace "New Host" --pdf
 
+# Save each copy as the next revision (REVA -> REVB) and bump the in-drawing box
+python visio_replace_tool.py "Floor Plan REVA.vsdx" \
+    --find "Old Server" --replace "New Host" --bump-revision --pdf
+
 # Choose the output name (single file only); case-sensitive, whole-word
 python visio_replace_tool.py in.vsdx -f Dev -r Prod -o out.vsdx \
     --case-sensitive --whole-word --pdf
@@ -116,6 +141,8 @@ python visio_replace_tool.py in.vsdx -f Dev -r Prod -o out.vsdx \
 | `--pdf` | Also export to PDF |
 | `--case-sensitive` | Match capitalization exactly |
 | `--whole-word` | Only match whole words |
+| `--bump-revision` | Name each copy as the next revision (REVx → next) read from the file name |
+| `--no-rev-text` | With `--bump-revision`, only rename the file; don't touch the REV box in the drawing |
 
 > The CLI applies every rule to every file listed. **Per-file targeting**
 > (a rule that only touches certain files) is available in the **GUI** via each

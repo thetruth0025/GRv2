@@ -38,12 +38,14 @@ import argparse
 import os
 import re
 import shutil
+import string
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 # ---------------------------------------------------------------------------
 # Core logic (no GUI dependencies -- safe to import and unit test)
@@ -116,16 +118,164 @@ def _is_text_part(name: str) -> bool:
     return lname.startswith("visio/") and lname.endswith(".xml")
 
 
+# ---------------------------------------------------------------------------
+# Revision handling
+# ---------------------------------------------------------------------------
+#
+# Drawings are versioned with a revision letter (A, B, C, ... Z), major changes
+# only. It shows up two ways:
+#   * In the FILE NAME, e.g. "Floor Plan REVA.vsdx".
+#   * In the DRAWING, as a single letter ("A") in its own text box, sitting
+#     next to a separate box labelled "REV" (a typical title block).
+# We read the current letter from the file name and bump it to the next one.
+
+# "REV" + optional space/dash/underscore + a single letter, not part of a word.
+_FILENAME_REV_RE = re.compile(r"(?i)(REV)([ _-]?)([A-Za-z])(?![A-Za-z])")
+_PAGE_NAME_RE = re.compile(r"visio/pages/page(\d+)\.xml$", re.IGNORECASE)
+
+
+def next_revision_letter(letter: str) -> Optional[str]:
+    """Return the next revision letter (A->B ... Y->Z), or None past Z."""
+    idx = string.ascii_uppercase.find(letter.upper())
+    if idx < 0 or idx >= 25:
+        return None
+    return string.ascii_uppercase[idx + 1]
+
+
+def revision_output_path(in_path: str | os.PathLike):
+    """Work out the next-revision copy name for a file.
+
+    Returns (out_path, old_letter, new_letter, status) where status is:
+      'ok'      -> out_path is the bumped-revision name
+      'no_rev'  -> no REVx in the name; out_path falls back to *_edited.vsdx
+      'at_z'    -> already at REVZ; out_path is None (caller should skip)
+    """
+    p = Path(in_path)
+    match = list(_FILENAME_REV_RE.finditer(p.stem))
+    if not match:
+        fallback = p.with_name(p.stem + "_edited" + p.suffix)
+        return fallback, None, None, "no_rev"
+
+    m = match[-1]  # last occurrence is the revision marker
+    old = m.group(3).upper()
+    nxt = next_revision_letter(old)
+    if nxt is None:
+        return None, old, None, "at_z"
+
+    new_stem = p.stem[: m.start(3)] + nxt + p.stem[m.end(3):]
+    return p.with_name(new_stem + p.suffix), old, nxt, "ok"
+
+
+def _first_page_part(names: Sequence[str]) -> Optional[str]:
+    """The archive member for page 1 (lowest-numbered page)."""
+    pages = [n for n in names if _PAGE_NAME_RE.search(n)]
+    if not pages:
+        return None
+    return min(pages, key=lambda n: int(_PAGE_NAME_RE.search(n).group(1)))
+
+
+def _cell_value(shape_el, ns: str, name: str) -> Optional[float]:
+    for cell in shape_el.findall(ns + "Cell"):
+        if cell.get("N") == name:
+            try:
+                return float(cell.get("V"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _choose_rev_candidate(page_xml: str, old_letter: str) -> Optional[int]:
+    """Pick which single-letter box (in document order) is THE revision.
+
+    Uses the position of the "REV" label box and chooses the matching letter
+    box closest to it. Returns the index among same-letter boxes, or None if
+    it can't be determined confidently.
+    """
+    try:
+        root = ET.fromstring(page_xml)
+    except ET.ParseError:
+        return None
+    ns = root.tag[: root.tag.index("}") + 1] if root.tag.startswith("{") else ""
+
+    candidates = []  # (pinx, piny) for single-letter boxes == old_letter
+    rev_labels = []  # (pinx, piny) for boxes whose text is "REV"
+    for sh in root.iter(ns + "Shape"):
+        text_el = sh.find(ns + "Text")
+        if text_el is None:
+            continue
+        norm = "".join(text_el.itertext()).strip()
+        if norm.upper() == "REV":
+            rev_labels.append(
+                (_cell_value(sh, ns, "PinX"), _cell_value(sh, ns, "PinY"))
+            )
+        elif len(norm) == 1 and norm.upper() == old_letter.upper():
+            candidates.append(
+                (_cell_value(sh, ns, "PinX"), _cell_value(sh, ns, "PinY"))
+            )
+
+    if not rev_labels:
+        return None  # no REV label -> can't tell which letter is the revision
+
+    best_idx, best_dist = None, None
+    for i, (px, py) in enumerate(candidates):
+        if px is None or py is None:
+            continue
+        for rx, ry in rev_labels:
+            if rx is None or ry is None:
+                continue
+            dist = (px - rx) ** 2 + (py - ry) ** 2
+            if best_dist is None or dist < best_dist:
+                best_dist, best_idx = dist, i
+    return best_idx
+
+
+def bump_revision_in_page(page_xml: str, old_letter: str, new_letter: str):
+    """Update the revision-letter box on a page. Returns (xml, status).
+
+    status: 'updated' | 'not_found' | 'ambiguous'
+    """
+    old_u = old_letter.upper()
+    # Single-letter <Text> boxes matching the old revision, in document order.
+    cands = []
+    for m in _TEXT_BLOCK_RE.finditer(page_xml):
+        text_only = _TAG_SPLIT_RE.sub("", m.group(2)).strip()
+        if len(text_only) == 1 and text_only.upper() == old_u:
+            cands.append(m)
+
+    if not cands:
+        return page_xml, "not_found"
+
+    index = 0
+    if len(cands) > 1:
+        index = _choose_rev_candidate(page_xml, old_u)
+        if index is None or index >= len(cands):
+            return page_xml, "ambiguous"
+
+    m = cands[index]
+    new_inner = re.sub(
+        re.escape(old_letter), lambda _m: new_letter, m.group(2),
+        count=1, flags=re.IGNORECASE,
+    )
+    new_block = m.group(1) + new_inner + m.group(3)
+    return page_xml[: m.start()] + new_block + page_xml[m.end():], "updated"
+
+
 def replace_text_in_vsdx(
     in_path: str | os.PathLike,
     out_path: str | os.PathLike,
     pairs: Sequence[Tuple[str, str]],
     case_sensitive: bool = True,
     whole_word: bool = False,
+    revision: Optional[Tuple[str, str]] = None,
+    update_drawing_rev: bool = False,
 ) -> dict:
     """Copy a .vsdx applying text replacements; return a report dict.
 
-    Report: {"total": int, "by_part": {part_name: count, ...}}
+    If ``revision`` is (old_letter, new_letter) and ``update_drawing_rev`` is
+    true, the single-letter revision box on page 1 is bumped to new_letter.
+
+    Report: {"total", "by_part", "rev_drawing"} where rev_drawing is one of
+    'na' (not attempted), 'updated', 'not_found', 'ambiguous'.
     """
     in_path = Path(in_path)
     out_path = Path(out_path)
@@ -139,30 +289,37 @@ def replace_text_in_vsdx(
 
     by_part: dict[str, int] = {}
     total = 0
+    rev_status = "na"
+    do_rev = bool(revision and update_drawing_rev)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(in_path, "r") as zin, zipfile.ZipFile(
-        out_path, "w", zipfile.ZIP_DEFLATED
-    ) as zout:
-        for item in zin.infolist():
-            data = zin.read(item.filename)
-            if _is_text_part(item.filename):
-                try:
-                    text = data.decode("utf-8")
-                except UnicodeDecodeError:
-                    pass  # leave non-text/binary-ish parts untouched
-                else:
-                    new_text, count = replace_in_xml(
-                        text, pairs, case_sensitive, whole_word
-                    )
-                    if count:
-                        by_part[item.filename] = count
-                        total += count
-                        data = new_text.encode("utf-8")
-            # Preserve the original name; recompress with deflate.
-            zout.writestr(item.filename, data)
+    with zipfile.ZipFile(in_path, "r") as zin:
+        first_page = _first_page_part(zin.namelist()) if do_rev else None
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                if _is_text_part(item.filename):
+                    try:
+                        text = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        pass  # leave non-text/binary-ish parts untouched
+                    else:
+                        new_text, count = replace_in_xml(
+                            text, pairs, case_sensitive, whole_word
+                        )
+                        if count:
+                            by_part[item.filename] = count
+                            total += count
+                        if do_rev and item.filename == first_page:
+                            new_text, rev_status = bump_revision_in_page(
+                                new_text, revision[0], revision[1]
+                            )
+                        if new_text != text:
+                            data = new_text.encode("utf-8")
+                # Preserve the original name; recompress with deflate.
+                zout.writestr(item.filename, data)
 
-    return {"total": total, "by_part": by_part}
+    return {"total": total, "by_part": by_part, "rev_drawing": rev_status}
 
 
 def find_libreoffice() -> str | None:
@@ -273,16 +430,31 @@ def _run_cli(argv: Sequence[str]) -> int:
         "--whole-word", action="store_true",
         help="Only match whole words",
     )
+    parser.add_argument(
+        "--bump-revision", action="store_true",
+        help="Name each copy as the next revision (e.g. REVA -> REVB) read "
+        "from the file name, instead of the *_edited suffix",
+    )
+    parser.add_argument(
+        "--no-rev-text", action="store_true",
+        help="With --bump-revision, do NOT change the REV letter box inside "
+        "the drawing (only rename the file)",
+    )
     args = parser.parse_args(argv)
 
     if len(args.find) != len(args.replace):
         parser.error("each --find must be paired with a --replace")
-    if not args.find:
-        parser.error("provide at least one --find/--replace pair")
+    if not args.find and not args.bump_revision:
+        parser.error(
+            "provide at least one --find/--replace pair (or --bump-revision)"
+        )
     if args.output and len(args.inputs) > 1:
         parser.error("--output cannot be used with multiple input files")
+    if args.output and args.bump_revision:
+        parser.error("--output cannot be used with --bump-revision")
 
     pairs = list(zip(args.find, args.replace))
+    update_rev_text = not args.no_rev_text
     had_error = False
 
     for raw in args.inputs:
@@ -292,27 +464,50 @@ def _run_cli(argv: Sequence[str]) -> int:
             had_error = True
             continue
 
-        out_path = (
-            Path(args.output)
-            if args.output
-            else in_path.with_name(in_path.stem + "_edited.vsdx")
-        )
+        revision = None
+        if args.bump_revision:
+            out_path, old, new, status = revision_output_path(in_path)
+            if status == "at_z":
+                print(
+                    f"{in_path.name}: already at REVZ - skipped "
+                    "(no next revision)."
+                )
+                continue
+            if status == "no_rev":
+                print(
+                    f"{in_path.name}: no REVx in the name; saving as "
+                    f"{Path(out_path).name}"
+                )
+            else:
+                revision = (old, new)
+        elif args.output:
+            out_path = Path(args.output)
+        else:
+            out_path = in_path.with_name(in_path.stem + "_edited.vsdx")
+
         try:
             report = replace_text_in_vsdx(
                 in_path, out_path, pairs,
                 case_sensitive=args.case_sensitive, whole_word=args.whole_word,
+                revision=revision, update_drawing_rev=update_rev_text,
             )
             print(
                 f"{in_path.name}: replaced {report['total']} occurrence(s) "
-                f"-> {out_path}"
+                f"-> {Path(out_path).name}"
             )
-            if report["total"] == 0:
-                print(
-                    "    (no matches found; check spelling or "
-                    "--case-sensitive)"
-                )
+            if revision:
+                rd = report["rev_drawing"]
+                note = {
+                    "updated": f"REV box bumped {revision[0]} -> {revision[1]}",
+                    "not_found": "REV box not found in drawing (file renamed "
+                    "only)",
+                    "ambiguous": "couldn't identify the REV box (file renamed "
+                    "only)",
+                    "na": "in-drawing REV left unchanged",
+                }.get(rd, rd)
+                print(f"    {note}")
             if args.pdf:
-                pdf = convert_to_pdf(out_path, out_path.parent)
+                pdf = convert_to_pdf(out_path, Path(out_path).parent)
                 print(f"    PDF -> {pdf}")
         except (ValueError, RuntimeError) as exc:
             print(f"Error ({in_path.name}): {exc}", file=sys.stderr)
@@ -414,15 +609,33 @@ def launch_gui() -> int:
             self.case_var = tk.BooleanVar(value=False)
             self.word_var = tk.BooleanVar(value=False)
             self.pdf_var = tk.BooleanVar(value=True)
+            self.rev_var = tk.BooleanVar(value=True)
+            self.revtext_var = tk.BooleanVar(value=True)
+
+            opt_row1 = ttk.Frame(opts)
+            opt_row1.pack(fill="x")
             ttk.Checkbutton(
-                opts, text="Case sensitive", variable=self.case_var
-            ).pack(side="left", padx=8, pady=8)
+                opt_row1, text="Case sensitive", variable=self.case_var
+            ).pack(side="left", padx=8, pady=6)
             ttk.Checkbutton(
-                opts, text="Whole word only", variable=self.word_var
-            ).pack(side="left", padx=8, pady=8)
+                opt_row1, text="Whole word only", variable=self.word_var
+            ).pack(side="left", padx=8, pady=6)
             ttk.Checkbutton(
-                opts, text="Also export PDF", variable=self.pdf_var
-            ).pack(side="left", padx=8, pady=8)
+                opt_row1, text="Also export PDF", variable=self.pdf_var
+            ).pack(side="left", padx=8, pady=6)
+
+            opt_row2 = ttk.Frame(opts)
+            opt_row2.pack(fill="x")
+            ttk.Checkbutton(
+                opt_row2,
+                text="Save copy as next revision (REVx → next)",
+                variable=self.rev_var, command=self._sync_rev_options,
+            ).pack(side="left", padx=8, pady=6)
+            self.revtext_chk = ttk.Checkbutton(
+                opt_row2, text="...and update the REV box in the drawing",
+                variable=self.revtext_var,
+            )
+            self.revtext_chk.pack(side="left", padx=8, pady=6)
 
             # --- Run -------------------------------------------------------
             run = ttk.Frame(root)
@@ -443,12 +656,18 @@ def launch_gui() -> int:
             self.log.pack(fill="both", expand=True, padx=6, pady=6)
 
             self.on_mode_change()
+            self._sync_rev_options()
             if find_libreoffice() is None:
                 self._log(
                     "Note: LibreOffice was not found, so PDF export is "
                     "unavailable. Install it from libreoffice.org to enable "
                     "PDF output. Text replacement still works."
                 )
+
+        def _sync_rev_options(self):
+            self.revtext_chk.configure(
+                state="normal" if self.rev_var.get() else "disabled"
+            )
 
         # -- file list ------------------------------------------------------
         def on_mode_change(self):
@@ -662,9 +881,14 @@ def launch_gui() -> int:
                     "These files no longer exist:\n" + "\n".join(missing),
                 )
                 return
-            if not any(r["find"].get() for r in self.rule_rows):
+            bump_rev = self.rev_var.get()
+            if not bump_rev and not any(
+                r["find"].get() for r in self.rule_rows
+            ):
                 messagebox.showwarning(
-                    "Nothing to find", "Enter at least one 'Find' value."
+                    "Nothing to do",
+                    "Enter at least one 'Find' value, or tick "
+                    "'Save copy as next revision'.",
                 )
                 return
 
@@ -675,13 +899,13 @@ def launch_gui() -> int:
                     list(self.files),
                     {f: self.pairs_for_file(f) for f in self.files},
                     self.case_var.get(), self.word_var.get(),
-                    self.pdf_var.get(),
+                    self.pdf_var.get(), bump_rev, self.revtext_var.get(),
                 ),
                 daemon=True,
             ).start()
 
         def _worker(self, files, pairs_by_file, case_sensitive, whole_word,
-                    make_pdf):
+                    make_pdf, bump_rev, update_rev_text):
             total_repl = 0
             done = 0
             errors = 0
@@ -689,26 +913,66 @@ def launch_gui() -> int:
             try:
                 for src in (Path(f) for f in files):
                     pairs = pairs_by_file.get(str(src), [])
-                    if not pairs:
-                        self.log(
-                            f"- {src.name}: skipped (no rule targets this file)"
-                        )
-                        continue
-                    try:
+
+                    # Decide the copy's name and whether to bump the revision.
+                    revision = None
+                    if bump_rev:
+                        out_vsdx, old, new, status = revision_output_path(src)
+                        if status == "at_z":
+                            self.log(
+                                f"- {src.name}: already at REVZ - skipped "
+                                "(no next revision)."
+                            )
+                            continue
+                        if status == "no_rev":
+                            self.log(
+                                f"  {src.name}: no REVx in name; saving as "
+                                f"{out_vsdx.name}"
+                            )
+                        else:
+                            revision = (old, new)
+                        out_vsdx = Path(out_vsdx)
+                    else:
+                        if not pairs:
+                            self.log(
+                                f"- {src.name}: skipped (no rule targets this "
+                                "file)"
+                            )
+                            continue
                         out_vsdx = src.with_name(src.stem + "_edited.vsdx")
+
+                    try:
                         report = replace_text_in_vsdx(
                             src, out_vsdx, pairs,
                             case_sensitive=case_sensitive,
                             whole_word=whole_word,
+                            revision=revision,
+                            update_drawing_rev=update_rev_text,
                         )
                         total_repl += report["total"]
                         msg = (
                             f"+ {src.name}: {report['total']} replacement(s) "
                             f"-> {out_vsdx.name}"
                         )
-                        if report["total"] == 0:
+                        if report["total"] == 0 and pairs:
                             msg += "  (no matches found)"
                         self.log(msg)
+                        if revision:
+                            rd = report["rev_drawing"]
+                            note = {
+                                "updated":
+                                    f"    REV box {revision[0]} -> "
+                                    f"{revision[1]}",
+                                "not_found":
+                                    "    (REV box not found in drawing; file "
+                                    "renamed only)",
+                                "ambiguous":
+                                    "    (couldn't identify the REV box; file "
+                                    "renamed only)",
+                                "na": None,
+                            }.get(rd)
+                            if note:
+                                self.log(note)
                         last_output = out_vsdx
 
                         if make_pdf:
