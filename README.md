@@ -6,10 +6,12 @@ PDF.
 
 Workflow:
 
-1. **Choose** a Visio file (`.vsdx`).
-2. **Enter** one or more *Find* → *Replace with* pairs.
+1. **Choose** a single Visio file (`.vsdx`) — or switch to **Batch** mode and add
+   many files (or a whole folder).
+2. **Enter** one or more *Find* → *Replace with* rules. Each rule can target
+   **all files** or just **specific files** in the batch.
 3. Click **Replace & Convert**.
-4. Get an edited `*_edited.vsdx` and a `*_edited.pdf` next to your original.
+4. Get an edited `*_edited.vsdx` (and `*_edited.pdf`) next to each original.
 
 The find/replace edits the Visio file directly (it's a ZIP of XML parts) and only
 touches the visible text inside shapes — geometry, colors, themes, connectors and
@@ -56,9 +58,22 @@ You have three options, from simplest to most self-contained:
 python visio_replace_tool.py
 ```
 
-A window opens. Browse to your `.vsdx`, fill in the Find/Replace boxes (use
-**+ Add another pair** for multiple terms), tick the options you want, and click
-**Replace & Convert**. The output folder opens automatically when it finishes.
+A window opens:
+
+1. **Pick your files (step 1 in the window).** Choose **Single file** to work on
+   one drawing, or **Batch (multiple files)** to process several at once. In
+   batch mode use **Add files...** (select several at once) or **Add folder...**
+   (adds every `.vsdx` in a folder). The chosen files appear in the list;
+   **Remove selected** / **Clear** manage it.
+2. **Add your rules (step 2).** Fill in a *Find* → *Replace with* row, and use
+   **+ Add another rule** for more terms. Each rule has an **Applies to** button:
+   - **All files** (the default) — the rule runs on every file, including any you
+     add later.
+   - Click it to pick **specific files** instead — handy when, say, one rule
+     should only touch two of the ten drawings in your batch.
+3. **Set options (step 3)** and click **Replace & Convert**. Each file is saved
+   as `*_edited.vsdx` (and `*_edited.pdf`) next to the original, and the output
+   folder opens when it finishes. The Status box lists what happened per file.
 
 Options:
 
@@ -83,19 +98,28 @@ python visio_replace_tool.py drawing.vsdx \
     --find "2023"       --replace "2026" \
     --pdf
 
-# Choose the output name; case-sensitive, whole-word matching
+# Batch: every rule is applied to ALL listed files
+python visio_replace_tool.py one.vsdx two.vsdx three.vsdx \
+    --find "Old Server" --replace "New Host" --pdf
+
+# Choose the output name (single file only); case-sensitive, whole-word
 python visio_replace_tool.py in.vsdx -f Dev -r Prod -o out.vsdx \
     --case-sensitive --whole-word --pdf
 ```
 
 | Flag | Meaning |
 |------|---------|
+| `inputs` | One or more `.vsdx` files (every rule applies to all of them) |
 | `-f`, `--find` | Text to search for (repeatable) |
 | `-r`, `--replace` | Replacement, paired with each `--find` in order |
-| `-o`, `--output` | Output `.vsdx` path (default: `<name>_edited.vsdx`) |
+| `-o`, `--output` | Output `.vsdx` path (single input only; default: `<name>_edited.vsdx`) |
 | `--pdf` | Also export to PDF |
 | `--case-sensitive` | Match capitalization exactly |
 | `--whole-word` | Only match whole words |
+
+> The CLI applies every rule to every file listed. **Per-file targeting**
+> (a rule that only touches certain files) is available in the **GUI** via each
+> rule's **Applies to** button.
 
 ---
 
