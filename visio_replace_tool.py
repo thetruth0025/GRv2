@@ -62,6 +62,32 @@ def xml_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def _splice_segments(segs: List[str], start: int, end: int, repl: str) -> None:
+    """Replace full-text range [start, end) across a list of text runs.
+
+    ``segs`` is edited in place. The replacement text lands in the first run
+    the match touches; characters in later runs the match spans are removed.
+    This lets a search term match even when Visio split it across formatting
+    runs (e.g. "Old " <cp/> "Server").
+    """
+    pos = 0
+    first = True
+    for k in range(len(segs)):
+        seg = segs[k]
+        seg_start = pos
+        seg_end = pos + len(seg)
+        pos = seg_end
+        if seg_end <= start or seg_start >= end:
+            continue  # this run is entirely outside the match
+        a = max(start, seg_start) - seg_start  # local removal start
+        b = min(end, seg_end) - seg_start      # local removal end
+        if first:
+            segs[k] = seg[:a] + repl + seg[b:]
+            first = False
+        else:
+            segs[k] = seg[:a] + seg[b:]
+
+
 def replace_in_xml(
     xml_text: str,
     pairs: Sequence[Tuple[str, str]],
@@ -72,10 +98,10 @@ def replace_in_xml(
 
     Returns the modified XML and the number of replacements made.
 
-    Only the text *between* tags is modified, so inline formatting markers
-    such as <cp/>, <pp/> and <fld/> are preserved. Text the user types is
-    XML-escaped before matching so that, e.g., searching for "A & B" matches
-    the stored "A &amp; B".
+    Inline formatting markers (<cp/>, <pp/>, <fld/>, ...) are preserved, and a
+    search term is matched even when it spans several of them. Text the user
+    types is XML-escaped before matching so that, e.g., searching for "A & B"
+    matches the stored "A &amp; B".
     """
     flags = 0 if case_sensitive else re.IGNORECASE
 
@@ -97,15 +123,25 @@ def replace_in_xml(
     def process_block(match: re.Match) -> str:
         nonlocal total
         open_tag, inner, close_tag = match.group(1), match.group(2), match.group(3)
-        # Split inner content into [text, tag, text, tag, ...]; text is at even
+        # Split inner into [text, tag, text, tag, ...]; text runs are at even
         # indices, tags (which we must not touch) at odd indices.
         parts = _TAG_SPLIT_RE.split(inner)
-        for i in range(0, len(parts), 2):
-            segment = parts[i]
-            for pattern, repl in compiled:
-                segment, n = pattern.subn(lambda _m, r=repl: r, segment)
-                total += n
-            parts[i] = segment
+        text_indices = list(range(0, len(parts), 2))
+        segs = [parts[i] for i in text_indices]
+
+        for pattern, repl in compiled:
+            # Match against the concatenated visible text so a term can span
+            # formatting runs; splice replacements back into the runs.
+            full = "".join(segs)
+            matches = list(pattern.finditer(full))
+            if not matches:
+                continue
+            for m in reversed(matches):  # right-to-left keeps offsets valid
+                _splice_segments(segs, m.start(), m.end(), repl)
+            total += len(matches)
+
+        for idx, i in enumerate(text_indices):
+            parts[i] = segs[idx]
         return open_tag + "".join(parts) + close_tag
 
     new_text = _TEXT_BLOCK_RE.sub(process_block, xml_text)
@@ -550,9 +586,6 @@ def launch_gui() -> int:
     import tkinter as tk
     from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-    # Sentinel meaning "this rule applies to every file (now and later)".
-    ALL_FILES = "ALL"
-
     class App:
         def __init__(self, root: "tk.Tk"):
             self.root = root
@@ -561,9 +594,11 @@ def launch_gui() -> int:
             root.minsize(640, 640)
 
             self.files: List[str] = []
-            # Each rule: {"frame","find","repl","scope","btn"}; scope is
-            # ALL_FILES or a set of file paths.
+            # Each rule: {"frame","find","repl","combo"}; the combobox holds
+            # "All files" or a file label from self._label_to_path.
             self.rule_rows: List[dict] = []
+            self._file_labels: List[str] = []
+            self._label_to_path: dict = {}
 
             pad = {"padx": 10, "pady": 6}
 
@@ -737,129 +772,74 @@ def launch_gui() -> int:
             for i in reversed(self.files_box.curselection()):
                 del self.files[i]
             self.refresh_files_box()
-            self._refresh_scope_buttons()
 
         def clear_files(self):
             self.files = []
             self.refresh_files_box()
-            self._refresh_scope_buttons()
 
         def refresh_files_box(self):
             self.files_box.delete(0, "end")
             for f in self.files:
                 self.files_box.insert("end", Path(f).name)
-            self._refresh_scope_buttons()
+            self._refresh_rule_combos()
+
+        def _rebuild_file_labels(self):
+            """Build the dropdown labels (basenames; full path if duplicated)."""
+            counts: dict = {}
+            for f in self.files:
+                counts[Path(f).name] = counts.get(Path(f).name, 0) + 1
+            self._file_labels = []
+            self._label_to_path = {}
+            for f in self.files:
+                base = Path(f).name
+                label = f if counts[base] > 1 else base
+                self._file_labels.append(label)
+                self._label_to_path[label] = f
+
+        def _refresh_rule_combos(self):
+            """Refresh every rule's file dropdown to the current file list."""
+            self._rebuild_file_labels()
+            values = ["All files"] + self._file_labels
+            for rule in self.rule_rows:
+                combo = rule["combo"]
+                current = combo.get()
+                combo["values"] = values
+                if current not in values:
+                    combo.set("All files")
 
         # -- rule rows ------------------------------------------------------
         def _header_row(self):
-            hdr = ttk.Frame(self.pairs_frame)
-            hdr.pack(fill="x")
-            ttk.Label(hdr, text="Find", width=24).pack(side="left", padx=4)
-            ttk.Label(hdr, text="Replace with", width=24).pack(
-                side="left", padx=4
-            )
-            ttk.Label(hdr, text="Applies to", width=16).pack(
-                side="left", padx=4
-            )
+            ttk.Label(
+                self.pairs_frame,
+                text="Type the text to find and its replacement, then pick "
+                "which file(s) the rule applies to.",
+            ).pack(anchor="w", padx=4, pady=(0, 4))
 
         def add_pair(self):
             row = ttk.Frame(self.pairs_frame)
-            row.pack(fill="x", pady=2)
-            find_e = ttk.Entry(row, width=24)
-            find_e.pack(side="left", fill="x", expand=True, padx=4)
-            repl_e = ttk.Entry(row, width=24)
-            repl_e.pack(side="left", fill="x", expand=True, padx=4)
-            scope_btn = ttk.Button(row, width=16)
-            scope_btn.pack(side="left", padx=4)
-            rule = {
-                "frame": row, "find": find_e, "repl": repl_e,
-                "scope": ALL_FILES, "btn": scope_btn,
-            }
-            scope_btn.configure(command=lambda r=rule: self.edit_scope(r))
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text="Find:").pack(side="left", padx=(4, 2))
+            find_e = ttk.Entry(row, width=16)
+            find_e.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            ttk.Label(row, text="Replace with:").pack(side="left", padx=(0, 2))
+            repl_e = ttk.Entry(row, width=16)
+            repl_e.pack(side="left", fill="x", expand=True, padx=(0, 8))
+            ttk.Label(row, text="in:").pack(side="left", padx=(0, 2))
+            combo = ttk.Combobox(row, width=18, state="readonly")
+            combo.pack(side="left", padx=(0, 4))
+            rule = {"frame": row, "find": find_e, "repl": repl_e, "combo": combo}
             ttk.Button(
                 row, text="X", width=3,
                 command=lambda r=rule: self.remove_pair(r),
             ).pack(side="left", padx=4)
             self.rule_rows.append(rule)
-            self._update_scope_button(rule)
+            self._refresh_rule_combos()
 
         def remove_pair(self, rule):
             if len(self.rule_rows) <= 1:
                 return  # keep at least one row
             rule["frame"].destroy()
             self.rule_rows = [r for r in self.rule_rows if r is not rule]
-
-        def _update_scope_button(self, rule):
-            scope = rule["scope"]
-            if scope == ALL_FILES:
-                rule["btn"].configure(text="All files")
-            else:
-                n = len(scope)
-                rule["btn"].configure(
-                    text=("No files" if n == 0 else f"{n} file(s)")
-                )
-
-        def _refresh_scope_buttons(self):
-            # Drop file paths that no longer exist in the list from each scope.
-            current = set(self.files)
-            for rule in self.rule_rows:
-                if rule["scope"] != ALL_FILES:
-                    rule["scope"] = {f for f in rule["scope"] if f in current}
-                self._update_scope_button(rule)
-
-        def edit_scope(self, rule):
-            if not self.files:
-                messagebox.showinfo(
-                    "Add files first",
-                    "Add one or more Visio files before choosing which ones "
-                    "this rule applies to.",
-                )
-                return
-
-            win = tk.Toplevel(self.root)
-            win.title("Apply this rule to...")
-            win.transient(self.root)
-            win.grab_set()
-
-            all_var = tk.BooleanVar(value=(rule["scope"] == ALL_FILES))
-            ttk.Checkbutton(
-                win, text="All files (including any added later)",
-                variable=all_var,
-            ).pack(anchor="w", padx=12, pady=(12, 4))
-            ttk.Label(
-                win, text="...or pick specific files:"
-            ).pack(anchor="w", padx=12)
-
-            box = tk.Listbox(win, selectmode="extended", height=8, width=48)
-            box.pack(fill="both", expand=True, padx=12, pady=6)
-            for f in self.files:
-                box.insert("end", Path(f).name)
-            if rule["scope"] != ALL_FILES:
-                for i, f in enumerate(self.files):
-                    if f in rule["scope"]:
-                        box.selection_set(i)
-
-            def sync_state(*_):
-                box.configure(state="disabled" if all_var.get() else "normal")
-            all_var.trace_add("write", sync_state)
-            sync_state()
-
-            def ok():
-                if all_var.get():
-                    rule["scope"] = ALL_FILES
-                else:
-                    rule["scope"] = {
-                        self.files[i] for i in box.curselection()
-                    }
-                self._update_scope_button(rule)
-                win.destroy()
-
-            btns = ttk.Frame(win)
-            btns.pack(fill="x", padx=12, pady=(0, 12))
-            ttk.Button(btns, text="OK", command=ok).pack(side="right")
-            ttk.Button(
-                btns, text="Cancel", command=win.destroy
-            ).pack(side="right", padx=6)
 
         # -- helpers --------------------------------------------------------
         def _log(self, msg: str):
@@ -880,14 +860,14 @@ def launch_gui() -> int:
                 self.progress.stop()
 
         def pairs_for_file(self, path: str) -> List[Tuple[str, str]]:
-            """Find/replace pairs whose scope includes this file."""
+            """Find/replace pairs whose dropdown selection includes this file."""
             pairs = []
             for rule in self.rule_rows:
                 find = rule["find"].get()
                 if not find:
                     continue
-                scope = rule["scope"]
-                if scope == ALL_FILES or path in scope:
+                sel = rule["combo"].get()
+                if sel == "All files" or self._label_to_path.get(sel) == path:
                     pairs.append((find, rule["repl"].get()))
             return pairs
 

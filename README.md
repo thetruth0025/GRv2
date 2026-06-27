@@ -82,12 +82,12 @@ A window opens:
    batch mode use **Add files...** (select several at once) or **Add folder...**
    (adds every `.vsdx` in a folder). The chosen files appear in the list;
    **Remove selected** / **Clear** manage it.
-2. **Add your rules (step 2).** Fill in a *Find* → *Replace with* row, and use
-   **+ Add another rule** for more terms. Each rule has an **Applies to** button:
-   - **All files** (the default) — the rule runs on every file, including any you
-     add later.
-   - Click it to pick **specific files** instead — handy when, say, one rule
-     should only touch two of the ten drawings in your batch.
+2. **Add your rules (step 2).** Each rule is a row with a separate **Find:** box
+   and **Replace with:** box, plus an **in:** dropdown. Use **+ Add another rule**
+   for more terms. The **in:** dropdown lists every file you added:
+   - **All files** (the default) — the rule runs on every file.
+   - Pick a **file name** to run that rule on only that file. To target a few
+     specific files, add one rule per file and point each at its file.
 3. **Set options (step 3)** and click **Replace & Convert**. Each file is saved
    as `*_edited.vsdx` (and `*_edited.pdf`) next to the original, and the output
    folder opens when it finishes. The Status box lists what happened per file.
@@ -154,9 +154,8 @@ python visio_replace_tool.py in.vsdx -f Dev -r Prod -o out.vsdx \
 
 - **Format:** supports the modern **`.vsdx`** format. For legacy binary `.vsd`
   files, open them in Visio and *Save As* `.vsdx` first.
-- **Text split across formatting runs:** a single label whose characters carry
-  *different* inline formatting in the middle of your search term may not be
-  matched (this is rare). Whole labels and normally-formatted text replace
-  reliably.
+- **Split text is handled:** Visio often stores a label as several formatting
+  runs (e.g. `Old ` `<cp/>` `Server`). Search terms are matched across those
+  runs, so `Old Server` is still found and replaced.
 - The original file is never modified; results are written to new files
-  (`*_edited.vsdx` / `*_edited.pdf`).
+  (the next-revision copy, or `*_edited.vsdx` / `*_edited.pdf`).
