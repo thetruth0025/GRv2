@@ -1,18 +1,19 @@
-# Visio Text Replacer → PDF
+# Visio / Excel Text Replacer
 
-A small desktop app that edits Microsoft Visio drawings (`.vsdx`): find text and
-replace it **everywhere it appears** in the drawing, then export the result to
-PDF.
+A small desktop app that finds and replaces text **everywhere it appears** in
+Microsoft **Visio drawings (`.vsdx`)** and **Excel workbooks (`.xlsx`)**, makes a
+next-revision copy, and optionally exports to PDF.
 
 Workflow:
 
-1. **Choose** a single Visio file (`.vsdx`) — or switch to **Batch** mode and add
-   many files (or a whole folder).
-2. **Enter** one or more *Find* → *Replace with* rules. Each rule can target
-   **all files** or just **specific files** in the batch.
+1. **Choose** a single file — or switch to **Batch** mode and add many files (or
+   a whole folder). You can mix `.vsdx` and `.xlsx`; each file's type is
+   **detected automatically**.
+2. **Enter** one or more *Find* → *Replace with* rules. Each rule's **in:**
+   dropdown lets you target **all files** or **tick several specific files**.
 3. Click **Replace & Convert**.
-4. Get a **next-revision copy** of each file (and a PDF) next to each original.
-   Your originals are never modified.
+4. Get a **next-revision copy** of each file next to each original. Your
+   originals are never modified.
 
 ### Revisions
 
@@ -20,20 +21,22 @@ The tool works on **copies**, never the originals. By default it names each copy
 as the **next revision letter**, read from the file name:
 
 - `Floor Plan REVA.vsdx` → `Floor Plan REVB.vsdx` (A→B→C … major changes only).
-- It also updates the revision **inside the drawing**: the single-letter box
-  (e.g. `A`) that sits next to a `REV` label on page 1 is bumped to match. Other
-  stray single letters (grid/zone labels around the border) are left alone — the
-  right box is found by its closeness to the `REV` label.
+- It also updates the revision **inside the file**: the single-letter box/cell
+  (e.g. `A`) that sits next to a `REV`/`Revision` label is bumped to match. In
+  Visio that's the text box nearest the `REV` label on the front page; in Excel
+  it's the cell next to the `REV` cell. Stray single letters elsewhere (grid/zone
+  labels) are left alone.
 - Already at `REVZ`? That file is skipped with a warning (no next letter).
-- No `REVx` in the file name? The copy falls back to `*_edited.vsdx`.
+- No `REVx` in the file name? The copy falls back to `*_edited`.
 
 Both behaviors are checkboxes you can turn off (rename only, or no revision bump
 at all).
 
-The find/replace edits the Visio file directly (it's a ZIP of XML parts) and only
-touches the visible text inside shapes — geometry, colors, themes, connectors and
-formatting are left untouched. PDF export uses **LibreOffice**, which renders the
-drawing faithfully.
+The find/replace edits the file directly (both formats are ZIPs of XML). For
+Visio it touches the text in shape `<Text>` blocks; for Excel the shared-strings
+table, inline strings, and drawing text boxes. Geometry, styles, formatting, and
+fonts are left untouched, and a term is matched even when it's split across
+formatting runs.
 
 ---
 
@@ -77,19 +80,19 @@ python visio_replace_tool.py
 
 A window opens:
 
-1. **Pick your files (step 1 in the window).** Choose **Single file** to work on
-   one drawing, or **Batch (multiple files)** to process several at once. In
-   batch mode use **Add files...** (select several at once) or **Add folder...**
-   (adds every `.vsdx` in a folder). The chosen files appear in the list;
-   **Remove selected** / **Clear** manage it.
+1. **Pick your files (step 1 in the window).** Choose **Single file**, or
+   **Batch (multiple files)** to process several at once (you can mix `.vsdx`
+   and `.xlsx`). Use **Add files...** (select several at once) or **Add
+   folder...** (adds every `.vsdx`/`.xlsx` in a folder). The chosen files appear
+   in the list; **Remove selected** / **Clear** manage it.
 2. **Add your rules (step 2).** Each rule is a row with a separate **Find:** box
    and **Replace with:** box, plus an **in:** dropdown. Use **+ Add another rule**
-   for more terms. The **in:** dropdown lists every file you added:
+   for more terms. The **in:** dropdown is a checklist of every file you added:
    - **All files** (the default) — the rule runs on every file.
-   - Pick a **file name** to run that rule on only that file. To target a few
-     specific files, add one rule per file and point each at its file.
+   - Or untick "All files" and **tick one or more specific files** to run the
+     rule on just those.
 3. **Set options (step 3)** and click **Replace & Convert**. Each file is saved
-   as `*_edited.vsdx` (and `*_edited.pdf`) next to the original, and the output
+   as its next-revision copy (or `*_edited`) next to the original, and the output
    folder opens when it finishes. The Status box lists what happened per file.
 
 Options:
@@ -111,7 +114,8 @@ Options:
 
 ## Command-line use (optional / scriptable)
 
-Passing any arguments runs in CLI mode instead of opening the window:
+Passing any arguments runs in CLI mode instead of opening the window. Inputs may
+be `.vsdx` or `.xlsx` (detected automatically):
 
 ```bash
 # Single replacement, edited .vsdx only

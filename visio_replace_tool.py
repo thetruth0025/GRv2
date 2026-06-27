@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
-Visio Text Replacer -> PDF
-==========================
+Visio / Excel Text Replacer
+===========================
 
 A small desktop application that lets you:
 
-  1. Pick a single Visio drawing (.vsdx) OR a batch of them.
+  1. Pick a single Visio drawing (.vsdx) or Excel workbook (.xlsx) -- or a
+     batch mixing both. The file type is detected automatically per file.
   2. Enter one or more "find" / "replace with" text rules.
-  3. Aim each rule at *all* files or only *specific* files in the batch.
-  4. Replace that text everywhere it appears in the drawing(s).
-  5. Save the edited .vsdx file(s) and (optionally) export them to PDF.
+  3. Aim each rule at *all* files or only *specific* files (multi-select).
+  4. Replace that text everywhere it appears.
+  5. Save the edited copy of each file (named as the next revision), and
+     optionally export to PDF.
 
-The find/replace works directly on the .vsdx file format (a ZIP archive of
-XML parts). Only the visible text inside Visio's <Text> blocks is touched, so
-shape geometry, formatting, themes, connectors, etc. are left untouched.
+The find/replace works directly on the file (both .vsdx and .xlsx are ZIP
+archives of XML). For Visio, only the text in <Text> shape blocks is touched;
+for Excel, the shared-strings table, inline strings, and drawing text boxes.
+Geometry, formatting, themes, styles, etc. are left untouched, and a search
+term is matched even when it is split across formatting runs.
 
-PDF export is done with LibreOffice (it has a built-in Visio import filter),
-which produces a faithful rendering of the drawing.
+PDF export is done with LibreOffice. Note: LibreOffice does not evaluate
+field-based values (e.g. a Visio "Sheet X of Y" page-number field), so export
+from the source app for those; PDF export is off by default.
 
 Run the GUI:
     python visio_replace_tool.py
@@ -34,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "1.6 (Windows path fix)"
+__version__ = "1.7 (Excel support + multi-select)"
 
 import argparse
 import os
@@ -90,6 +95,42 @@ def _splice_segments(segs: List[str], start: int, end: int, repl: str) -> None:
             segs[k] = seg[:a] + seg[b:]
 
 
+def _compile_pairs(
+    pairs: Sequence[Tuple[str, str]],
+    case_sensitive: bool,
+    whole_word: bool,
+) -> List[Tuple["re.Pattern", str]]:
+    """Compile find/replace pairs into (pattern, xml-escaped replacement)."""
+    flags = 0 if case_sensitive else re.IGNORECASE
+    compiled: List[Tuple[re.Pattern, str]] = []
+    for find, repl in pairs:
+        if not find:
+            continue
+        pattern = re.escape(xml_escape(find))
+        if whole_word:
+            pattern = r"\b" + pattern + r"\b"
+        compiled.append((re.compile(pattern, flags), xml_escape(repl)))
+    return compiled
+
+
+def _replace_across_runs(segs: List[str], compiled) -> int:
+    """Run-aware replace over a list of text runs (edited in place).
+
+    Matches against the concatenation of the runs so a term can span them,
+    then splices replacements back. Returns the number of replacements.
+    """
+    total = 0
+    for pattern, repl in compiled:
+        full = "".join(segs)
+        matches = list(pattern.finditer(full))
+        if not matches:
+            continue
+        for m in reversed(matches):  # right-to-left keeps offsets valid
+            _splice_segments(segs, m.start(), m.end(), repl)
+        total += len(matches)
+    return total
+
+
 def replace_in_xml(
     xml_text: str,
     pairs: Sequence[Tuple[str, str]],
@@ -105,18 +146,7 @@ def replace_in_xml(
     types is XML-escaped before matching so that, e.g., searching for "A & B"
     matches the stored "A &amp; B".
     """
-    flags = 0 if case_sensitive else re.IGNORECASE
-
-    # Pre-compile a pattern + escaped replacement for each pair.
-    compiled: List[Tuple[re.Pattern, str]] = []
-    for find, repl in pairs:
-        if not find:
-            continue
-        pattern = re.escape(xml_escape(find))
-        if whole_word:
-            pattern = r"\b" + pattern + r"\b"
-        compiled.append((re.compile(pattern, flags), xml_escape(repl)))
-
+    compiled = _compile_pairs(pairs, case_sensitive, whole_word)
     if not compiled:
         return xml_text, 0
 
@@ -131,16 +161,7 @@ def replace_in_xml(
         text_indices = list(range(0, len(parts), 2))
         segs = [parts[i] for i in text_indices]
 
-        for pattern, repl in compiled:
-            # Match against the concatenated visible text so a term can span
-            # formatting runs; splice replacements back into the runs.
-            full = "".join(segs)
-            matches = list(pattern.finditer(full))
-            if not matches:
-                continue
-            for m in reversed(matches):  # right-to-left keeps offsets valid
-                _splice_segments(segs, m.start(), m.end(), repl)
-            total += len(matches)
+        total += _replace_across_runs(segs, compiled)
 
         for idx, i in enumerate(text_indices):
             parts[i] = segs[idx]
@@ -379,6 +400,279 @@ def replace_text_in_vsdx(
     return {"total": total, "by_part": by_part, "rev_drawing": rev_status}
 
 
+# ---------------------------------------------------------------------------
+# Excel workbooks (.xlsx)
+# ---------------------------------------------------------------------------
+#
+# Excel text is not stored in the worksheet cells directly: string cells point
+# at a shared-strings table (xl/sharedStrings.xml), where the text lives inside
+# <t> elements. Text can also appear as inline strings in sheets and as shape
+# text in drawings (<a:t>). We run-aware replace across all of those.
+
+_XLSX_SI_BLOCK = re.compile(r"<si\b[^>]*>.*?</si>", re.DOTALL)
+_XLSX_IS_BLOCK = re.compile(r"<is\b[^>]*>.*?</is>", re.DOTALL)
+_XLSX_AP_BLOCK = re.compile(r"<a:p\b[^>]*>.*?</a:p>", re.DOTALL)
+_XLSX_T_RUN = re.compile(r"<t\b[^>]*>(.*?)</t>", re.DOTALL)
+_XLSX_AT_RUN = re.compile(r"<a:t\b[^>]*>(.*?)</a:t>", re.DOTALL)
+_XLSX_CELL = re.compile(r'<c r="([A-Z]+\d+)"([^>]*)>(.*?)</c>', re.DOTALL)
+_WORKSHEET_RE = re.compile(r"xl/worksheets/sheet\d+\.xml$", re.IGNORECASE)
+
+
+def _xml_unescape(text: str) -> str:
+    return (text.replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&quot;", '"').replace("&apos;", "'")
+            .replace("&amp;", "&"))
+
+
+def _replace_in_blocks(xml_text, block_re, run_re, compiled) -> Tuple[str, int]:
+    """Run-aware replace within each block's <t>/<a:t> runs."""
+    total = 0
+
+    def process_block(bm: re.Match) -> str:
+        nonlocal total
+        block = bm.group(0)
+        runs = list(run_re.finditer(block))
+        if not runs:
+            return block
+        texts = [r.group(1) for r in runs]
+        n = _replace_across_runs(texts, compiled)
+        if not n:
+            return block
+        total += n
+        out, last = [], 0
+        for i, r in enumerate(runs):
+            out.append(block[last:r.start(1)])
+            out.append(texts[i])
+            last = r.end(1)
+        out.append(block[last:])
+        return "".join(out)
+
+    return block_re.sub(process_block, xml_text), total
+
+
+def replace_in_xlsx_part(name: str, xml_text: str, compiled) -> Tuple[str, int]:
+    """Apply replacements to one .xlsx XML part, by part type."""
+    ln = name.lower()
+    if ln.endswith("sharedstrings.xml"):
+        return _replace_in_blocks(xml_text, _XLSX_SI_BLOCK, _XLSX_T_RUN, compiled)
+    if _WORKSHEET_RE.search(ln):  # inline strings only
+        return _replace_in_blocks(xml_text, _XLSX_IS_BLOCK, _XLSX_T_RUN, compiled)
+    if "/drawings/" in ln and ln.endswith(".xml"):
+        return _replace_in_blocks(xml_text, _XLSX_AP_BLOCK, _XLSX_AT_RUN, compiled)
+    return xml_text, 0
+
+
+def _parse_cell_ref(ref: str) -> Optional[Tuple[int, int]]:
+    """'B12' -> (column=2, row=12)."""
+    m = re.match(r"([A-Z]+)(\d+)", ref)
+    if not m:
+        return None
+    col = 0
+    for ch in m.group(1):
+        col = col * 26 + (ord(ch) - 64)
+    return col, int(m.group(2))
+
+
+def _read_shared_strings(zin: zipfile.ZipFile) -> List[str]:
+    try:
+        xml = zin.read("xl/sharedStrings.xml").decode("utf-8")
+    except KeyError:
+        return []
+    out = []
+    for sim in _XLSX_SI_BLOCK.finditer(xml):
+        ts = _XLSX_T_RUN.findall(sim.group(0))
+        out.append(_xml_unescape("".join(ts)))
+    return out
+
+
+def _cell_text(attrs: str, content: str, shared: List[str]) -> Optional[str]:
+    tm = re.search(r'\bt="([^"]+)"', attrs)
+    t = tm.group(1) if tm else "n"
+    if t == "s":
+        v = re.search(r"<v>(.*?)</v>", content, re.DOTALL)
+        if not v:
+            return None
+        try:
+            idx = int(v.group(1))
+        except ValueError:
+            return None
+        return shared[idx] if 0 <= idx < len(shared) else None
+    if t == "inlineStr":
+        return _xml_unescape("".join(_XLSX_T_RUN.findall(content)))
+    if t == "str":
+        v = re.search(r"<v>(.*?)</v>", content, re.DOTALL)
+        return _xml_unescape(v.group(1)) if v else None
+    return None
+
+
+def _find_rev_cell(zin, names, shared, old_letter):
+    """Find the worksheet cell holding the revision letter (next to a REV
+    label). Returns ((part_name, cell_ref), status)."""
+    old_u = old_letter.upper()
+    best = None  # (score, part, ref)
+    no_label_cands = []
+    any_cands = False
+    for name in names:
+        if not _WORKSHEET_RE.search(name.lower()):
+            continue
+        xml = zin.read(name).decode("utf-8", "replace")
+        labels, cands = [], []
+        for cm in _XLSX_CELL.finditer(xml):
+            ref, attrs, content = cm.group(1), cm.group(2), cm.group(3)
+            txt = _cell_text(attrs, content, shared)
+            if txt is None:
+                continue
+            norm = txt.strip()
+            if _is_rev_label(norm):
+                labels.append(_parse_cell_ref(ref))
+            elif len(norm) == 1 and norm.upper() == old_u:
+                cands.append((ref, _parse_cell_ref(ref)))
+        if not cands:
+            continue
+        any_cands = True
+        if labels:
+            for ref, pos in cands:
+                if pos is None:
+                    continue
+                for lp in labels:
+                    if lp is None:
+                        continue
+                    same_row = pos[1] == lp[1]
+                    dist = abs(pos[0] - lp[0]) + (
+                        0 if same_row else 1000 + abs(pos[1] - lp[1])
+                    )
+                    if best is None or dist < best[0]:
+                        best = (dist, name, ref)
+        else:
+            no_label_cands.extend((name, ref) for ref, _ in cands)
+
+    if best is not None:
+        return (best[1], best[2]), "ok"
+    if len(no_label_cands) == 1:
+        return no_label_cands[0], "ok"
+    if any_cands:
+        return None, "ambiguous"
+    return None, "not_found"
+
+
+def _set_cell_text(xml_text: str, ref: str, text: str) -> Tuple[str, bool]:
+    """Force one cell to an inline string with ``text`` (keeps its style)."""
+    cell_re = re.compile(
+        r'<c r="' + re.escape(ref) + r'"([^>]*?)(?:/>|>.*?</c>)', re.DOTALL
+    )
+
+    def repl(m: re.Match) -> str:
+        attrs = m.group(1)
+        sm = re.search(r'\bs="(\d+)"', attrs)
+        style = f' s="{sm.group(1)}"' if sm else ""
+        return (f'<c r="{ref}"{style} t="inlineStr"><is><t>'
+                f'{xml_escape(text)}</t></is></c>')
+
+    new, n = cell_re.subn(repl, xml_text, count=1)
+    return new, n > 0
+
+
+def replace_text_in_xlsx(
+    in_path, out_path, pairs,
+    case_sensitive=True, whole_word=False,
+    revision=None, update_drawing_rev=False,
+) -> dict:
+    """Find/replace (and optional revision bump) for an .xlsx workbook."""
+    in_path = Path(in_path)
+    out_path = Path(out_path)
+    if not zipfile.is_zipfile(in_path):
+        raise ValueError(f"'{in_path.name}' is not a valid .xlsx file.")
+
+    compiled = _compile_pairs(pairs, case_sensitive, whole_word)
+    by_part: dict[str, int] = {}
+    total = 0
+    rev_status = "na"
+    target = None
+    do_rev = bool(revision and update_drawing_rev)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(in_path, "r") as zin:
+        names = zin.namelist()
+        if do_rev:
+            shared = _read_shared_strings(zin)
+            target, rev_status = _find_rev_cell(zin, names, shared, revision[0])
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+                ln = item.filename.lower()
+                if ln.startswith("xl/") and ln.endswith(".xml"):
+                    try:
+                        text = data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        zout.writestr(item.filename, data)
+                        continue
+                    new_text = text
+                    if compiled:
+                        new_text, count = replace_in_xlsx_part(
+                            item.filename, new_text, compiled
+                        )
+                        if count:
+                            by_part[item.filename] = count
+                            total += count
+                    if target and item.filename == target[0]:
+                        new_text, changed = _set_cell_text(
+                            new_text, target[1], revision[1]
+                        )
+                        if changed:
+                            rev_status = "updated"
+                    if new_text != text:
+                        data = new_text.encode("utf-8")
+                zout.writestr(item.filename, data)
+
+    return {"total": total, "by_part": by_part, "rev_drawing": rev_status}
+
+
+# ---------------------------------------------------------------------------
+# Format detection + dispatch
+# ---------------------------------------------------------------------------
+
+def detect_format(path: str | os.PathLike) -> Optional[str]:
+    """Return 'vsdx', 'xlsx', or None, by extension then by archive contents."""
+    ext = Path(path).suffix.lower()
+    if ext == ".vsdx":
+        return "vsdx"
+    if ext == ".xlsx":
+        return "xlsx"
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            if any(n.startswith("visio/") for n in names):
+                return "vsdx"
+            if any(n.startswith("xl/") for n in names):
+                return "xlsx"
+    except (zipfile.BadZipFile, OSError):
+        pass
+    return None
+
+
+def replace_text_in_file(
+    in_path, out_path, pairs,
+    case_sensitive=True, whole_word=False,
+    revision=None, update_drawing_rev=False,
+) -> dict:
+    """Dispatch to the Visio or Excel engine based on the file type."""
+    fmt = detect_format(in_path)
+    if fmt == "vsdx":
+        return replace_text_in_vsdx(
+            in_path, out_path, pairs, case_sensitive, whole_word,
+            revision=revision, update_drawing_rev=update_drawing_rev,
+        )
+    if fmt == "xlsx":
+        return replace_text_in_xlsx(
+            in_path, out_path, pairs, case_sensitive, whole_word,
+            revision=revision, update_drawing_rev=update_drawing_rev,
+        )
+    raise ValueError(
+        f"Unsupported file type '{Path(in_path).suffix}'. "
+        "This tool handles Visio .vsdx and Excel .xlsx files."
+    )
+
+
 def find_libreoffice() -> str | None:
     """Locate the LibreOffice/soffice executable across platforms."""
     for name in ("soffice", "libreoffice"):
@@ -548,10 +842,12 @@ def _run_cli(argv: Sequence[str]) -> int:
         elif args.output:
             out_path = Path(args.output)
         else:
-            out_path = in_path.with_name(in_path.stem + "_edited.vsdx")
+            out_path = in_path.with_name(
+                in_path.stem + "_edited" + in_path.suffix
+            )
 
         try:
-            report = replace_text_in_vsdx(
+            report = replace_text_in_file(
                 in_path, out_path, pairs,
                 case_sensitive=args.case_sensitive, whole_word=args.whole_word,
                 revision=revision, update_drawing_rev=update_rev_text,
@@ -594,21 +890,22 @@ def launch_gui() -> int:
     class App:
         def __init__(self, root: "tk.Tk"):
             self.root = root
-            root.title(f"Visio Text Replacer  ->  PDF   [v{__version__}]")
-            root.geometry("780x760")
-            root.minsize(640, 640)
+            root.title(f"Visio / Excel Text Replacer   [v{__version__}]")
+            root.geometry("820x760")
+            root.minsize(680, 640)
 
             self.files: List[str] = []
-            # Each rule: {"frame","find","repl","combo"}; the combobox holds
-            # "All files" or a file label from self._label_to_path.
+            # Each rule: {frame, find, repl, menubtn, menu, all_var, file_vars}.
+            # all_var True => applies to every file; otherwise file_vars holds a
+            # BooleanVar per file path for multi-select targeting.
             self.rule_rows: List[dict] = []
-            self._file_labels: List[str] = []
-            self._label_to_path: dict = {}
 
             pad = {"padx": 10, "pady": 6}
 
             # --- 1. Files --------------------------------------------------
-            top = ttk.LabelFrame(root, text="1.  Visio files (.vsdx)")
+            top = ttk.LabelFrame(
+                root, text="1.  Files (.vsdx Visio / .xlsx Excel)"
+            )
             top.pack(fill="x", **pad)
 
             mode_row = ttk.Frame(top)
@@ -748,15 +1045,20 @@ def launch_gui() -> int:
                 self.log("Single-file mode: keeping only the first file.")
 
         def add_files(self):
-            ft = [("Visio drawing", "*.vsdx"), ("All files", "*.*")]
+            ft = [
+                ("Visio / Excel", "*.vsdx *.xlsx"),
+                ("Visio drawing", "*.vsdx"),
+                ("Excel workbook", "*.xlsx"),
+                ("All files", "*.*"),
+            ]
             if self.mode_var.get() == "single":
                 path = filedialog.askopenfilename(
-                    title="Choose a Visio file", filetypes=ft
+                    title="Choose a Visio or Excel file", filetypes=ft
                 )
                 self.files = [path] if path else self.files[:0]
             else:
                 paths = filedialog.askopenfilenames(
-                    title="Choose Visio files", filetypes=ft
+                    title="Choose Visio/Excel files", filetypes=ft
                 )
                 for p in paths:
                     if p not in self.files:
@@ -764,16 +1066,22 @@ def launch_gui() -> int:
             self.refresh_files_box()
 
         def add_folder(self):
-            folder = filedialog.askdirectory(title="Choose a folder of .vsdx files")
+            folder = filedialog.askdirectory(
+                title="Choose a folder of .vsdx / .xlsx files"
+            )
             if not folder:
                 return
-            found = sorted(str(p) for p in Path(folder).glob("*.vsdx"))
+            found = sorted(
+                str(p) for p in Path(folder).iterdir()
+                if p.suffix.lower() in (".vsdx", ".xlsx")
+            )
             for p in found:
                 if p not in self.files:
                     self.files.append(p)
             if not found:
                 messagebox.showinfo(
-                    "No files", "No .vsdx files were found in that folder."
+                    "No files",
+                    "No .vsdx or .xlsx files were found in that folder.",
                 )
             self.refresh_files_box()
 
@@ -790,38 +1098,62 @@ def launch_gui() -> int:
             self.files_box.delete(0, "end")
             for f in self.files:
                 self.files_box.insert("end", Path(f).name)
-            self._refresh_rule_combos()
+            self._refresh_rule_menus()
 
-        def _rebuild_file_labels(self):
-            """Build the dropdown labels (basenames; full path if duplicated)."""
-            counts: dict = {}
-            for f in self.files:
-                counts[Path(f).name] = counts.get(Path(f).name, 0) + 1
-            self._file_labels = []
-            self._label_to_path = {}
-            for f in self.files:
-                base = Path(f).name
-                label = f if counts[base] > 1 else base
-                self._file_labels.append(label)
-                self._label_to_path[label] = f
-
-        def _refresh_rule_combos(self):
-            """Refresh every rule's file dropdown to the current file list."""
-            self._rebuild_file_labels()
-            values = ["All files"] + self._file_labels
+        def _refresh_rule_menus(self):
+            """Rebuild every rule's multi-select file dropdown."""
             for rule in self.rule_rows:
-                combo = rule["combo"]
-                current = combo.get()
-                combo["values"] = values
-                if current not in values:
-                    combo.set("All files")
+                menu = rule["menu"]
+                menu.delete(0, "end")
+                fv = rule["file_vars"]
+                for p in list(fv):  # drop files no longer loaded
+                    if p not in self.files:
+                        del fv[p]
+                for f in self.files:
+                    fv.setdefault(f, tk.BooleanVar(value=False))
+                menu.add_checkbutton(
+                    label="All files", variable=rule["all_var"],
+                    command=lambda r=rule: self._on_all_toggle(r),
+                )
+                menu.add_separator()
+                for f in self.files:
+                    menu.add_checkbutton(
+                        label=Path(f).name, variable=fv[f],
+                        command=lambda r=rule, p=f: self._on_file_toggle(r, p),
+                    )
+                self._update_menu_label(rule)
+
+        def _on_all_toggle(self, rule):
+            if rule["all_var"].get():
+                for v in rule["file_vars"].values():
+                    v.set(False)
+            self._update_menu_label(rule)
+
+        def _on_file_toggle(self, rule, path):
+            if rule["file_vars"][path].get():
+                rule["all_var"].set(False)
+            self._update_menu_label(rule)
+
+        def _update_menu_label(self, rule):
+            if rule["all_var"].get():
+                rule["menubtn"]["text"] = "All files"
+                return
+            sel = [f for f in self.files
+                   if rule["file_vars"].get(f) and rule["file_vars"][f].get()]
+            if not sel:
+                rule["menubtn"]["text"] = "(no files)"
+            elif len(sel) == 1:
+                rule["menubtn"]["text"] = Path(sel[0]).name[:18]
+            else:
+                rule["menubtn"]["text"] = f"{len(sel)} files"
 
         # -- rule rows ------------------------------------------------------
         def _header_row(self):
             ttk.Label(
                 self.pairs_frame,
                 text="Type the text to find and its replacement, then pick "
-                "which file(s) the rule applies to.",
+                "which file(s) the rule applies to (the 'in' menu lets you "
+                "tick several).",
             ).pack(anchor="w", padx=4, pady=(0, 4))
 
         def add_pair(self):
@@ -834,15 +1166,21 @@ def launch_gui() -> int:
             repl_e = ttk.Entry(row, width=16)
             repl_e.pack(side="left", fill="x", expand=True, padx=(0, 8))
             ttk.Label(row, text="in:").pack(side="left", padx=(0, 2))
-            combo = ttk.Combobox(row, width=18, state="readonly")
-            combo.pack(side="left", padx=(0, 4))
-            rule = {"frame": row, "find": find_e, "repl": repl_e, "combo": combo}
+            menubtn = ttk.Menubutton(row, text="All files", width=16)
+            menu = tk.Menu(menubtn, tearoff=0)
+            menubtn["menu"] = menu
+            menubtn.pack(side="left", padx=(0, 4))
+            rule = {
+                "frame": row, "find": find_e, "repl": repl_e,
+                "menubtn": menubtn, "menu": menu,
+                "all_var": tk.BooleanVar(value=True), "file_vars": {},
+            }
             ttk.Button(
                 row, text="X", width=3,
                 command=lambda r=rule: self.remove_pair(r),
             ).pack(side="left", padx=4)
             self.rule_rows.append(rule)
-            self._refresh_rule_combos()
+            self._refresh_rule_menus()
 
         def remove_pair(self, rule):
             if len(self.rule_rows) <= 1:
@@ -875,9 +1213,12 @@ def launch_gui() -> int:
                 find = rule["find"].get()
                 if not find:
                     continue
-                sel = rule["combo"].get()
-                if sel == "All files" or self._label_to_path.get(sel) == path:
+                if rule["all_var"].get():
                     pairs.append((find, rule["repl"].get()))
+                else:
+                    v = rule["file_vars"].get(path)
+                    if v is not None and v.get():
+                        pairs.append((find, rule["repl"].get()))
             return pairs
 
         # -- run ------------------------------------------------------------
@@ -955,10 +1296,12 @@ def launch_gui() -> int:
                                 "file)"
                             )
                             continue
-                        out_vsdx = src.with_name(src.stem + "_edited.vsdx")
+                        out_vsdx = src.with_name(
+                            src.stem + "_edited" + src.suffix
+                        )
 
                     try:
-                        report = replace_text_in_vsdx(
+                        report = replace_text_in_file(
                             src, out_vsdx, pairs,
                             case_sensitive=case_sensitive,
                             whole_word=whole_word,
