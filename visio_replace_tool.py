@@ -34,6 +34,8 @@ Requirements:
 
 from __future__ import annotations
 
+__version__ = "1.4 (run-aware match + file dropdown)"
+
 import argparse
 import os
 import re
@@ -464,6 +466,9 @@ def _run_cli(argv: Sequence[str]) -> int:
         "per-file targeting).",
     )
     parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}",
+    )
+    parser.add_argument(
         "inputs", nargs="+", help="One or more input .vsdx files",
     )
     parser.add_argument(
@@ -589,7 +594,7 @@ def launch_gui() -> int:
     class App:
         def __init__(self, root: "tk.Tk"):
             self.root = root
-            root.title("Visio Text Replacer  ->  PDF")
+            root.title(f"Visio Text Replacer  ->  PDF   [v{__version__}]")
             root.geometry("780x760")
             root.minsize(640, 640)
 
@@ -716,6 +721,7 @@ def launch_gui() -> int:
 
             self.on_mode_change()
             self._sync_rev_options()
+            self._log(f"Visio Text Replacer  v{__version__}")
             if find_libreoffice() is None:
                 self._log(
                     "Note: LibreOffice was not found, so PDF export is "
