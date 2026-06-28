@@ -2346,11 +2346,16 @@ def launch_gui() -> int:
                 "a different value in one file than another. Edit any field, "
                 "then Save. Fields you leave unchanged are not touched. Use "
                 "Refresh after adding files or changing the Find value(s).",
-            ).pack(fill="x", padx=10, pady=8)
+            ).pack(side="top", fill="x", padx=10, pady=8)
 
-            canvas = tk.Canvas(win, highlightthickness=0,
+            bottom = ttk.Frame(win)
+            bottom.pack(side="bottom", fill="x", padx=10, pady=10)
+
+            body = ttk.Frame(win)
+            body.pack(side="top", fill="both", expand=True)
+            canvas = tk.Canvas(body, highlightthickness=0,
                                bg=self.palette["bg"])
-            sb = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
+            sb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
             inner = ttk.Frame(canvas)
             inner.bind(
                 "<Configure>",
@@ -2452,15 +2457,13 @@ def launch_gui() -> int:
                 )
                 win.destroy()
 
-            btns = ttk.Frame(win)
-            btns.pack(fill="x", padx=10, pady=10)
-            self._rbtn(btns, "Save edits", apply, kind="accent").pack(
+            self._rbtn(bottom, "Save edits", apply, kind="accent").pack(
                 side="right"
             )
-            self._rbtn(btns, "Cancel", win.destroy).pack(
+            self._rbtn(bottom, "Cancel", win.destroy).pack(
                 side="right", padx=6
             )
-            self._rbtn(btns, "🔄  Refresh", populate).pack(side="left")
+            self._rbtn(bottom, "Refresh lookup", populate).pack(side="left")
 
         # -- Change Log entry ----------------------------------------------
         def open_changelog_editor(self):
