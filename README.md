@@ -143,9 +143,10 @@ its number. Put the part number in a **Find** box, then click
 1. Finds the column headed **P/N** / **Part Number** (also `P/n`, etc.) in each
    loaded `.xlsx`, and locates every row whose part number matches a Find value.
 2. Lists each matched row **grouped by file** (e.g. *DOC11111…* then its rows,
-   *DOC22222…* then its rows), with that row's other fields under their headers
-   — **Manufacturer**, **Unit Cost**, **Description**, **Qty** (or Quantity),
-   **Notes** (or Comments) — pre-filled with the current values.
+   *DOC22222…* then its rows), labelling each match with the **sheet name** and
+   **row** it was found on, and showing that row's other fields under their
+   headers — **Manufacturer**, **Unit Cost**, **Description**, **Qty** (or
+   Quantity), **Notes** (or Comments) — pre-filled with the current values.
 3. Lets you edit each row **individually per file**, so the same part can get a
    different Qty (or any value) in one file than another. Click **Save edits**
    to stage them.

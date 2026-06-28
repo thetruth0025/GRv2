@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.9 (approved filenames, output folder, date-cell alignment)"
+__version__ = "2.9.1 (BOM lookup shows the sheet name)"
 
 import argparse
 import datetime
@@ -1459,7 +1459,9 @@ def _find_bom_header(cells):
 def excel_scan_rows(path, part_numbers, case_sensitive=False):
     """Find rows whose P/N matches; return per-row field data + cell refs.
 
-    Each match: {file, sheet, part, row, matched, fields:{field:(ref,value)}}.
+    Each match: {file, sheet, sheet_name, part, row, matched,
+    fields:{field:(ref,value)}}, where ``sheet`` is the worksheet part and
+    ``sheet_name`` is its display name (the tab label).
     """
     matches = []
     norm_targets = [(p, p if case_sensitive else p.lower()) for p in part_numbers
@@ -1467,6 +1469,7 @@ def excel_scan_rows(path, part_numbers, case_sensitive=False):
     with zipfile.ZipFile(path) as z:
         shared = _read_shared_strings(z)
         protected = _changelog_part(z)
+        sheet_names = _xlsx_sheet_display(z)
         for name in z.namelist():
             if not _WORKSHEET_RE.search(name.lower()) or name == protected:
                 continue
@@ -1501,6 +1504,7 @@ def excel_scan_rows(path, part_numbers, case_sensitive=False):
                     val = cell[1] if cell and cell[1] is not None else ""
                     fields[cf] = (ref, val)
                 matches.append({"file": str(path), "sheet": name,
+                                "sheet_name": sheet_names.get(name, ""),
                                 "part": pnval, "row": row, "matched": hit,
                                 "fields": fields})
     return matches
@@ -2414,7 +2418,8 @@ HELP_SECTIONS = [
         "Put a part number in a **Find** box, then click **Excel: find & edit "
         "rows...**.",
         "* It finds the **P/N** / **Part Number** column and lists every "
-        "matching row **grouped by file**.",
+        "matching row **grouped by file**, showing the **sheet name** and row "
+        "it was found on.",
         "* Edit **Manufacturer, Unit Cost, Description, Qty, Notes** for each "
         "row — you can set a different value per file.",
         "* **Refresh lookup** re-scans after you add files or change the Find "
@@ -3301,9 +3306,12 @@ def launch_gui() -> int:
                         foreground=self.palette["accent"],
                     ).pack(anchor="w", padx=6, pady=(10, 0))
                     for mt in matches:
+                        sheet_lbl = mt.get("sheet_name") or ""
+                        where = (f"sheet: {sheet_lbl}    (row {mt['row']})"
+                                 if sheet_lbl else f"row {mt['row']}")
                         lf = ttk.LabelFrame(
                             inner,
-                            text=f"P/N: {mt['part']}    (row {mt['row']})",
+                            text=f"P/N: {mt['part']}    ·    {where}",
                         )
                         lf.pack(fill="x", padx=12, pady=4)
                         cells = {}
