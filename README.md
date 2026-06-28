@@ -38,6 +38,13 @@ table, inline strings, and drawing text boxes. Geometry, styles, formatting, and
 fonts are left untouched, and a term is matched even when it's split across
 formatting runs.
 
+### Built-in help ("How to use")
+
+Every feature below is documented inside the app: click **❓ How to use** in the
+top-right of the window for a scrollable job aid covering each step. Click
+**🖨 Open printable / PDF version** in that window to open a clean, printable
+HTML copy you can save or print to PDF for training/reference.
+
 ---
 
 ## Requirements

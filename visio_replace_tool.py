@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.5 (per-file BOM editing + refresh)"
+__version__ = "2.6 (help / how-to)"
 
 import argparse
 import datetime
@@ -1727,6 +1727,175 @@ def _run_cli(argv: Sequence[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Job aid / help content (rendered in-app and as printable HTML)
+# ---------------------------------------------------------------------------
+#
+# Each section: (heading, [lines]). A line starting with "* " is a bullet;
+# **bold** marks emphasis.
+
+HELP_TITLE = "Visio / Excel Text Replacer — How to Use"
+
+HELP_SECTIONS = [
+    ("What this tool does", [
+        "It finds and replaces text across many Microsoft **Visio drawings "
+        "(.vsdx)** and **Excel workbooks (.xlsx)** at once, saves each result "
+        "as a new **next-revision** copy (your originals are never changed), "
+        "and writes a **change summary** you can hand to an approver.",
+        "It also has Excel helpers: edit a part's whole BOM row, append a "
+        "Change Log entry, and stamp the Author box with a name and today's "
+        "date.",
+    ]),
+    ("Before you start", [
+        "* Your originals are never modified — every result is a separate copy.",
+        "* PDF export needs **LibreOffice** installed (optional; off by "
+        "default). For correct Visio 'Sheet X of Y' numbers, export the PDF "
+        "from Visio instead.",
+        "* Only the modern **.vsdx** and **.xlsx** formats are supported. "
+        "Re-save old .vsd / .xls files in the new format first.",
+    ]),
+    ("Document types (from the file name)", [
+        "Files are classified by their name so rules can target a whole type:",
+        "* **BOM** — name contains DOCxxxxx (e.g. DOC00475)",
+        "* **System Drawing** — name contains DWGxxxxx",
+        "* **Cable Drawing** — name contains CBLxxxxx",
+        "Anything else is **Other**.",
+    ]),
+    ("Step 1 — Add your files", [
+        "* Pick **Single file**, or **Batch** to process several at once "
+        "(you can mix Visio and Excel).",
+        "* Use **Add files...** to pick several, or **Add folder...** to add "
+        "every .vsdx/.xlsx in a folder.",
+        "* **Remove selected** / **Clear** manage the list.",
+    ]),
+    ("Step 2 — Add find / replace rules", [
+        "* Each rule has a **Find:** box and a **Replace with:** box. Click "
+        "**+ Add another rule** for more.",
+        "* The **in:** dropdown chooses which document type(s) the rule "
+        "applies to — tick **All files**, or any of BOM / System Drawing / "
+        "Cable Drawing.",
+        "* Matching is case-insensitive unless you tick **Case sensitive**, "
+        "and it finds text even when Visio/Excel split it into pieces.",
+    ]),
+    ("Step 2 (Excel only) — Edit BOM rows", [
+        "Put a part number in a **Find** box, then click **Excel: find & edit "
+        "rows...**.",
+        "* It finds the **P/N** / **Part Number** column and lists every "
+        "matching row **grouped by file**.",
+        "* Edit **Manufacturer, Unit Cost, Description, Qty, Notes** for each "
+        "row — you can set a different value per file.",
+        "* **Refresh lookup** re-scans after you add files or change the Find "
+        "value; **Save edits** stages them. Numbers stay numeric.",
+    ]),
+    ("Step 2 (Excel only) — Change Log entry", [
+        "Click **Excel: add Change Log entry...** and fill in **Item, ECN #** "
+        "(or ECO#), **ERB Approval Date, Change Description, Change Author**.",
+        "* The row is appended to the **Change Log** sheet of every Excel "
+        "file, at the next free row (found via the ECN # column).",
+        "* The Change Log sheet is otherwise **protected** — Find/Replace and "
+        "BOM edits never touch it, for traceability.",
+    ]),
+    ("Step 2 (Excel only) — Author + date", [
+        "Click **Excel: set Author + date...** and type a name. On every "
+        "Excel sheet (except the Change Log), the name beside the **Author** "
+        "box is replaced and the date beside it is set to **today** (kept in "
+        "the same format).",
+    ]),
+    ("Step 3 — Options", [
+        "* **Case sensitive** / **Whole word only** — control matching.",
+        "* **Also export PDF (LibreOffice)** — off by default.",
+        "* **Save copy as next revision (REVx -> next)** — name each copy "
+        "as the next letter (REVA -> REVB) and bump the REV box inside the "
+        "file. On by default.",
+        "* **Generate change summary** — write a before/after review document.",
+    ]),
+    ("Run it", [
+        "Click **Replace & Convert**. Each file is saved next to the original "
+        "as its next-revision copy (or *_edited). The **Status** box reports "
+        "what happened per file, and the **change summary** opens when done.",
+    ]),
+    ("The change summary", [
+        "An HTML document grouped by document type. For each file it lists "
+        "every change as **Location / Before / After** — text replacements, "
+        "BOM edits, the Author name+date, the appended Change Log row, and the "
+        "revision bump. Print it to PDF for sign-off.",
+    ]),
+    ("Revisions", [
+        "* The revision letter is read from the **file name** (e.g. REVA).",
+        "* A->B->C ... major changes only. Already at REVZ? That file is "
+        "skipped with a warning. No REVx in the name? The copy is named "
+        "*_edited instead.",
+        "* The matching letter **inside** the file (next to a REV / Revision "
+        "label) is bumped too.",
+    ]),
+    ("Appearance", [
+        "* Use the **Dark / Light** button (top-right) to switch themes.",
+    ]),
+    ("Tips & troubleshooting", [
+        "* Nothing replaced? Check spelling, the **in:** type, and **Case "
+        "sensitive**.",
+        "* 'Sheet 0 of N' in a PDF is a LibreOffice limitation — export the "
+        "PDF from Visio for correct sheet numbers.",
+        "* The title bar shows the version; keep it up to date.",
+    ]),
+]
+
+
+def _help_lines_to_html(lines) -> str:
+    import html as _html
+    out, in_list = [], False
+
+    def fmt(s):
+        s = _html.escape(s)
+        while "**" in s:
+            s = s.replace("**", "<b>", 1)
+            if "**" in s:
+                s = s.replace("**", "</b>", 1)
+            else:
+                s += "</b>"
+        return s
+
+    for ln in lines:
+        if ln.startswith("* "):
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append(f"<li>{fmt(ln[2:])}</li>")
+        else:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append(f"<p>{fmt(ln)}</p>")
+    if in_list:
+        out.append("</ul>")
+    return "".join(out)
+
+
+def help_to_html(path) -> "Path":
+    """Write the job aid as a printable HTML document."""
+    import html as _html
+    path = Path(path)
+    body = [f"<h1>{_html.escape(HELP_TITLE)}</h1>"]
+    for heading, lines in HELP_SECTIONS:
+        body.append(f"<h2>{_html.escape(heading)}</h2>")
+        body.append(_help_lines_to_html(lines))
+    doc = f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<title>{_html.escape(HELP_TITLE)}</title><style>
+ body {{ font-family: Segoe UI, Arial, sans-serif; max-width: 820px;
+        margin: 30px auto; color:#1f2933; line-height:1.5; padding:0 16px; }}
+ h1 {{ color:#1d4ed8; }}
+ h2 {{ color:#243b53; margin-top:26px; border-bottom:2px solid #e2e8f0;
+       padding-bottom:4px; }}
+ ul {{ margin:6px 0 6px 4px; }} li {{ margin:3px 0; }}
+ b {{ color:#111; }}
+ @media print {{ h2 {{ page-break-inside: avoid; }} }}
+</style></head><body>{''.join(body)}
+<p style="color:#888;margin-top:30px;font-size:0.85em">Visio / Excel Text
+ Replacer v{__version__}</p></body></html>"""
+    path.write_text(doc, encoding="utf-8")
+    return path
+
+
+# ---------------------------------------------------------------------------
 # Tkinter GUI
 # ---------------------------------------------------------------------------
 
@@ -1856,8 +2025,15 @@ def launch_gui() -> int:
                 kind="normal", palette=self.palette, radius=14,
                 bg_key="banner", padx=12, pady=6,
             )
-            self.theme_btn.pack(side="right", padx=14, pady=8)
+            self.theme_btn.pack(side="right", padx=(0, 14), pady=8)
             self._rbuttons.append(self.theme_btn)
+            self.help_btn = RoundedButton(
+                self._banner, text="❓  How to use", command=self.show_help,
+                kind="accent", palette=self.palette, radius=14,
+                bg_key="banner", padx=12, pady=6,
+            )
+            self.help_btn.pack(side="right", padx=(0, 8), pady=8)
+            self._rbuttons.append(self.help_btn)
 
             self.files: List[str] = []
             # Each rule: {frame, find, repl, menubtn, menu, all_var, cat_vars}.
@@ -2770,6 +2946,84 @@ def launch_gui() -> int:
         def _reveal(self, path: str):
             """Open the folder containing the result, best-effort."""
             self._open_path(str(Path(path).parent))
+
+        def show_help(self):
+            """Open the in-app job aid: a scrollable How-to window."""
+            c = self.palette
+            win = tk.Toplevel(self.root)
+            win.title(HELP_TITLE)
+            win.geometry("780x620")
+            win.transient(self.root)
+            win.configure(bg=c["bg"])
+
+            bottom = ttk.Frame(win)
+            bottom.pack(side="bottom", fill="x", padx=12, pady=10)
+
+            txt = scrolledtext.ScrolledText(
+                win, wrap="word", relief="flat", borderwidth=0,
+                bg=c["card"], fg=c["text"], padx=18, pady=14,
+                insertbackground=c["text"], font=("Segoe UI", 10),
+                cursor="arrow", spacing1=2, spacing3=4,
+            )
+            txt.pack(side="top", fill="both", expand=True, padx=12, pady=(12, 0))
+
+            txt.tag_configure(
+                "h1", font=("Segoe UI", 16, "bold"), foreground=c["accent"],
+                spacing1=4, spacing3=10,
+            )
+            txt.tag_configure(
+                "h2", font=("Segoe UI", 12, "bold"), foreground=c["text"],
+                spacing1=14, spacing3=6,
+            )
+            txt.tag_configure("body", font=("Segoe UI", 10), lmargin1=4,
+                              lmargin2=4, spacing3=4)
+            txt.tag_configure("bullet", font=("Segoe UI", 10), lmargin1=18,
+                              lmargin2=32, spacing3=3)
+            txt.tag_configure("b", font=("Segoe UI", 10, "bold"))
+            txt.tag_configure("bb", font=("Segoe UI", 10, "bold"),
+                              foreground=c["accent"])
+
+            def emit(text, base):
+                # Render inline **bold** spans within a line.
+                bold = base == "bullet" and "bb" or "b"
+                parts = text.split("**")
+                for i, seg in enumerate(parts):
+                    if not seg:
+                        continue
+                    tags = (base, bold) if i % 2 else (base,)
+                    txt.insert("end", seg, tags)
+                txt.insert("end", "\n")
+
+            txt.insert("end", HELP_TITLE + "\n", ("h1",))
+            for heading, lines in HELP_SECTIONS:
+                txt.insert("end", heading + "\n", ("h2",))
+                for ln in lines:
+                    if ln.startswith("* "):
+                        txt.insert("end", "•  ", ("bullet",))
+                        emit(ln[2:], "bullet")
+                    else:
+                        emit(ln, "body")
+            txt.configure(state="disabled")
+
+            def open_printable():
+                import tempfile
+                tmp = Path(tempfile.gettempdir()) / "Visio_Tool_How_To.html"
+                try:
+                    help_to_html(tmp)
+                    self._open_path(str(tmp))
+                except Exception as exc:  # noqa: BLE001
+                    messagebox.showerror(
+                        "Help", f"Could not open printable version:\n{exc}",
+                        parent=win,
+                    )
+
+            self._rbtn(
+                bottom, "🖨  Open printable / PDF version", open_printable,
+                kind="normal", radius=12,
+            ).pack(side="left")
+            self._rbtn(
+                bottom, "Close", win.destroy, kind="accent", radius=12,
+            ).pack(side="right")
 
         def _open_path(self, path: str):
             """Open a file or folder with the OS default app, best-effort."""
