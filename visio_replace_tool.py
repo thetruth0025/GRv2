@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.8 (approvals: Visio by REV, Excel by EE/ME/Production)"
+__version__ = "2.9 (approved filenames, output folder, date-cell alignment)"
 
 import argparse
 import datetime
@@ -633,10 +633,6 @@ def _revtable_border_shape(header_cells, new_y, row_h, new_id):
     )
 
 
-# Visio attributes may use single OR double quotes; match either.
-_LEAD_FMT_RE = re.compile(r'\s*<(?:cp|pp|tp)\b[^>]*/>', re.IGNORECASE)
-
-
 def _leaf_shape_span(page_xml, sid):
     """Raw [start, end) of a leaf <Shape ID="sid">...</Shape> (or self-closing).
     Attribute quoting (single or double) is handled."""
@@ -653,19 +649,33 @@ def _leaf_shape_span(page_xml, sid):
 
 
 def _set_shape_text_raw(raw: str, text: str) -> str:
-    """Set a leaf shape's text, keeping the leading Visio formatting markers
-    (<cp/>, <pp/>, <tp/>) so the new text inherits the cell's font/size."""
+    """Set a leaf shape's text in place.
+
+    Visio stores cell text as formatting markers (<cp/>, <pp/>, <tp/>, <fld>)
+    interspersed with literal characters, and the last run often ends with a
+    trailing <cp/> marker and a "\\r\\n". We replace ONLY the first non-blank
+    literal run, keeping every marker and the surrounding whitespace -- so the
+    new text keeps the cell's font, size AND vertical alignment (dropping the
+    trailing run/newline shifts a single-line cell up or down).
+    """
     esc = xml_escape(text)
 
     def repl(m):
-        inner, i, prefix = m.group(2), 0, ""
-        while True:
-            tm = _LEAD_FMT_RE.match(inner, i)
-            if not tm:
+        inner = m.group(2)
+        # Split into tags (odd indices) and literal text (even indices).
+        parts = re.split(r'(<[^>]*>)', inner)
+        done = False
+        for i in range(0, len(parts), 2):
+            seg = parts[i]
+            if seg.strip():
+                lead = seg[:len(seg) - len(seg.lstrip())]
+                trail = seg[len(seg.rstrip()):]
+                parts[i] = lead + esc + trail
+                done = True
                 break
-            prefix += inner[i:tm.end()]
-            i = tm.end()
-        return m.group(1) + prefix + esc + m.group(3)
+        if not done:  # blank cell: put the text after the formatting markers
+            parts[-1] = esc + parts[-1]
+        return m.group(1) + "".join(parts) + m.group(3)
 
     if _TEXT_BLOCK_RE.search(raw):
         return _TEXT_BLOCK_RE.sub(repl, raw, count=1)
@@ -2452,19 +2462,27 @@ HELP_SECTIONS = [
         "* The dialog lists the **revision letters found** in the table.",
         "* On run, your name is written into the **Approved** column of the row "
         "with that REV letter, in every loaded Visio file's revision table.",
+        "* An approval **does not bump the revision**; the copy is named "
+        "**<name>_approved_<today's date>** so it's clearly a sign-off.",
     ]),
     ("Step 3 — Options", [
         "* **Case sensitive** / **Whole word only** — control matching.",
         "* **Also export PDF (LibreOffice)** — off by default.",
         "* **Save copy as next revision (REVx -> next)** — name each copy "
         "as the next letter (REVA -> REVB) and bump the REV box inside the "
-        "file. On by default.",
+        "file. On by default. (Ignored for a file you're approving — those are "
+        "named *_approved_<date> and keep their revision.)",
         "* **Generate change summary** — write a before/after review document.",
+        "* **Output folder** — click **Choose folder...** to send every "
+        "finished file (and the change summary) to one folder; **Use source "
+        "folder** puts each copy next to its original (the default).",
     ]),
     ("Run it", [
-        "Click **Replace & Convert**. Each file is saved next to the original "
-        "as its next-revision copy (or *_edited). The **Status** box reports "
-        "what happened per file, and the **change summary** opens when done.",
+        "Click **Replace & Convert**. Each file is saved as its next-revision "
+        "copy (or *_edited, or *_approved_<date> for an approval) — next to the "
+        "original, or in your chosen **output folder**. The **Status** box "
+        "reports what happened per file, and the **change summary** opens when "
+        "done.",
     ]),
     ("The change summary", [
         "An HTML document grouped by document type. For each file it lists "
@@ -2711,6 +2729,8 @@ def launch_gui() -> int:
             self.visio_approval: dict = {}
             # Staged Excel approval: {"discipline": EE/ME/Production, "name":..}.
             self.excel_approval: dict = {}
+            # Optional folder for all finished files ("" = beside each source).
+            self.out_dir: str = ""
 
             pad = {"padx": 10, "pady": 6}
 
@@ -2859,6 +2879,24 @@ def launch_gui() -> int:
                 variable=self.summary_var,
             ).pack(side="left", padx=8, pady=(0, 6))
 
+            # Output folder: where all finished files (and the summary) land.
+            opt_row4 = ttk.Frame(opts)
+            opt_row4.pack(fill="x", pady=(2, 6))
+            ttk.Label(opt_row4, text="Output folder:").pack(
+                side="left", padx=(8, 4)
+            )
+            self._rbtn(
+                opt_row4, "Choose folder...", self._choose_out_dir, radius=10,
+            ).pack(side="left")
+            self._rbtn(
+                opt_row4, "Use source folder", self._clear_out_dir, radius=10,
+            ).pack(side="left", padx=6)
+            self.out_dir_lbl = ttk.Label(
+                opt_row4, text="(same folder as each source file)",
+                foreground=self.palette["muted"],
+            )
+            self.out_dir_lbl.pack(side="left", padx=6)
+
             # --- Run -------------------------------------------------------
             run = ttk.Frame(root)
             run.pack(fill="x", **pad)
@@ -2959,6 +2997,7 @@ def launch_gui() -> int:
                 bg=c["field"], fg=c["field_fg"], selectbackground=c["sel"]
             )
             self.log_box.configure(bg=c["field"], fg=c["field_fg"])
+            self.out_dir_lbl.configure(foreground=c["muted"])
             for b in self._rbuttons:
                 b.set_palette(c)
             self._refresh_rule_menus()  # recolors the dropdown menus
@@ -3633,6 +3672,21 @@ def launch_gui() -> int:
             self._rbtn(btns, "Save", apply, kind="green").pack(side="right")
             self._rbtn(btns, "Cancel", win.destroy).pack(side="right", padx=6)
 
+        # -- output folder --------------------------------------------------
+        def _choose_out_dir(self):
+            d = filedialog.askdirectory(
+                title="Choose a folder for all finished files",
+                initialdir=self.out_dir or None,
+            )
+            if d:
+                self.out_dir = d
+                self.out_dir_lbl.configure(text=d)
+                self.log(f"Output folder set to: {d}")
+
+        def _clear_out_dir(self):
+            self.out_dir = ""
+            self.out_dir_lbl.configure(text="(same folder as each source file)")
+
         # -- run ------------------------------------------------------------
         def run(self):
             if not self.files:
@@ -3661,6 +3715,16 @@ def launch_gui() -> int:
                 )
                 return
 
+            if self.out_dir:
+                try:
+                    Path(self.out_dir).mkdir(parents=True, exist_ok=True)
+                except OSError as exc:
+                    messagebox.showerror(
+                        "Output folder",
+                        f"Couldn't use that output folder:\n{exc}",
+                    )
+                    return
+
             self._set_busy(True)
             threading.Thread(
                 target=self._worker,
@@ -3672,7 +3736,7 @@ def launch_gui() -> int:
                     dict(self.bom_edits), dict(self.changelog_entry),
                     self.author_name, self.summary_var.get(),
                     dict(self.visio_rev_entry), dict(self.visio_approval),
-                    dict(self.excel_approval),
+                    dict(self.excel_approval), self.out_dir,
                 ),
                 daemon=True,
             ).start()
@@ -3680,7 +3744,7 @@ def launch_gui() -> int:
         def _worker(self, files, pairs_by_file, case_sensitive, whole_word,
                     make_pdf, bump_rev, update_rev_text, bom_edits,
                     changelog_entry, author_name, make_summary,
-                    visio_rev_entry, visio_approval, excel_approval):
+                    visio_rev_entry, visio_approval, excel_approval, out_dir):
             total_repl = 0
             done = 0
             errors = 0
@@ -3697,6 +3761,7 @@ def launch_gui() -> int:
                     # Log append, the Author name/date, and an EE/ME/Production
                     # approval name+date (all by cell ref).
                     cell_edits = None
+                    excel_approved = False
                     if ((bom_edits or changelog_entry or author_name
                          or excel_approval) and detect_format(f) == "xlsx"):
                         merged: dict = {}
@@ -3715,10 +3780,13 @@ def launch_gui() -> int:
                                 ).items():
                                     merged.setdefault(part, {}).update(d)
                             if excel_approval:
-                                for part, d in build_approval_edits(
+                                ae = build_approval_edits(
                                     f, excel_approval.get("discipline"),
                                     excel_approval.get("name"),
-                                ).items():
+                                )
+                                if ae:
+                                    excel_approved = True
+                                for part, d in ae.items():
                                     merged.setdefault(part, {}).update(d)
                         except Exception:  # noqa: BLE001
                             merged = {}
@@ -3731,10 +3799,18 @@ def launch_gui() -> int:
                     appr = visio_approval if (visio_approval
                                               and is_vsdx) else None
                     has_edits = bool(cell_edits or rev_entry or appr)
+                    # An approval signs off an existing revision -- it must NOT
+                    # bump the revision; the copy is named "*_approved_<date>".
+                    is_approving = bool(appr) or excel_approved
 
                     # Decide the copy's name and whether to bump the revision.
                     revision = None
-                    if bump_rev:
+                    if is_approving:
+                        stamp = datetime.date.today().strftime("%Y-%m-%d")
+                        out_vsdx = src.with_name(
+                            f"{src.stem}_approved_{stamp}{src.suffix}"
+                        )
+                    elif bump_rev:
                         out_vsdx, old, new, status = revision_output_path(src)
                         if status == "at_z":
                             self.log(
@@ -3760,6 +3836,10 @@ def launch_gui() -> int:
                         out_vsdx = src.with_name(
                             src.stem + "_edited" + src.suffix
                         )
+
+                    # Redirect every output to the chosen folder, if any.
+                    if out_dir:
+                        out_vsdx = Path(out_dir) / out_vsdx.name
 
                     try:
                         report = replace_text_in_file(
@@ -3867,7 +3947,8 @@ def launch_gui() -> int:
                 summary_path = None
                 if make_summary and summary_records:
                     try:
-                        folder = (Path(str(last_output)).parent
+                        folder = (Path(out_dir) if out_dir
+                                  else Path(str(last_output)).parent
                                   if last_output else Path(files[0]).parent)
                         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                         summary_path = generate_change_summary(

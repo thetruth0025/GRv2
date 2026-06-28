@@ -230,6 +230,18 @@ Discipline labels are matched flexibly (e.g. `EE`/`Electrical`, `ME`/
 `Mechanical`, `Production`/`Prod`/`MFG`). A file with no matching label is left
 unchanged.
 
+An approval is a **sign-off, not a revision change**, so it does **not** bump
+the revision letter even if *Save copy as next revision* is ticked. The approved
+copy is named **`<name>_approved_<today's date>`** (e.g.
+`CBL00011_REVD_…_approved_2026-06-28.vsdx`).
+
+### Output folder
+
+By default each finished copy is written **next to its original**. To collect
+everything in one place, use **Output folder → Choose folder...** in the Options
+section — every result (and the change summary) is written there instead.
+**Use source folder** switches back to the default.
+
 ### Change summary (for approval review)
 
 With **Generate change summary** ticked (on by default), the tool writes a
