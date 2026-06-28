@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.0 (Author box + robust Excel parsing)"
+__version__ = "2.1 (change summary report)"
 
 import argparse
 import datetime
@@ -1174,6 +1174,308 @@ def replace_text_in_file(
     )
 
 
+# ---------------------------------------------------------------------------
+# Change summary: diff the original vs the edited copy and report before/after
+# ---------------------------------------------------------------------------
+
+def _xlsx_sheet_display(zin: zipfile.ZipFile) -> dict:
+    """{worksheet_part: display sheet name}."""
+    try:
+        wb = zin.read("xl/workbook.xml").decode("utf-8", "replace")
+        rels = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8", "replace")
+    except KeyError:
+        return {}
+    rid_target = {}
+    for rel in re.finditer(r"<Relationship\b[^>]*>", rels):
+        idm = re.search(r'Id="([^"]+)"', rel.group(0))
+        tm = re.search(r'Target="([^"]+)"', rel.group(0))
+        if idm and tm:
+            rid_target[idm.group(1)] = tm.group(1)
+    out = {}
+    for sh in re.finditer(r"<sheet\b[^>]*>", wb):
+        nm = re.search(r'name="([^"]+)"', sh.group(0))
+        rm = re.search(r'r:id="([^"]+)"', sh.group(0))
+        if nm and rm and rm.group(1) in rid_target:
+            part = posixpath.normpath(
+                posixpath.join("xl", rid_target[rm.group(1)].lstrip("/"))
+            )
+            out[part] = _xml_unescape(nm.group(1))
+    return out
+
+
+def _label_row(cells) -> dict:
+    """Best-effort {col: header text} from the most header-like top row."""
+    rows: dict = {}
+    for (col, row), (ref, txt) in cells.items():
+        rows.setdefault(row, {})[col] = txt
+    best_row, best_score = None, 0
+    for row, colvals in rows.items():
+        if row > 10:
+            continue
+        score = sum(
+            1 for txt in colvals.values()
+            if txt and (_canonical_field(txt) or _canonical_changelog_field(txt))
+        )
+        if score > best_score:
+            best_score, best_row = score, row
+    if best_row is None or best_score < 1:
+        return {}
+    return {col: txt for col, txt in rows[best_row].items() if txt}
+
+
+_BUILTIN_DATE_FMT = (set(range(14, 23)) | set(range(45, 48)) | {27, 28, 29,
+                     30, 31, 32, 33, 34, 35, 36, 50, 51, 52, 53, 54, 55, 56,
+                     57, 58})
+
+
+def _xlsx_date_styles(zin: zipfile.ZipFile) -> set:
+    """Style indices (cellXfs) that render as a date."""
+    try:
+        styles = zin.read("xl/styles.xml").decode("utf-8", "replace")
+    except KeyError:
+        return set()
+    date_fmt_ids = set(_BUILTIN_DATE_FMT)
+    for m in re.finditer(r'<numFmt numFmtId="(\d+)" formatCode="([^"]*)"',
+                         styles):
+        core = re.sub(r'"[^"]*"', "", m.group(2).lower())
+        if re.search(r"[dmy]", core) and not re.search(r"[#0]",
+                                                       core.replace("e", "")):
+            date_fmt_ids.add(int(m.group(1)))
+    out = set()
+    cx = re.search(r"<cellXfs[^>]*>(.*?)</cellXfs>", styles, re.DOTALL)
+    if cx:
+        for i, xf in enumerate(
+            re.findall(r"<xf\b[^>]*?(?:/>|>.*?</xf>)", cx.group(1), re.DOTALL)
+        ):
+            fm = re.search(r'numFmtId="(\d+)"', xf)
+            if fm and int(fm.group(1)) in date_fmt_ids:
+                out.add(i)
+    return out
+
+
+def _sheet_cell_styles(sheet_xml: str) -> dict:
+    """{cell_ref: style index} for cells that declare a style."""
+    out = {}
+    for m in re.finditer(r'<c r="([A-Z]+\d+)"[^>]*?\bs="(\d+)"', sheet_xml):
+        out[m.group(1)] = int(m.group(2))
+    return out
+
+
+def _serial_to_date(value: str) -> str:
+    """Excel date serial -> 'YYYY-MM-DD' (passes other text through)."""
+    try:
+        n = float(value)
+    except (TypeError, ValueError):
+        return value
+    try:
+        d = datetime.date(1899, 12, 30) + datetime.timedelta(days=int(n))
+        return d.strftime("%Y-%m-%d")
+    except (OverflowError, ValueError):
+        return value
+
+
+def _cell_label(rows_out: dict, col: int, row: int, headers: dict) -> str:
+    """Label a cell: the 'Key:' to its left for a key/value row (e.g. Author:,
+    Revision:), else the column header for a table row."""
+    rowcells = sorted(
+        (c, txt) for c, txt in rows_out.get(row, {}).items()
+        if txt and str(txt).strip()
+    )
+    if rowcells and str(rowcells[0][1]).rstrip().endswith(":"):
+        label = str(rowcells[0][1]).rstrip().rstrip(":")
+        for c, txt in rowcells:
+            if c < col and str(txt).rstrip().endswith(":"):
+                label = str(txt).rstrip().rstrip(":")
+        return label.strip()
+    return headers.get(col, "")
+
+
+def _diff_xlsx(in_path, out_path) -> list:
+    changes = []
+    with zipfile.ZipFile(in_path) as zi, zipfile.ZipFile(out_path) as zo:
+        shi, sho = _read_shared_strings(zi), _read_shared_strings(zo)
+        names = _xlsx_sheet_display(zi)
+        date_styles_i = _xlsx_date_styles(zi)
+        date_styles_o = _xlsx_date_styles(zo)
+        for part, sheet_name in names.items():
+            try:
+                xml_i = zi.read(part).decode("utf-8", "replace")
+                xml_o = zo.read(part).decode("utf-8", "replace")
+            except KeyError:
+                continue
+            ci = _read_sheet_cells(xml_i, shi)
+            co = _read_sheet_cells(xml_o, sho)
+            style_i = _sheet_cell_styles(xml_i)
+            style_o = _sheet_cell_styles(xml_o)
+            headers = _label_row(co or ci)
+            rows_out: dict = {}
+            for (col, row), (ref, txt) in co.items():
+                rows_out.setdefault(row, {})[col] = txt
+            for key in sorted(set(ci) | set(co), key=lambda k: (k[1], k[0])):
+                bef = (ci.get(key) or (None, None))[1] or ""
+                aft = (co.get(key) or (None, None))[1] or ""
+                if str(bef) == str(aft):
+                    continue
+                ref = (co.get(key) or ci.get(key))[0]
+                is_date = (style_o.get(ref) in date_styles_o
+                           or style_i.get(ref) in date_styles_i)
+                if is_date:
+                    bef, aft = _serial_to_date(str(bef)), _serial_to_date(str(aft))
+                changes.append({
+                    "location": f"{sheet_name}!{ref}",
+                    "field": _cell_label(rows_out, key[0], key[1], headers),
+                    "before": str(bef), "after": str(aft),
+                })
+    return changes
+
+
+def _visio_page_names(zin: zipfile.ZipFile) -> dict:
+    """{page part: display page name}, best effort."""
+    try:
+        pages = zin.read("visio/pages/pages.xml").decode("utf-8", "replace")
+        rels = zin.read(
+            "visio/pages/_rels/pages.xml.rels"
+        ).decode("utf-8", "replace")
+    except KeyError:
+        return {}
+    rid_target = {}
+    for rel in re.finditer(r"<Relationship\b[^>]*>", rels):
+        idm = re.search(r'Id="([^"]+)"', rel.group(0))
+        tm = re.search(r'Target="([^"]+)"', rel.group(0))
+        if idm and tm:
+            rid_target[idm.group(1)] = tm.group(1)
+    out = {}
+    for pm in re.finditer(r"<Page\b[^>]*>.*?</Page>|<Page\b[^>]*/>", pages,
+                          re.DOTALL):
+        block = pm.group(0)
+        nm = re.search(r'\bName="([^"]+)"', block)
+        rm = re.search(r'r:id="([^"]+)"', block)
+        if nm and rm and rm.group(1) in rid_target:
+            part = posixpath.normpath(
+                posixpath.join("visio/pages", rid_target[rm.group(1)].lstrip("/"))
+            )
+            out[part] = _xml_unescape(nm.group(1))
+    return out
+
+
+def _visio_text_blocks(xml_text: str) -> list:
+    """Visible text of each <Text> block, in order."""
+    out = []
+    for m in _TEXT_BLOCK_RE.finditer(xml_text):
+        visible = _TAG_SPLIT_RE.sub("", m.group(2))
+        out.append(_xml_unescape(visible).strip())
+    return out
+
+
+def _diff_vsdx(in_path, out_path) -> list:
+    changes = []
+    with zipfile.ZipFile(in_path) as zi, zipfile.ZipFile(out_path) as zo:
+        page_names = _visio_page_names(zi)
+        parts = [n for n in zi.namelist()
+                 if re.match(r"visio/pages/page\d+\.xml$", n)]
+        for part in sorted(parts,
+                           key=lambda n: int(re.search(r"(\d+)", n).group())):
+            try:
+                bi = _visio_text_blocks(zi.read(part).decode("utf-8", "replace"))
+                bo = _visio_text_blocks(zo.read(part).decode("utf-8", "replace"))
+            except KeyError:
+                continue
+            label = page_names.get(part) or Path(part).stem
+            for bef, aft in zip(bi, bo):
+                if bef != aft and (bef or aft):
+                    changes.append({
+                        "location": label, "field": "",
+                        "before": bef, "after": aft,
+                    })
+    return changes
+
+
+def diff_files(in_path, out_path) -> list:
+    """Return a list of {location, field, before, after} changes."""
+    fmt = detect_format(in_path)
+    try:
+        if fmt == "xlsx":
+            return _diff_xlsx(in_path, out_path)
+        if fmt == "vsdx":
+            return _diff_vsdx(in_path, out_path)
+    except Exception:  # noqa: BLE001 - a summary should never block the run
+        return []
+    return []
+
+
+def generate_change_summary(records, summary_path, run_dt=None) -> Path:
+    """Write an HTML before/after change-review document.
+
+    records: list of {input, output, revision, changes:[...]}.
+    """
+    import html as _html
+
+    run_dt = run_dt or datetime.datetime.now()
+    summary_path = Path(summary_path)
+    total = sum(len(r["changes"]) for r in records)
+
+    rows_html = []
+    for r in records:
+        rev = ""
+        if r.get("revision"):
+            rev = (f' &nbsp;|&nbsp; revision <b>{_html.escape(r["revision"][0])}'
+                   f' &rarr; {_html.escape(r["revision"][1])}</b>')
+        head = (f'<h2>{_html.escape(r["input"])}</h2>'
+                f'<div class="sub">saved as <b>{_html.escape(r["output"])}</b>'
+                f'{rev}</div>')
+        if not r["changes"]:
+            rows_html.append(head + '<p class="none">No content changes '
+                             '(copied as-is).</p>')
+            continue
+        trs = []
+        for c in r["changes"]:
+            loc = _html.escape(c["location"])
+            if c.get("field"):
+                loc += (f'<br><span class="field">'
+                        f'{_html.escape(c["field"])}</span>')
+            trs.append(
+                f'<tr><td class="loc">{loc}</td>'
+                f'<td class="before">{_html.escape(c["before"]) or "&nbsp;"}</td>'
+                f'<td class="after">{_html.escape(c["after"]) or "&nbsp;"}</td></tr>'
+            )
+        rows_html.append(
+            head
+            + '<table><thead><tr><th>Location</th><th>Before</th>'
+            '<th>After</th></tr></thead><tbody>'
+            + "".join(trs) + '</tbody></table>'
+        )
+
+    doc = f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Change Summary</title>
+<style>
+ body {{ font-family: Segoe UI, Arial, sans-serif; margin: 28px; color:#1a1a1a; }}
+ h1 {{ margin-bottom: 4px; }}
+ .meta {{ color:#555; margin-bottom: 22px; }}
+ h2 {{ margin: 26px 0 2px; padding-top: 14px; border-top: 2px solid #ddd; }}
+ .sub {{ color:#555; margin-bottom: 8px; font-size: 0.95em; }}
+ table {{ border-collapse: collapse; width: 100%; margin: 8px 0 4px; }}
+ th, td {{ border: 1px solid #ccc; padding: 6px 9px; text-align: left;
+          vertical-align: top; font-size: 0.92em; }}
+ th {{ background:#f3f3f3; }}
+ td.loc {{ white-space: nowrap; font-family: Consolas, monospace; }}
+ .field {{ color:#0066aa; font-family: Segoe UI, Arial; font-size:0.85em; }}
+ td.before {{ background:#fff3f3; }}
+ td.after {{ background:#f1fbf1; }}
+ .none {{ color:#777; font-style: italic; }}
+ @media print {{ h2 {{ page-break-before: auto; }} }}
+</style></head><body>
+<h1>Change Summary</h1>
+<div class="meta">Generated {_html.escape(run_dt.strftime("%Y-%m-%d %H:%M"))}
+ &nbsp;|&nbsp; {len(records)} file(s) &nbsp;|&nbsp; {total} change(s).
+ Before/after values for approver review.</div>
+{''.join(rows_html)}
+</body></html>"""
+
+    summary_path.write_text(doc, encoding="utf-8")
+    return summary_path
+
+
 def find_libreoffice() -> str | None:
     """Locate the LibreOffice/soffice executable across platforms."""
     for name in ("soffice", "libreoffice"):
@@ -1497,6 +1799,7 @@ def launch_gui() -> int:
             self.pdf_var = tk.BooleanVar(value=False)
             self.rev_var = tk.BooleanVar(value=True)
             self.revtext_var = tk.BooleanVar(value=True)
+            self.summary_var = tk.BooleanVar(value=True)
 
             opt_row1 = ttk.Frame(opts)
             opt_row1.pack(fill="x")
@@ -1523,6 +1826,11 @@ def launch_gui() -> int:
                 variable=self.revtext_var,
             )
             self.revtext_chk.pack(side="left", padx=8, pady=6)
+            ttk.Checkbutton(
+                opt_row2,
+                text="Generate change summary (for approval review)",
+                variable=self.summary_var,
+            ).pack(side="left", padx=8, pady=6)
 
             # --- Run -------------------------------------------------------
             run = ttk.Frame(root)
@@ -2005,18 +2313,19 @@ def launch_gui() -> int:
                     self.case_var.get(), self.word_var.get(),
                     self.pdf_var.get(), bump_rev, self.revtext_var.get(),
                     dict(self.bom_edits), dict(self.changelog_entry),
-                    self.author_name,
+                    self.author_name, self.summary_var.get(),
                 ),
                 daemon=True,
             ).start()
 
         def _worker(self, files, pairs_by_file, case_sensitive, whole_word,
                     make_pdf, bump_rev, update_rev_text, bom_edits,
-                    changelog_entry, author_name):
+                    changelog_entry, author_name, make_summary):
             total_repl = 0
             done = 0
             errors = 0
             last_output = None
+            summary_records = []
             try:
                 for f in files:
                     src = Path(f)
@@ -2120,6 +2429,13 @@ def launch_gui() -> int:
                                 self.log(note)
                         last_output = out_vsdx
 
+                        if make_summary:
+                            summary_records.append({
+                                "input": src.name, "output": out_vsdx.name,
+                                "revision": revision,
+                                "changes": diff_files(src, out_vsdx),
+                            })
+
                         if make_pdf:
                             pdf_path = convert_to_pdf(out_vsdx, out_vsdx.parent)
                             self.log(f"    PDF -> {pdf_path.name}")
@@ -2136,9 +2452,26 @@ def launch_gui() -> int:
                     + "."
                 )
                 self.log(summary)
+
+                summary_path = None
+                if make_summary and summary_records:
+                    try:
+                        folder = (Path(str(last_output)).parent
+                                  if last_output else Path(files[0]).parent)
+                        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        summary_path = generate_change_summary(
+                            summary_records,
+                            folder / f"Change_Summary_{stamp}.html",
+                        )
+                        self.log(f"Change summary -> {summary_path.name}")
+                    except Exception as exc:  # noqa: BLE001
+                        self.log(f"(could not write change summary: {exc})")
+
                 self.root.after(
                     0, lambda: messagebox.showinfo("Finished", summary)
                 )
+                if summary_path is not None:
+                    self._open_path(str(summary_path))
                 if last_output is not None:
                     self._reveal(str(last_output))
             except Exception as exc:  # noqa: BLE001 - never kill the thread
@@ -2151,14 +2484,17 @@ def launch_gui() -> int:
 
         def _reveal(self, path: str):
             """Open the folder containing the result, best-effort."""
-            folder = str(Path(path).parent)
+            self._open_path(str(Path(path).parent))
+
+        def _open_path(self, path: str):
+            """Open a file or folder with the OS default app, best-effort."""
             try:
                 if sys.platform.startswith("win"):
-                    os.startfile(folder)  # type: ignore[attr-defined]
+                    os.startfile(path)  # type: ignore[attr-defined]
                 elif sys.platform == "darwin":
-                    subprocess.Popen(["open", folder])
+                    subprocess.Popen(["open", path])
                 else:
-                    subprocess.Popen(["xdg-open", folder])
+                    subprocess.Popen(["xdg-open", path])
             except Exception:
                 pass
 

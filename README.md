@@ -152,6 +152,17 @@ name beside the **Author** box is set to your value, and the date beside it is
 stamped with **today's date** — kept in the **same format** as the date that was
 there (an Excel date serial stays a properly-formatted date).
 
+### Change summary (for approval review)
+
+With **Generate change summary** ticked (on by default), the tool writes a
+**`Change_Summary_<timestamp>.html`** document next to the edited files and opens
+it. For every file it lists each change as **Location · Before · After** —
+including text replacements, BOM row edits, the Author name/date, the appended
+Change Log row, and the revision bump. Cells are labelled by their column or
+title-block label (e.g. *P/N*, *Unit Cost*, *Author*, *Revision*), and dates are
+shown as real dates. An approver can review every change in one document without
+opening each file, and can print it to PDF.
+
 ---
 
 ## Command-line use (optional / scriptable)
