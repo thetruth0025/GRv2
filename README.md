@@ -24,8 +24,9 @@ as the **next revision letter**, read from the file name:
 - It also updates the revision **inside the file**: the single-letter box/cell
   (e.g. `A`) that sits next to a `REV`/`Revision` label is bumped to match. In
   Visio that's the text box nearest the `REV` label on the front page; in Excel
-  it's the cell next to the `REV` cell. Stray single letters elsewhere (grid/zone
-  labels) are left alone.
+  it's the cell next to the `REV` cell **on every worksheet** that carries the
+  title block (not just the first). The protected **Change Log** sheet is left
+  alone, and stray single letters elsewhere (grid/zone labels) are too.
 - Already at `REVZ`? That file is skipped with a warning (no next letter).
 - No `REVx` in the file name? The copy falls back to `*_edited`.
 

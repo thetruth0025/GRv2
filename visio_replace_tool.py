@@ -603,12 +603,17 @@ def _replace_cells_in_sheet(sheet_xml, shared, plain_compiled):
     return _XLSX_CELL.sub(repl_cell, sheet_xml), count
 
 
-def _find_rev_cell(zin, names, shared, old_letter):
-    """Find the worksheet cell holding the revision letter (next to a REV
-    label). Returns ((part_name, cell_ref), status)."""
+def _find_rev_cells(zin, names, shared, old_letter):
+    """Find the revision-letter cell on EVERY worksheet that has one (the box
+    next to a REV/Revision label in that sheet's title block).
+
+    Returns (targets, status) where ``targets`` is a list of (part_name,
+    cell_ref) -- one per sheet. A title block is repeated on each sheet, so the
+    revision letter must be bumped on all of them, not just the first.
+    """
     old_u = old_letter.upper()
-    best = None  # (score, part, ref)
-    no_label_cands = []
+    targets = []           # (part, ref) chosen via a REV label on that sheet
+    no_label_cands = []    # (part, ref) candidates on sheets with no REV label
     any_cands = False
     protected = _changelog_part(zin)
     for name in names:
@@ -630,6 +635,8 @@ def _find_rev_cell(zin, names, shared, old_letter):
             continue
         any_cands = True
         if labels:
+            # Pick the candidate closest to a REV label on THIS sheet.
+            best = None  # (dist, ref)
             for ref, pos in cands:
                 if pos is None:
                     continue
@@ -641,14 +648,17 @@ def _find_rev_cell(zin, names, shared, old_letter):
                         0 if same_row else 1000 + abs(pos[1] - lp[1])
                     )
                     if best is None or dist < best[0]:
-                        best = (dist, name, ref)
+                        best = (dist, ref)
+            if best is not None:
+                targets.append((name, best[1]))
         else:
             no_label_cands.extend((name, ref) for ref, _ in cands)
 
-    if best is not None:
-        return (best[1], best[2]), "ok"
+    if targets:
+        return targets, "ok"
+    # No REV label anywhere: only safe if there's exactly one stray candidate.
     if len(no_label_cands) == 1:
-        return no_label_cands[0], "ok"
+        return [no_label_cands[0]], "ok"
     if any_cands:
         return None, "ambiguous"
     return None, "not_found"
@@ -702,7 +712,7 @@ def replace_text_in_xlsx(
     total = 0
     cells_changed = 0
     rev_status = "na"
-    target = None
+    targets = None
     do_rev = bool(revision and update_drawing_rev)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -715,7 +725,8 @@ def replace_text_in_xlsx(
         protected_draw = (_drawing_for_sheet(zin, protected)
                           if protected else None)
         if do_rev:
-            target, rev_status = _find_rev_cell(zin, names, shared, revision[0])
+            targets, rev_status = _find_rev_cells(zin, names, shared,
+                                                  revision[0])
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -750,12 +761,15 @@ def replace_text_in_xlsx(
                     for ref, value in cell_edits.get(name, {}).items():
                         new_text = _set_or_insert_cell(new_text, ref, value)
                         cells_changed += 1
-                    if target and name == target[0]:
-                        new_text, changed = _set_cell_text(
-                            new_text, target[1], revision[1]
-                        )
-                        if changed:
-                            rev_status = "updated"
+                    if targets:
+                        for tpart, tref in targets:
+                            if tpart != name:
+                                continue
+                            new_text, changed = _set_cell_text(
+                                new_text, tref, revision[1]
+                            )
+                            if changed:
+                                rev_status = "updated"
                     if new_text != text:
                         data = new_text.encode("utf-8")
                 zout.writestr(name, data)
