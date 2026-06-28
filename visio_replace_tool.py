@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.6 (help / how-to)"
+__version__ = "2.7 (multi-sheet REV + Visio revision entry)"
 
 import argparse
 import datetime
@@ -348,6 +348,291 @@ def bump_revision_in_page(page_xml: str, old_letter: str, new_letter: str):
     return page_xml[: m.start()] + new_block + page_xml[m.end():], "updated"
 
 
+# ---------------------------------------------------------------------------
+# Visio revision-history table (the chart in a corner of the cover page)
+# ---------------------------------------------------------------------------
+#
+# A Visio cover page usually carries a revision-history block: a grid of column
+# headers (REV / DESCRIPTION / DATE / APPROVED ...) with one data row per
+# revision. Unlike Excel there is no real "table" -- every cell is a separately
+# positioned <Shape> carrying a <Text>. We find the header shapes by their text,
+# read their X positions as columns, group the data shapes into rows by their Y,
+# and add a new revision row: either by filling an existing blank row, or by
+# cloning the most recent row's cells just below it. Everything is geometry- and
+# guard-checked; if the table can't be confidently located the page is left
+# untouched.
+
+_REVTABLE_FIELDS = {
+    "Rev": {"rev", "revision", "revno", "ltr", "letter", "rev#"},
+    "ECN #": {"ecn", "eco", "ecnno", "econo", "ecnnumber", "econumber",
+              "ecn#", "eco#"},
+    "Description": {"description", "desc", "descr", "reasonforchange",
+                    "reason", "change", "changedescription",
+                    "revisiondescription", "natureofchange", "nature"},
+    "Date": {"date", "approvaldate", "revdate", "dateapproved",
+             "erbapprovaldate"},
+    "Approved By": {"approved", "approvedby", "by", "author", "engineer",
+                    "eng", "drawnby", "chk", "checked", "appd", "apprd",
+                    "changeauthor"},
+}
+REVTABLE_FIELD_ORDER = ["Rev", "ECN #", "Description", "Date", "Approved By"]
+
+
+def _canonical_revtable_field(text: str) -> Optional[str]:
+    """Match a shape's text to a revision-table column (headers often carry
+    extra words, e.g. 'DESCRIPTION OF CHANGE')."""
+    n = _norm_header(text)
+    if not n:
+        return None
+    for field, variants in _REVTABLE_FIELDS.items():
+        for v in variants:
+            if n == v or (len(v) >= 4 and n.startswith(v)):
+                return field
+    return None
+
+
+def _cluster(values, tol):
+    """Greedy 1-D clustering: sorted values within ``tol`` of the running mean
+    join the same cluster. Returns a list of (mean, [members])."""
+    clusters = []
+    for v in sorted(values, key=lambda t: t[0]):
+        if clusters and abs(v[0] - clusters[-1][0]) <= tol:
+            grp = clusters[-1][1]
+            grp.append(v)
+            clusters[-1][0] = sum(m[0] for m in grp) / len(grp)
+        else:
+            clusters.append([v[0], [v]])
+    return [(c[0], c[1]) for c in clusters]
+
+
+def _visio_leaf_cells(page_xml):
+    """Leaf text-box shapes with geometry. Returns (ns, cells, max_id) where
+    each cell is {id, x, y, w, h, text}. Leaf = has its own <Text> and no child
+    <Shapes>, i.e. a single grid cell (not a group)."""
+    try:
+        root = ET.fromstring(page_xml)
+    except ET.ParseError:
+        return None, [], 0
+    ns = root.tag[: root.tag.index("}") + 1] if root.tag.startswith("{") else ""
+    cells = []
+    max_id = 0
+    for sh in root.iter(ns + "Shape"):
+        sid = sh.get("ID")
+        if sid and sid.isdigit():
+            max_id = max(max_id, int(sid))
+        if sh.find(ns + "Shapes") is not None:
+            continue  # a group, not a single cell
+        text_el = sh.find(ns + "Text")
+        if text_el is None:
+            continue
+        cells.append({
+            "id": sid,
+            "x": _cell_value(sh, ns, "PinX"),
+            "y": _cell_value(sh, ns, "PinY"),
+            "w": _cell_value(sh, ns, "Width"),
+            "h": _cell_value(sh, ns, "Height"),
+            "text": "".join(text_el.itertext()).strip(),
+        })
+    return ns, cells, max_id
+
+
+def _detect_revtable(page_xml):
+    """Locate the revision table. Returns a dict with the column->x map, the
+    header Y, the data rows (each {field: cell}), the row pitch and growth
+    direction, or None if no confident table is found."""
+    ns, cells, max_id = _visio_leaf_cells(page_xml)
+    if not cells:
+        return None
+
+    geo = [c for c in cells if c["x"] is not None and c["y"] is not None]
+    if len(geo) < 4:
+        return None
+    heights = [c["h"] for c in geo if c["h"]]
+    row_tol = (sorted(heights)[len(heights) // 2] * 0.6) if heights else 0.12
+    row_tol = max(row_tol, 0.04)
+
+    # Header candidates: leaf cells whose text names a column.
+    hdr = []
+    for c in geo:
+        cf = _canonical_revtable_field(c["text"])
+        if cf:
+            hdr.append((c["y"], cf, c))
+    if len(hdr) < 2:
+        return None
+
+    # The header row is the Y band holding the most DISTINCT column names.
+    best = None  # (distinct_count, mean_y, members)
+    for mean_y, members in _cluster([(y, (cf, c)) for y, cf, c in hdr], row_tol):
+        fields = {}
+        for _y, (cf, c) in members:
+            fields.setdefault(cf, c)  # first cell wins per field
+        if best is None or len(fields) > best[0]:
+            best = (len(fields), mean_y, fields)
+    if best is None or best[0] < 2:
+        return None
+    _n, header_y, columns = best  # columns: {field: cell}
+    col_x = {f: c["x"] for f, c in columns.items()}
+
+    # Column tolerance from the smallest gap between adjacent columns.
+    xs = sorted(col_x.values())
+    gaps = [b - a for a, b in zip(xs, xs[1:]) if b - a > 1e-6]
+    col_tol = (min(gaps) * 0.45) if gaps else 0.5
+    header_ids = {c["id"] for c in columns.values()}
+
+    # Assign every other leaf cell to its nearest column (if close enough).
+    placed = []  # (field, cell)
+    for c in geo:
+        if c["id"] in header_ids:
+            continue
+        nearest = min(col_x, key=lambda f: abs(c["x"] - col_x[f]))
+        if abs(c["x"] - col_x[nearest]) <= col_tol:
+            placed.append((nearest, c))
+    if not placed:
+        return None
+
+    # Group those cells into rows by Y.
+    rows = []
+    for mean_y, members in _cluster(
+        [(c["y"], (f, c)) for f, c in placed], row_tol
+    ):
+        row = {}
+        for _y, (f, c) in members:
+            row.setdefault(f, c)
+        rows.append({"y": mean_y, "cells": row})
+    if not rows:
+        return None
+
+    # Data rows sit on one side of the header; keep the majority side.
+    below = [r for r in rows if r["y"] < header_y]
+    above = [r for r in rows if r["y"] > header_y]
+    data = below if len(below) >= len(above) else above
+    if not data:
+        return None
+    grow_down = data is below  # newest revision extends away from the header
+    data.sort(key=lambda r: r["y"], reverse=not grow_down)
+
+    ys = [header_y] + [r["y"] for r in data]
+    diffs = [abs(a - b) for a, b in zip(ys, ys[1:]) if abs(a - b) > 1e-6]
+    pitch = (sorted(diffs)[len(diffs) // 2] if diffs else
+             (heights[0] if heights else 0.25))
+
+    return {
+        "col_x": col_x, "header_y": header_y, "rows": data,
+        "pitch": pitch, "grow_down": grow_down, "max_id": max_id,
+    }
+
+
+def _leaf_shape_span(page_xml, sid):
+    """Raw [start, end) of a leaf <Shape ID="sid">...</Shape> (or self-closing)."""
+    m = re.search(r'<Shape\b[^>]*\bID="' + re.escape(str(sid)) + r'"[^>]*?(/?)>',
+                  page_xml)
+    if not m:
+        return None
+    if m.group(1) == "/":  # self-closing <Shape .../>
+        return m.start(), m.end()
+    end = page_xml.find("</Shape>", m.end())
+    if end < 0:
+        return None
+    return m.start(), end + len("</Shape>")
+
+
+def _set_shape_text_raw(raw: str, text: str) -> str:
+    """Set a leaf shape's text (replaces its <Text> body, or inserts one)."""
+    esc = xml_escape(text)
+    if _TEXT_BLOCK_RE.search(raw):
+        return _TEXT_BLOCK_RE.sub(
+            lambda mm: mm.group(1) + esc + mm.group(3), raw, count=1
+        )
+    close = raw.rfind("</Shape>")
+    if close < 0:
+        return raw
+    return raw[:close] + f"<Text>{esc}</Text>" + raw[close:]
+
+
+def add_revision_entry_to_page(page_xml: str, entry: dict):
+    """Add a revision row to the page's revision table. Returns (xml, status):
+    'filled' (reused a blank row), 'appended' (cloned a new row), 'not_found'
+    (no table) or 'no_slot' (table found but no safe place to add a row)."""
+    values = {f: v for f, v in (entry or {}).items() if v and v.strip()}
+    if not values:
+        return page_xml, "na"
+    tbl = _detect_revtable(page_xml)
+    if tbl is None:
+        return page_xml, "not_found"
+    col_x, rows = tbl["col_x"], tbl["rows"]
+    writable = [f for f in values if f in col_x]
+    if not writable:
+        return page_xml, "not_found"
+
+    # 1) Reuse an existing fully-blank row if there is one.
+    for row in rows:
+        if row["cells"] and all(not c["text"] for c in row["cells"].values()):
+            edits = []  # (start, end, new_raw)
+            for f in writable:
+                cell = row["cells"].get(f)
+                if not cell or not cell["id"]:
+                    continue
+                span = _leaf_shape_span(page_xml, cell["id"])
+                if span:
+                    raw = page_xml[span[0]:span[1]]
+                    edits.append((span[0], span[1],
+                                  _set_shape_text_raw(raw, values[f])))
+            if not edits:
+                continue
+            for start, end, new_raw in sorted(edits, reverse=True):
+                page_xml = page_xml[:start] + new_raw + page_xml[end:]
+            return page_xml, "filled"
+
+    # 2) Otherwise clone the most recent row's cells just past it.
+    last = rows[-1]
+    new_y = last["y"] - tbl["pitch"] if tbl["grow_down"] else \
+        last["y"] + tbl["pitch"]
+    piny_re = re.compile(r'(<Cell\b[^>]*\bN="PinY"[^>]*?\bV=")[^"]*(")')
+    has_formula = re.compile(r'<Cell\b[^>]*\bN="PinY"[^>]*\bF="')
+    inserts = []  # (after_index, new_raw)
+    next_id = tbl["max_id"]
+    for f in writable:
+        cell = last["cells"].get(f)
+        if not cell or not cell["id"]:
+            return page_xml, "no_slot"
+        span = _leaf_shape_span(page_xml, cell["id"])
+        if not span:
+            return page_xml, "no_slot"
+        raw = page_xml[span[0]:span[1]]
+        if has_formula.search(raw) or not piny_re.search(raw):
+            return page_xml, "no_slot"  # can't reposition safely
+        next_id += 1
+        clone = re.sub(r'(<Shape\b[^>]*\bID=")\d+(")',
+                       r'\g<1>' + str(next_id) + r'\g<2>', raw, count=1)
+        clone = re.sub(r'\s+(UniqueID|NameU|Name)="[^"]*"', "", clone)
+        clone = piny_re.sub(r'\g<1>' + f"{new_y:.6f}" + r'\g<2>', clone, count=1)
+        clone = _set_shape_text_raw(clone, values[f])
+        inserts.append((span[1], clone))
+    if not inserts:
+        return page_xml, "no_slot"
+    for after, clone in sorted(inserts, reverse=True):
+        page_xml = page_xml[:after] + clone + page_xml[after:]
+    return page_xml, "appended"
+
+
+def vsdx_revtable_columns(path) -> Optional[List[str]]:
+    """The revision-table column names detected on a .vsdx cover page (in
+    canonical order), or None if no table is found. Used to confirm/preview
+    what the 'add revision entry' feature will write to."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            page = _first_page_part(z.namelist())
+            if not page:
+                return None
+            xml = z.read(page).decode("utf-8", "replace")
+    except (zipfile.BadZipFile, OSError, KeyError):
+        return None
+    tbl = _detect_revtable(xml)
+    if not tbl:
+        return None
+    return [f for f in REVTABLE_FIELD_ORDER if f in tbl["col_x"]]
+
+
 def replace_text_in_vsdx(
     in_path: str | os.PathLike,
     out_path: str | os.PathLike,
@@ -356,14 +641,18 @@ def replace_text_in_vsdx(
     whole_word: bool = False,
     revision: Optional[Tuple[str, str]] = None,
     update_drawing_rev: bool = False,
+    rev_entry: Optional[dict] = None,
 ) -> dict:
     """Copy a .vsdx applying text replacements; return a report dict.
 
     If ``revision`` is (old_letter, new_letter) and ``update_drawing_rev`` is
     true, the single-letter revision box on page 1 is bumped to new_letter.
+    If ``rev_entry`` is given, a new row is added to the cover page's revision
+    table.
 
-    Report: {"total", "by_part", "rev_drawing"} where rev_drawing is one of
-    'na' (not attempted), 'updated', 'not_found', 'ambiguous'.
+    Report: {"total", "by_part", "rev_drawing", "rev_table"}. rev_drawing is one
+    of 'na'/'updated'/'not_found'/'ambiguous'; rev_table is one of
+    'na'/'filled'/'appended'/'not_found'/'no_slot'.
     """
     in_path = Path(in_path)
     out_path = Path(out_path)
@@ -378,11 +667,15 @@ def replace_text_in_vsdx(
     by_part: dict[str, int] = {}
     total = 0
     rev_status = "na"
+    table_status = "na"
     do_rev = bool(revision and update_drawing_rev)
+    do_table = bool(rev_entry and any(
+        v and v.strip() for v in rev_entry.values()))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(in_path, "r") as zin:
-        first_page = _first_page_part(zin.namelist()) if do_rev else None
+        first_page = (_first_page_part(zin.namelist())
+                      if (do_rev or do_table) else None)
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -402,12 +695,17 @@ def replace_text_in_vsdx(
                             new_text, rev_status = bump_revision_in_page(
                                 new_text, revision[0], revision[1]
                             )
+                        if do_table and item.filename == first_page:
+                            new_text, table_status = add_revision_entry_to_page(
+                                new_text, rev_entry
+                            )
                         if new_text != text:
                             data = new_text.encode("utf-8")
                 # Preserve the original name; recompress with deflate.
                 zout.writestr(item.filename, data)
 
-    return {"total": total, "by_part": by_part, "rev_drawing": rev_status}
+    return {"total": total, "by_part": by_part, "rev_drawing": rev_status,
+            "rev_table": table_status}
 
 
 # ---------------------------------------------------------------------------
@@ -1201,7 +1499,7 @@ def replace_text_in_file(
     in_path, out_path, pairs,
     case_sensitive=True, whole_word=False,
     revision=None, update_drawing_rev=False,
-    cell_edits=None,
+    cell_edits=None, rev_entry=None,
 ) -> dict:
     """Dispatch to the Visio or Excel engine based on the file type."""
     fmt = detect_format(in_path)
@@ -1209,6 +1507,7 @@ def replace_text_in_file(
         return replace_text_in_vsdx(
             in_path, out_path, pairs, case_sensitive, whole_word,
             revision=revision, update_drawing_rev=update_drawing_rev,
+            rev_entry=rev_entry,
         )
     if fmt == "xlsx":
         return replace_text_in_xlsx(
@@ -1814,6 +2113,17 @@ HELP_SECTIONS = [
         "box is replaced and the date beside it is set to **today** (kept in "
         "the same format).",
     ]),
+    ("Step 2 (Visio only) — Add a revision entry", [
+        "Click **Visio: add revision entry...** to add a row to the "
+        "**revision-history table** on a drawing's cover page (the chart in a "
+        "corner with REV / DESCRIPTION / DATE / APPROVED columns).",
+        "* The dialog shows the **columns it detected** in your loaded files. "
+        "Fill in **Rev, ECN #, Description, Date, Approved By** (skip any).",
+        "* On run, each Visio file gets the new row: an existing **blank row** "
+        "is filled, otherwise a new row is **cloned** below the last one.",
+        "* If no table is confidently found on a file, that file is **left "
+        "unchanged** (the Status box says so) — it never risks the drawing.",
+    ]),
     ("Step 3 — Options", [
         "* **Case sensitive** / **Whole word only** — control matching.",
         "* **Also export PDF (LibreOffice)** — off by default.",
@@ -2012,8 +2322,8 @@ def launch_gui() -> int:
         def __init__(self, root: "tk.Tk"):
             self.root = root
             root.title(f"Visio / Excel Text Replacer   [v{__version__}]")
-            root.geometry("860x800")
-            root.minsize(700, 680)
+            root.geometry("980x820")
+            root.minsize(800, 680)
             self.dark = False
             self.palette = LIGHT
             self._rbuttons: list = []      # rounded buttons to re-theme
@@ -2060,6 +2370,8 @@ def launch_gui() -> int:
             self.changelog_entry: dict = {}
             # New name for the "Author" box (date is stamped automatically).
             self.author_name: str = ""
+            # Staged Visio revision-table row: {canonical_field: value}.
+            self.visio_rev_entry: dict = {}
 
             pad = {"padx": 10, "pady": 6}
 
@@ -2123,23 +2435,31 @@ def launch_gui() -> int:
             self._header_row()
             self.add_pair()
             rule_btns = ttk.Frame(mid)
-            rule_btns.pack(fill="x", padx=8, pady=(0, 8))
+            rule_btns.pack(fill="x", padx=8, pady=(0, 4))
             self._rbtn(
                 rule_btns, "+ Add another rule", self.add_pair
             ).pack(side="left")
-            self._rbtn(
-                rule_btns, "Excel: find & edit rows...", self.open_bom_editor
-            ).pack(side="left", padx=8)
-            self._rbtn(
-                rule_btns, "Excel: add Change Log entry...",
-                self.open_changelog_editor,
-            ).pack(side="left")
-            self._rbtn(
-                rule_btns, "Excel: set Author + date...",
-                self.open_author_editor,
-            ).pack(side="left", padx=8)
             self.bom_status = ttk.Label(rule_btns, text="")
             self.bom_status.pack(side="left", padx=8)
+
+            # Per-format helper editors get their own row so they never clip.
+            helper_btns = ttk.Frame(mid)
+            helper_btns.pack(fill="x", padx=8, pady=(0, 8))
+            self._rbtn(
+                helper_btns, "Excel: find & edit rows...", self.open_bom_editor
+            ).pack(side="left")
+            self._rbtn(
+                helper_btns, "Excel: add Change Log entry...",
+                self.open_changelog_editor,
+            ).pack(side="left", padx=8)
+            self._rbtn(
+                helper_btns, "Excel: set Author + date...",
+                self.open_author_editor,
+            ).pack(side="left")
+            self._rbtn(
+                helper_btns, "Visio: add revision entry...",
+                self.open_visio_rev_editor,
+            ).pack(side="left", padx=8)
 
             # --- 3. Options ------------------------------------------------
             opts = ttk.LabelFrame(root, text="3.  Options")
@@ -2755,6 +3075,90 @@ def launch_gui() -> int:
             else:
                 self.log("Author update cleared.")
 
+        # -- Visio revision table ------------------------------------------
+        def open_visio_rev_editor(self):
+            vsdx_files = [f for f in self.files
+                          if detect_format(f) == "vsdx"]
+            if not vsdx_files:
+                messagebox.showinfo(
+                    "No Visio files", "Add at least one .vsdx file first."
+                )
+                return
+            # Report which revision-table columns were detected per file.
+            detected = {}
+            for f in vsdx_files:
+                cols = vsdx_revtable_columns(f)
+                if cols:
+                    detected[Path(f).name] = cols
+            if not detected:
+                messagebox.showwarning(
+                    "No revision table found",
+                    "Couldn't confidently locate a revision-history table on "
+                    "the cover page of any loaded Visio file.\n\n"
+                    "The table is found by its column headers (REV, "
+                    "DESCRIPTION, DATE, APPROVED, ECN, ...). If your drawing "
+                    "uses different labels, share a sample .vsdx so it can be "
+                    "tuned. You can still stage an entry below; files without "
+                    "a detected table are left unchanged.",
+                )
+
+            win = tk.Toplevel(self.root)
+            win.title("Add Visio revision entry")
+            win.transient(self.root)
+            win.grab_set()
+            win.configure(bg=self.palette["bg"])
+            if detected:
+                found = "; ".join(
+                    f"{n}: {', '.join(cols)}" for n, cols in detected.items()
+                )
+                info = ("A new row is added to the revision table on each "
+                        "Visio file's cover page (an existing blank row is "
+                        "filled, otherwise a new row is cloned below the last "
+                        "one). Leave a field blank to skip it.\n\nDetected "
+                        f"columns — {found}")
+            else:
+                info = ("No revision table was detected, but you can still "
+                        "stage an entry; any file where the table is found at "
+                        "run time will get the row, others are left unchanged.")
+            ttk.Label(
+                win, wraplength=580, justify="left", text=info,
+            ).pack(fill="x", padx=10, pady=8)
+
+            form = ttk.Frame(win)
+            form.pack(fill="x", padx=10, pady=4)
+            entries = {}
+            for field in REVTABLE_FIELD_ORDER:
+                rowf = ttk.Frame(form)
+                rowf.pack(fill="x", pady=3)
+                ttk.Label(rowf, text=field + ":", width=14).pack(side="left")
+                e = ttk.Entry(rowf, width=46)
+                e.insert(0, self.visio_rev_entry.get(field, ""))
+                e.pack(side="left", fill="x", expand=True)
+                entries[field] = e
+
+            def apply():
+                entry = {f: e.get() for f, e in entries.items()}
+                if not any(v.strip() for v in entry.values()):
+                    self.visio_rev_entry = {}
+                    self.log("Visio revision entry cleared.")
+                else:
+                    self.visio_rev_entry = entry
+                    rev = entry.get("Rev", "").strip()
+                    self.log(
+                        "Staged a Visio revision-table entry"
+                        + (f" (REV {rev})." if rev else ".")
+                    )
+                win.destroy()
+
+            btns = ttk.Frame(win)
+            btns.pack(fill="x", padx=10, pady=10)
+            self._rbtn(btns, "Save entry", apply, kind="accent").pack(
+                side="right"
+            )
+            self._rbtn(btns, "Cancel", win.destroy).pack(
+                side="right", padx=6
+            )
+
         # -- run ------------------------------------------------------------
         def run(self):
             if not self.files:
@@ -2773,11 +3177,12 @@ def launch_gui() -> int:
             if (not bump_rev
                     and not any(r["find"].get() for r in self.rule_rows)
                     and not self.bom_edits and not self.changelog_entry
-                    and not self.author_name):
+                    and not self.author_name and not self.visio_rev_entry):
                 messagebox.showwarning(
                     "Nothing to do",
                     "Enter a 'Find' value, tick 'Save copy as next revision', "
-                    "or stage an Excel row / Change Log / Author edit.",
+                    "or stage an Excel row / Change Log / Author / Visio "
+                    "revision edit.",
                 )
                 return
 
@@ -2791,13 +3196,15 @@ def launch_gui() -> int:
                     self.pdf_var.get(), bump_rev, self.revtext_var.get(),
                     dict(self.bom_edits), dict(self.changelog_entry),
                     self.author_name, self.summary_var.get(),
+                    dict(self.visio_rev_entry),
                 ),
                 daemon=True,
             ).start()
 
         def _worker(self, files, pairs_by_file, case_sensitive, whole_word,
                     make_pdf, bump_rev, update_rev_text, bom_edits,
-                    changelog_entry, author_name, make_summary):
+                    changelog_entry, author_name, make_summary,
+                    visio_rev_entry):
             total_repl = 0
             done = 0
             errors = 0
@@ -2864,6 +3271,11 @@ def launch_gui() -> int:
                             src.stem + "_edited" + src.suffix
                         )
 
+                    # A Visio revision-table row applies only to .vsdx files.
+                    rev_entry = (visio_rev_entry
+                                 if (visio_rev_entry
+                                     and detect_format(f) == "vsdx") else None)
+
                     try:
                         report = replace_text_in_file(
                             src, out_vsdx, pairs,
@@ -2872,6 +3284,7 @@ def launch_gui() -> int:
                             revision=revision,
                             update_drawing_rev=update_rev_text,
                             cell_edits=cell_edits,
+                            rev_entry=rev_entry,
                         )
                         total_repl += report["total"]
                         msg = (
@@ -2902,6 +3315,22 @@ def launch_gui() -> int:
                             }.get(rd)
                             if note:
                                 self.log(note)
+                        if rev_entry:
+                            tnote = {
+                                "filled":
+                                    "    revision table: new row added",
+                                "appended":
+                                    "    revision table: new row added",
+                                "not_found":
+                                    "    (revision table not found on the "
+                                    "cover page; left unchanged)",
+                                "no_slot":
+                                    "    (revision table found, but no safe "
+                                    "place to add a row; left unchanged)",
+                                "na": None,
+                            }.get(report.get("rev_table"))
+                            if tnote:
+                                self.log(tnote)
                         last_output = out_vsdx
 
                         if make_summary:

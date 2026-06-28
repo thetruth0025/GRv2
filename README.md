@@ -179,6 +179,31 @@ name beside the **Author** box is set to your value, and the date beside it is
 stamped with **today's date** — kept in the **same format** as the date that was
 there (an Excel date serial stays a properly-formatted date).
 
+### Visio: add a revision-table entry
+
+Visio cover pages usually carry a **revision-history table** in a corner — the
+chart with **REV / DESCRIPTION / DATE / APPROVED** columns. This is the Visio
+counterpart of the Excel *add Change Log entry* feature. Click **Visio: add
+revision entry...** and the tool:
+
+1. Finds the table on each loaded `.vsdx` cover page by its **column headers**
+   (a generous set of spellings: `REV`, `REVISION`, `DESCRIPTION`/`REASON FOR
+   CHANGE`, `DATE`, `APPROVED`/`BY`/`ENGINEER`, `ECN`/`ECO`, …) and their
+   on-page geometry, and shows you **which columns it detected**.
+2. Lets you fill in **Rev**, **ECN #**, **Description**, **Date**, and **Approved
+   By** (leave any blank to skip it).
+3. On **Replace & Convert**, adds the new revision row to **every** Visio file:
+   an existing **blank row** in the table is filled if there is one, otherwise a
+   new row is **cloned** from the last row (same columns/formatting) and placed
+   just below it.
+
+Because a Visio "table" is really just positioned text boxes, the detection is
+**conservative**: if it can't confidently locate the table on a file (or can't
+find a safe place to add the row), that file is **left completely unchanged**
+and the Status box says so — it never risks corrupting a drawing. If your
+template uses unusual column labels, share a sample `.vsdx` so the detection can
+be tuned to it.
+
 ### Change summary (for approval review)
 
 With **Generate change summary** ticked (on by default), the tool writes a
