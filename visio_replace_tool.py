@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.1 (change summary report)"
+__version__ = "2.2 (file-type grouping + targeting)"
 
 import argparse
 import datetime
@@ -1127,8 +1127,28 @@ def build_author_edits(path, new_name, run_date=None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Format detection + dispatch
+# File category (by file name) + format detection + dispatch
 # ---------------------------------------------------------------------------
+
+# Document type is read from the file name: DOCxxxxx = BOM, DWGxxxxx = System
+# Drawing, CBLxxxxx = Cable Drawing.
+_FILE_CATEGORIES = [
+    ("BOM", re.compile(r"DOC\d", re.IGNORECASE)),
+    ("System Drawing", re.compile(r"DWG\d", re.IGNORECASE)),
+    ("Cable Drawing", re.compile(r"CBL\d", re.IGNORECASE)),
+]
+CATEGORY_ORDER = ["BOM", "System Drawing", "Cable Drawing", "Other"]
+
+
+def file_category(path: str | os.PathLike) -> str:
+    """Classify a file by its name: 'BOM', 'System Drawing', 'Cable Drawing',
+    or 'Other'."""
+    name = Path(path).name
+    for cat, pat in _FILE_CATEGORIES:
+        if pat.search(name):
+            return cat
+    return "Other"
+
 
 def detect_format(path: str | os.PathLike) -> Optional[str]:
     """Return 'vsdx', 'xlsx', or None, by extension then by archive contents."""
@@ -1414,19 +1434,17 @@ def generate_change_summary(records, summary_path, run_dt=None) -> Path:
     summary_path = Path(summary_path)
     total = sum(len(r["changes"]) for r in records)
 
-    rows_html = []
-    for r in records:
+    def render_file(r) -> str:
         rev = ""
         if r.get("revision"):
             rev = (f' &nbsp;|&nbsp; revision <b>{_html.escape(r["revision"][0])}'
                    f' &rarr; {_html.escape(r["revision"][1])}</b>')
-        head = (f'<h2>{_html.escape(r["input"])}</h2>'
+        head = (f'<h3>{_html.escape(r["input"])}</h3>'
                 f'<div class="sub">saved as <b>{_html.escape(r["output"])}</b>'
                 f'{rev}</div>')
         if not r["changes"]:
-            rows_html.append(head + '<p class="none">No content changes '
-                             '(copied as-is).</p>')
-            continue
+            return head + ('<p class="none">No content changes '
+                           '(copied as-is).</p>')
         trs = []
         for c in r["changes"]:
             loc = _html.escape(c["location"])
@@ -1438,12 +1456,27 @@ def generate_change_summary(records, summary_path, run_dt=None) -> Path:
                 f'<td class="before">{_html.escape(c["before"]) or "&nbsp;"}</td>'
                 f'<td class="after">{_html.escape(c["after"]) or "&nbsp;"}</td></tr>'
             )
+        return (head + '<table><thead><tr><th>Location</th><th>Before</th>'
+                '<th>After</th></tr></thead><tbody>'
+                + "".join(trs) + '</tbody></table>')
+
+    # Group files by document type (BOM / System Drawing / Cable Drawing).
+    by_cat: dict = {}
+    for r in records:
+        by_cat.setdefault(file_category(r["input"]), []).append(r)
+
+    rows_html = []
+    for cat in CATEGORY_ORDER:
+        recs = by_cat.get(cat)
+        if not recs:
+            continue
+        nchg = sum(len(r["changes"]) for r in recs)
         rows_html.append(
-            head
-            + '<table><thead><tr><th>Location</th><th>Before</th>'
-            '<th>After</th></tr></thead><tbody>'
-            + "".join(trs) + '</tbody></table>'
+            f'<h2>{_html.escape(cat)} '
+            f'<span class="count">({len(recs)} file(s), '
+            f'{nchg} change(s))</span></h2>'
         )
+        rows_html.extend(render_file(r) for r in recs)
 
     doc = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -1452,7 +1485,10 @@ def generate_change_summary(records, summary_path, run_dt=None) -> Path:
  body {{ font-family: Segoe UI, Arial, sans-serif; margin: 28px; color:#1a1a1a; }}
  h1 {{ margin-bottom: 4px; }}
  .meta {{ color:#555; margin-bottom: 22px; }}
- h2 {{ margin: 26px 0 2px; padding-top: 14px; border-top: 2px solid #ddd; }}
+ h2 {{ margin: 30px 0 6px; padding: 6px 10px; background:#243b53;
+       color:#fff; border-radius:4px; }}
+ h2 .count {{ font-weight: normal; font-size: 0.8em; opacity: 0.85; }}
+ h3 {{ margin: 18px 0 2px; padding-top: 8px; border-top: 1px solid #ddd; }}
  .sub {{ color:#555; margin-bottom: 8px; font-size: 0.95em; }}
  table {{ border-collapse: collapse; width: 100%; margin: 8px 0 4px; }}
  th, td {{ border: 1px solid #ccc; padding: 6px 9px; text-align: left;
@@ -1698,9 +1734,9 @@ def launch_gui() -> int:
             root.minsize(680, 640)
 
             self.files: List[str] = []
-            # Each rule: {frame, find, repl, menubtn, menu, all_var, file_vars}.
-            # all_var True => applies to every file; otherwise file_vars holds a
-            # BooleanVar per file path for multi-select targeting.
+            # Each rule: {frame, find, repl, menubtn, menu, all_var, cat_vars}.
+            # all_var True => applies to every file; otherwise cat_vars holds a
+            # BooleanVar per document type (BOM/System Drawing/Cable Drawing).
             self.rule_rows: List[dict] = []
             # Staged Excel row edits: {part_number: {canonical_field: value}}.
             self.bom_edits: dict = {}
@@ -1931,37 +1967,42 @@ def launch_gui() -> int:
                 self.files_box.insert("end", Path(f).name)
             self._refresh_rule_menus()
 
+        def _present_categories(self) -> List[str]:
+            present = {file_category(f) for f in self.files}
+            return [c for c in CATEGORY_ORDER if c in present]
+
         def _refresh_rule_menus(self):
-            """Rebuild every rule's multi-select file dropdown."""
+            """Rebuild every rule's multi-select dropdown of file TYPES."""
+            cats = self._present_categories()
             for rule in self.rule_rows:
                 menu = rule["menu"]
                 menu.delete(0, "end")
-                fv = rule["file_vars"]
-                for p in list(fv):  # drop files no longer loaded
-                    if p not in self.files:
-                        del fv[p]
-                for f in self.files:
-                    fv.setdefault(f, tk.BooleanVar(value=False))
+                cv = rule["cat_vars"]
+                for c in list(cv):  # drop categories no longer present
+                    if c not in cats:
+                        del cv[c]
+                for c in cats:
+                    cv.setdefault(c, tk.BooleanVar(value=False))
                 menu.add_checkbutton(
                     label="All files", variable=rule["all_var"],
                     command=lambda r=rule: self._on_all_toggle(r),
                 )
                 menu.add_separator()
-                for f in self.files:
+                for c in cats:
                     menu.add_checkbutton(
-                        label=Path(f).name, variable=fv[f],
-                        command=lambda r=rule, p=f: self._on_file_toggle(r, p),
+                        label=c, variable=cv[c],
+                        command=lambda r=rule: self._on_cat_toggle(r),
                     )
                 self._update_menu_label(rule)
 
         def _on_all_toggle(self, rule):
             if rule["all_var"].get():
-                for v in rule["file_vars"].values():
+                for v in rule["cat_vars"].values():
                     v.set(False)
             self._update_menu_label(rule)
 
-        def _on_file_toggle(self, rule, path):
-            if rule["file_vars"][path].get():
+        def _on_cat_toggle(self, rule):
+            if any(v.get() for v in rule["cat_vars"].values()):
                 rule["all_var"].set(False)
             self._update_menu_label(rule)
 
@@ -1969,22 +2010,21 @@ def launch_gui() -> int:
             if rule["all_var"].get():
                 rule["menubtn"]["text"] = "All files"
                 return
-            sel = [f for f in self.files
-                   if rule["file_vars"].get(f) and rule["file_vars"][f].get()]
+            sel = [c for c, v in rule["cat_vars"].items() if v.get()]
             if not sel:
-                rule["menubtn"]["text"] = "(no files)"
+                rule["menubtn"]["text"] = "(none)"
             elif len(sel) == 1:
-                rule["menubtn"]["text"] = Path(sel[0]).name[:18]
+                rule["menubtn"]["text"] = sel[0]
             else:
-                rule["menubtn"]["text"] = f"{len(sel)} files"
+                rule["menubtn"]["text"] = f"{len(sel)} types"
 
         # -- rule rows ------------------------------------------------------
         def _header_row(self):
             ttk.Label(
                 self.pairs_frame,
-                text="Type the text to find and its replacement, then pick "
-                "which file(s) the rule applies to (the 'in' menu lets you "
-                "tick several).",
+                text="Type the text to find and its replacement, then choose "
+                "which document type(s) it applies to via 'in' "
+                "(BOM=DOC, System Drawing=DWG, Cable Drawing=CBL).",
             ).pack(anchor="w", padx=4, pady=(0, 4))
 
         def add_pair(self):
@@ -1997,14 +2037,14 @@ def launch_gui() -> int:
             repl_e = ttk.Entry(row, width=16)
             repl_e.pack(side="left", fill="x", expand=True, padx=(0, 8))
             ttk.Label(row, text="in:").pack(side="left", padx=(0, 2))
-            menubtn = ttk.Menubutton(row, text="All files", width=16)
+            menubtn = ttk.Menubutton(row, text="All files", width=15)
             menu = tk.Menu(menubtn, tearoff=0)
             menubtn["menu"] = menu
             menubtn.pack(side="left", padx=(0, 4))
             rule = {
                 "frame": row, "find": find_e, "repl": repl_e,
                 "menubtn": menubtn, "menu": menu,
-                "all_var": tk.BooleanVar(value=True), "file_vars": {},
+                "all_var": tk.BooleanVar(value=True), "cat_vars": {},
             }
             ttk.Button(
                 row, text="X", width=3,
@@ -2038,7 +2078,9 @@ def launch_gui() -> int:
                 self.progress.stop()
 
         def pairs_for_file(self, path: str) -> List[Tuple[str, str]]:
-            """Find/replace pairs whose dropdown selection includes this file."""
+            """Find/replace pairs whose dropdown selection includes this file's
+            document type."""
+            cat = file_category(path)
             pairs = []
             for rule in self.rule_rows:
                 find = rule["find"].get()
@@ -2047,7 +2089,7 @@ def launch_gui() -> int:
                 if rule["all_var"].get():
                     pairs.append((find, rule["repl"].get()))
                 else:
-                    v = rule["file_vars"].get(path)
+                    v = rule["cat_vars"].get(cat)
                     if v is not None and v.get():
                         pairs.append((find, rule["repl"].get()))
             return pairs

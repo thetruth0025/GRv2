@@ -87,13 +87,29 @@ A window opens:
    in the list; **Remove selected** / **Clear** manage it.
 2. **Add your rules (step 2).** Each rule is a row with a separate **Find:** box
    and **Replace with:** box, plus an **in:** dropdown. Use **+ Add another rule**
-   for more terms. The **in:** dropdown is a checklist of every file you added:
+   for more terms. The **in:** dropdown targets files by **document type**
+   (detected from the file name — see *Document types* below):
    - **All files** (the default) — the rule runs on every file.
-   - Or untick "All files" and **tick one or more specific files** to run the
-     rule on just those.
+   - Or untick "All files" and **tick one or more types** (BOM / System Drawing /
+     Cable Drawing) to run the rule only on files of those types.
 3. **Set options (step 3)** and click **Replace & Convert**. Each file is saved
    as its next-revision copy (or `*_edited`) next to the original, and the output
    folder opens when it finishes. The Status box lists what happened per file.
+
+### Document types
+
+The tool classifies each file by its **name** so rules can target a whole type
+and the change summary can be grouped:
+
+| Type | File name contains | Example |
+|------|--------------------|---------|
+| **BOM** | `DOCxxxxx` | `DOC00475_…` |
+| **System Drawing** | `DWGxxxxx` | `DWG01234_…` |
+| **Cable Drawing** | `CBLxxxxx` | `CBL00134-01_…` |
+
+Anything else is **Other**. The **in:** dropdown on each rule lists the types
+present in your loaded files, so a rule can apply to, say, all Cable Drawings at
+once.
 
 Options:
 
@@ -156,7 +172,8 @@ there (an Excel date serial stays a properly-formatted date).
 
 With **Generate change summary** ticked (on by default), the tool writes a
 **`Change_Summary_<timestamp>.html`** document next to the edited files and opens
-it. For every file it lists each change as **Location · Before · After** —
+it. Files are **grouped by document type** (BOM / System Drawing / Cable
+Drawing), and for every file it lists each change as **Location · Before · After** —
 including text replacements, BOM row edits, the Author name/date, the appended
 Change Log row, and the revision bump. Cells are labelled by their column or
 title-block label (e.g. *P/N*, *Unit Cost*, *Author*, *Revision*), and dates are
