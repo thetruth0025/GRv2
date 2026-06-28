@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.9.1 (BOM lookup shows the sheet name)"
+__version__ = "2.10 (BOM sheet sub-header + Reset all button)"
 
 import argparse
 import datetime
@@ -2488,6 +2488,9 @@ HELP_SECTIONS = [
         "original, or in your chosen **output folder**. The **Status** box "
         "reports what happened per file, and the **change summary** opens when "
         "done.",
+        "* **Reset all** (the orange button) clears the loaded files, every "
+        "rule, all staged edits and the output folder — use it to start fresh "
+        "on a new file or batch.",
     ]),
     ("The change summary", [
         "An HTML document grouped by document type. For each file it lists "
@@ -2591,6 +2594,7 @@ def launch_gui() -> int:
         "btn": "#dbe3ee", "btn_fg": "#1f2933", "btn_hover": "#c7d3e3",
         "btn_off": "#cdd6e2", "btn_off_fg": "#8a97a8",
         "green": "#16a34a", "green_dk": "#15803d",
+        "orange": "#ea580c", "orange_dk": "#c2410c",
         "banner": "#2563eb", "banner_sub": "#cfe0ff", "sel": "#2563eb",
     }
     DARK = {
@@ -2600,6 +2604,7 @@ def launch_gui() -> int:
         "btn": "#3a4150", "btn_fg": "#e6e9ef", "btn_hover": "#49525f",
         "btn_off": "#333a47", "btn_off_fg": "#6b7585",
         "green": "#22c55e", "green_dk": "#16a34a",
+        "orange": "#fb923c", "orange_dk": "#f97316",
         "banner": "#172554", "banner_sub": "#9db8ff", "sel": "#3b82f6",
     }
 
@@ -2619,7 +2624,8 @@ def launch_gui() -> int:
             self._hover = False
             self.font = font or tkfont.Font(
                 family="Segoe UI", size=10,
-                weight="bold" if kind in ("accent", "green") else "normal",
+                weight=("bold" if kind in ("accent", "green", "orange")
+                        else "normal"),
             )
             w = self.font.measure(text) + padx * 2
             h = self.font.metrics("linespace") + pady * 2
@@ -2639,6 +2645,9 @@ def launch_gui() -> int:
                 return (p["accent_dk"] if self._hover else p["accent"]), "#ffffff"
             if self.kind == "green":
                 return (p["green_dk"] if self._hover else p["green"]), "#ffffff"
+            if self.kind == "orange":
+                return (p["orange_dk"] if self._hover
+                        else p["orange"]), "#ffffff"
             return (p["btn_hover"] if self._hover else p["btn"]), p["btn_fg"]
 
         def _draw(self):
@@ -2910,6 +2919,10 @@ def launch_gui() -> int:
                 radius=13, padx=22, pady=10,
             )
             self.run_btn.pack(side="left", padx=8)
+            self._rbtn(
+                run, "Reset all", self.reset_all, kind="orange",
+                radius=13, padx=16, pady=10,
+            ).pack(side="right", padx=8)
             self.progress = ttk.Progressbar(
                 run, mode="indeterminate", style="Horizontal.TProgressbar"
             )
@@ -3003,6 +3016,7 @@ def launch_gui() -> int:
             )
             self.log_box.configure(bg=c["field"], fg=c["field_fg"])
             self.out_dir_lbl.configure(foreground=c["muted"])
+            self._rbuttons = [b for b in self._rbuttons if b.winfo_exists()]
             for b in self._rbuttons:
                 b.set_palette(c)
             self._refresh_rule_menus()  # recolors the dropdown menus
@@ -3305,37 +3319,51 @@ def launch_gui() -> int:
                         font=("Segoe UI", 10, "bold"),
                         foreground=self.palette["accent"],
                     ).pack(anchor="w", padx=6, pady=(10, 0))
+                    # Group this file's matches by the sheet they were found on,
+                    # so each sheet gets a sub-header (added info -- the per-row
+                    # P/N and row line below is unchanged).
+                    by_sheet: dict = {}
                     for mt in matches:
-                        sheet_lbl = mt.get("sheet_name") or ""
-                        where = (f"sheet: {sheet_lbl}    (row {mt['row']})"
-                                 if sheet_lbl else f"row {mt['row']}")
-                        lf = ttk.LabelFrame(
-                            inner,
-                            text=f"P/N: {mt['part']}    ·    {where}",
-                        )
-                        lf.pack(fill="x", padx=12, pady=4)
-                        cells = {}
-                        for field in BOM_FIELD_ORDER:
-                            if field == "Part Number":
-                                continue
-                            cell = mt["fields"].get(field)
-                            if cell is None:
-                                continue
-                            ref, val = cell
-                            rowf = ttk.Frame(lf)
-                            rowf.pack(fill="x", padx=6, pady=2)
-                            ttk.Label(rowf, text=field + ":", width=14).pack(
-                                side="left"
+                        key = (mt["sheet"], mt.get("sheet_name") or "")
+                        by_sheet.setdefault(key, []).append(mt)
+                    for (sheet_part, sheet_name), sheet_matches in \
+                            by_sheet.items():
+                        if sheet_name:
+                            ttk.Label(
+                                inner, text="     Sheet:  " + sheet_name,
+                                font=("Segoe UI", 9, "bold"),
+                                foreground=self.palette["muted"],
+                            ).pack(anchor="w", padx=12, pady=(4, 0))
+                        for mt in sheet_matches:
+                            lf = ttk.LabelFrame(
+                                inner,
+                                text=f"P/N: {mt['part']}    (row {mt['row']})",
                             )
-                            e = ttk.Entry(rowf)
-                            e.insert(0, snap.get((f, mt["sheet"], ref), val))
-                            e.pack(side="left", fill="x", expand=True)
-                            cells[field] = (ref, val, e)
-                        self._bom_rows.append({
-                            "file": f, "sheet": mt["sheet"],
-                            "part": mt["part"], "row": mt["row"],
-                            "cells": cells,
-                        })
+                            lf.pack(fill="x", padx=12, pady=4)
+                            cells = {}
+                            for field in BOM_FIELD_ORDER:
+                                if field == "Part Number":
+                                    continue
+                                cell = mt["fields"].get(field)
+                                if cell is None:
+                                    continue
+                                ref, val = cell
+                                rowf = ttk.Frame(lf)
+                                rowf.pack(fill="x", padx=6, pady=2)
+                                ttk.Label(
+                                    rowf, text=field + ":", width=14
+                                ).pack(side="left")
+                                e = ttk.Entry(rowf)
+                                e.insert(
+                                    0, snap.get((f, mt["sheet"], ref), val)
+                                )
+                                e.pack(side="left", fill="x", expand=True)
+                                cells[field] = (ref, val, e)
+                            self._bom_rows.append({
+                                "file": f, "sheet": mt["sheet"],
+                                "part": mt["part"], "row": mt["row"],
+                                "cells": cells,
+                            })
                 if not any_match:
                     ttk.Label(
                         inner, text="No matches for the current Find value(s).",
@@ -3694,6 +3722,40 @@ def launch_gui() -> int:
         def _clear_out_dir(self):
             self.out_dir = ""
             self.out_dir_lbl.configure(text="(same folder as each source file)")
+
+        # -- reset everything ----------------------------------------------
+        def reset_all(self):
+            """Clear loaded files, all find/replace rules, every staged edit
+            and the output folder, so a fresh file/batch starts from scratch."""
+            if not messagebox.askyesno(
+                "Reset everything?",
+                "This clears the loaded files, all find/replace rules, every "
+                "staged edit (BOM rows, Change Log, Author, revision entry, "
+                "approvals) and the output folder.\n\nStart from scratch?",
+            ):
+                return
+            # Files.
+            self.files = []
+            self.refresh_files_box()
+            # Rules: drop them all, then re-add a single empty one.
+            for r in list(self.rule_rows):
+                r["frame"].destroy()
+            self.rule_rows = []
+            self._rbuttons = [b for b in self._rbuttons if b.winfo_exists()]
+            self.add_pair()
+            # Every staged action.
+            self.bom_edits = {}
+            self.changelog_entry = {}
+            self.author_name = ""
+            self.visio_rev_entry = {}
+            self.visio_approval = {}
+            self.excel_approval = {}
+            self.bom_status.configure(text="")
+            self._clear_out_dir()
+            self.log(
+                "Reset: cleared files, rules, all staged edits and the output "
+                "folder. Ready for a new file or batch."
+            )
 
         # -- run ------------------------------------------------------------
         def run(self):

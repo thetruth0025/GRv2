@@ -243,6 +243,13 @@ everything in one place, use **Output folder → Choose folder...** in the Optio
 section — every result (and the change summary) is written there instead.
 **Use source folder** switches back to the default.
 
+### Reset all
+
+The orange **Reset all** button (next to *Replace & Convert*) clears the loaded
+files, every find/replace rule, all staged edits (BOM rows, Change Log entry,
+Author, Visio revision entry, and both approvals) and the output folder — so you
+can start from scratch on a new file or batch. It asks for confirmation first.
+
 ### Change summary (for approval review)
 
 With **Generate change summary** ticked (on by default), the tool writes a
