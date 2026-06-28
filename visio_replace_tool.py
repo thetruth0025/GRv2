@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.7 (multi-sheet REV + Visio revision entry)"
+__version__ = "2.7.1 (Visio revision entry: real-file fixes)"
 
 import argparse
 import datetime
@@ -502,19 +502,48 @@ def _detect_revtable(page_xml):
     if not rows:
         return None
 
-    # Data rows sit on one side of the header; keep the majority side.
-    below = [r for r in rows if r["y"] < header_y]
-    above = [r for r in rows if r["y"] > header_y]
-    data = below if len(below) >= len(above) else above
+    # The real revision rows form a regular grid butting up against the header.
+    # Other shapes on the page (part number, SIZE/REV/TITLE blocks, etc.) can
+    # coincidentally line up with a column, so we don't trust every aligned row.
+    # Instead we walk outward from the header in fixed-pitch steps and keep only
+    # the contiguous, mostly-complete rows -- this excludes stray title-block
+    # text that sits far from the table.
+    ncols = len(col_x)
+    need = max(2, ncols - 1)  # a real row fills almost every column
+    qual = [r for r in rows
+            if len(r["cells"]) >= need and abs(r["y"] - header_y) > 1e-6]
+    if not qual:
+        return None
+    nearest = min(qual, key=lambda r: abs(r["y"] - header_y))
+    pitch = abs(nearest["y"] - header_y)
+    if pitch <= 1e-6:
+        return None
+    slot_tol = min(row_tol, pitch * 0.45)
+
+    def walk(direction):
+        seq, k = [], 1
+        while k <= 500:
+            target = header_y + direction * k * pitch
+            hit = None
+            for r in rows:
+                if (len(r["cells"]) >= need
+                        and abs(r["y"] - target) <= slot_tol
+                        and (hit is None
+                             or abs(r["y"] - target) < abs(hit["y"] - target))):
+                    hit = r
+            if hit is None:
+                break
+            seq.append(hit)
+            k += 1
+        return seq
+
+    down, up = walk(-1), walk(1)
+    data = down if len(down) >= len(up) else up
     if not data:
         return None
-    grow_down = data is below  # newest revision extends away from the header
-    data.sort(key=lambda r: r["y"], reverse=not grow_down)
-
-    ys = [header_y] + [r["y"] for r in data]
-    diffs = [abs(a - b) for a, b in zip(ys, ys[1:]) if abs(a - b) > 1e-6]
-    pitch = (sorted(diffs)[len(diffs) // 2] if diffs else
-             (heights[0] if heights else 0.25))
+    grow_down = data is down  # rows extend away from the header in this dir
+    # ``data`` is ordered nearest-header -> farthest; the farthest row is the
+    # most recent revision, and the next new row goes one pitch past it.
 
     return {
         "col_x": col_x, "header_y": header_y, "rows": data,
@@ -522,10 +551,15 @@ def _detect_revtable(page_xml):
     }
 
 
+# Visio attributes may use single OR double quotes; match either.
+_LEAD_FMT_RE = re.compile(r'\s*<(?:cp|pp|tp)\b[^>]*/>', re.IGNORECASE)
+
+
 def _leaf_shape_span(page_xml, sid):
-    """Raw [start, end) of a leaf <Shape ID="sid">...</Shape> (or self-closing)."""
-    m = re.search(r'<Shape\b[^>]*\bID="' + re.escape(str(sid)) + r'"[^>]*?(/?)>',
-                  page_xml)
+    """Raw [start, end) of a leaf <Shape ID="sid">...</Shape> (or self-closing).
+    Attribute quoting (single or double) is handled."""
+    m = re.search(r'<Shape\b[^>]*\bID=["\']' + re.escape(str(sid))
+                  + r'["\'][^>]*?(/?)>', page_xml)
     if not m:
         return None
     if m.group(1) == "/":  # self-closing <Shape .../>
@@ -537,12 +571,22 @@ def _leaf_shape_span(page_xml, sid):
 
 
 def _set_shape_text_raw(raw: str, text: str) -> str:
-    """Set a leaf shape's text (replaces its <Text> body, or inserts one)."""
+    """Set a leaf shape's text, keeping the leading Visio formatting markers
+    (<cp/>, <pp/>, <tp/>) so the new text inherits the cell's font/size."""
     esc = xml_escape(text)
+
+    def repl(m):
+        inner, i, prefix = m.group(2), 0, ""
+        while True:
+            tm = _LEAD_FMT_RE.match(inner, i)
+            if not tm:
+                break
+            prefix += inner[i:tm.end()]
+            i = tm.end()
+        return m.group(1) + prefix + esc + m.group(3)
+
     if _TEXT_BLOCK_RE.search(raw):
-        return _TEXT_BLOCK_RE.sub(
-            lambda mm: mm.group(1) + esc + mm.group(3), raw, count=1
-        )
+        return _TEXT_BLOCK_RE.sub(repl, raw, count=1)
     close = raw.rfind("</Shape>")
     if close < 0:
         return raw
@@ -587,8 +631,11 @@ def add_revision_entry_to_page(page_xml: str, entry: dict):
     last = rows[-1]
     new_y = last["y"] - tbl["pitch"] if tbl["grow_down"] else \
         last["y"] + tbl["pitch"]
-    piny_re = re.compile(r'(<Cell\b[^>]*\bN="PinY"[^>]*?\bV=")[^"]*(")')
-    has_formula = re.compile(r'<Cell\b[^>]*\bN="PinY"[^>]*\bF="')
+    # PinY value (single or double quoted), captured so we can swap only it.
+    piny_re = re.compile(
+        r'(<Cell\b[^>]*?\bN=["\']PinY["\'][^>]*?\bV=)(["\'])[^"\']*\2')
+    has_formula = re.compile(
+        r'<Cell\b[^>]*?\bN=["\']PinY["\'][^>]*?\bF=["\']')
     inserts = []  # (after_index, new_raw)
     next_id = tbl["max_id"]
     for f in writable:
@@ -600,12 +647,16 @@ def add_revision_entry_to_page(page_xml: str, entry: dict):
             return page_xml, "no_slot"
         raw = page_xml[span[0]:span[1]]
         if has_formula.search(raw) or not piny_re.search(raw):
-            return page_xml, "no_slot"  # can't reposition safely
+            return page_xml, "no_slot"  # PinY is a formula; can't reposition
         next_id += 1
-        clone = re.sub(r'(<Shape\b[^>]*\bID=")\d+(")',
-                       r'\g<1>' + str(next_id) + r'\g<2>', raw, count=1)
-        clone = re.sub(r'\s+(UniqueID|NameU|Name)="[^"]*"', "", clone)
-        clone = piny_re.sub(r'\g<1>' + f"{new_y:.6f}" + r'\g<2>', clone, count=1)
+        clone = re.sub(
+            r'(<Shape\b[^>]*\bID=)(["\'])\d+\2',
+            lambda m: f"{m.group(1)}{m.group(2)}{next_id}{m.group(2)}",
+            raw, count=1)
+        clone = re.sub(r'\s+(?:UniqueID|NameU|Name)=(["\'])[^"\']*\1', "", clone)
+        clone = piny_re.sub(
+            lambda m: f"{m.group(1)}{m.group(2)}{new_y:.6f}{m.group(2)}",
+            clone, count=1)
         clone = _set_shape_text_raw(clone, values[f])
         inserts.append((span[1], clone))
     if not inserts:
