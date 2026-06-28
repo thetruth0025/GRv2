@@ -2567,6 +2567,7 @@ def launch_gui() -> int:
         "border": "#cbd5e1", "field": "#ffffff", "field_fg": "#1f2933",
         "btn": "#dbe3ee", "btn_fg": "#1f2933", "btn_hover": "#c7d3e3",
         "btn_off": "#cdd6e2", "btn_off_fg": "#8a97a8",
+        "green": "#16a34a", "green_dk": "#15803d",
         "banner": "#2563eb", "banner_sub": "#cfe0ff", "sel": "#2563eb",
     }
     DARK = {
@@ -2575,6 +2576,7 @@ def launch_gui() -> int:
         "border": "#3a4150", "field": "#2b3240", "field_fg": "#e6e9ef",
         "btn": "#3a4150", "btn_fg": "#e6e9ef", "btn_hover": "#49525f",
         "btn_off": "#333a47", "btn_off_fg": "#6b7585",
+        "green": "#22c55e", "green_dk": "#16a34a",
         "banner": "#172554", "banner_sub": "#9db8ff", "sel": "#3b82f6",
     }
 
@@ -2594,7 +2596,7 @@ def launch_gui() -> int:
             self._hover = False
             self.font = font or tkfont.Font(
                 family="Segoe UI", size=10,
-                weight="bold" if kind == "accent" else "normal",
+                weight="bold" if kind in ("accent", "green") else "normal",
             )
             w = self.font.measure(text) + padx * 2
             h = self.font.metrics("linespace") + pady * 2
@@ -2612,6 +2614,8 @@ def launch_gui() -> int:
                 return p["btn_off"], p["btn_off_fg"]
             if self.kind == "accent":
                 return (p["accent_dk"] if self._hover else p["accent"]), "#ffffff"
+            if self.kind == "green":
+                return (p["green_dk"] if self._hover else p["green"]), "#ffffff"
             return (p["btn_hover"] if self._hover else p["btn"]), p["btn_fg"]
 
         def _draw(self):
@@ -2794,7 +2798,7 @@ def launch_gui() -> int:
             ).pack(side="left")
             self._rbtn(
                 excel_btns, "Excel: approve (EE/ME/Prod)...",
-                self.open_excel_approval,
+                self.open_excel_approval, kind="green",
             ).pack(side="left", padx=8)
 
             visio_btns = ttk.Frame(mid)
@@ -2805,7 +2809,7 @@ def launch_gui() -> int:
             ).pack(side="left")
             self._rbtn(
                 visio_btns, "Visio: approve revision...",
-                self.open_visio_approval,
+                self.open_visio_approval, kind="green",
             ).pack(side="left", padx=8)
 
             # --- 3. Options ------------------------------------------------
@@ -3562,7 +3566,7 @@ def launch_gui() -> int:
 
             btns = ttk.Frame(win)
             btns.pack(fill="x", padx=10, pady=10)
-            self._rbtn(btns, "Save", apply, kind="accent").pack(side="right")
+            self._rbtn(btns, "Save", apply, kind="green").pack(side="right")
             self._rbtn(btns, "Cancel", win.destroy).pack(side="right", padx=6)
 
         # -- Excel approval (EE / ME / Production sign off) ----------------
@@ -3626,7 +3630,7 @@ def launch_gui() -> int:
 
             btns = ttk.Frame(win)
             btns.pack(fill="x", padx=10, pady=10)
-            self._rbtn(btns, "Save", apply, kind="accent").pack(side="right")
+            self._rbtn(btns, "Save", apply, kind="green").pack(side="right")
             self._rbtn(btns, "Cancel", win.destroy).pack(side="right", padx=6)
 
         # -- run ------------------------------------------------------------
