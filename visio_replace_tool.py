@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.4 (dark mode + rounded buttons)"
+__version__ = "2.5 (per-file BOM editing + refresh)"
 
 import argparse
 import datetime
@@ -2319,61 +2319,33 @@ def launch_gui() -> int:
             return seen
 
         def open_bom_editor(self):
-            parts = self._find_values()
-            if not parts:
+            if not self._find_values():
                 messagebox.showinfo(
                     "No Find values",
                     "Type the part number(s) into the Find box(es) first.",
                 )
                 return
-            excel_files = [f for f in self.files
-                           if detect_format(f) == "xlsx"]
-            if not excel_files:
+            if not any(detect_format(f) == "xlsx" for f in self.files):
                 messagebox.showinfo(
                     "No Excel files", "Add at least one .xlsx file first."
                 )
                 return
+            self._build_bom_window()
 
-            found: dict = {}            # part -> {field: value}
-            files_with: dict = {}       # part -> set(files)
-            rows_with: dict = {}        # part -> count
-            cs = self.case_var.get()
-            for f in excel_files:
-                try:
-                    matches = excel_scan_rows(f, parts, cs)
-                except Exception:  # noqa: BLE001
-                    matches = []
-                for mt in matches:
-                    p = mt["matched"]
-                    files_with.setdefault(p, set()).add(f)
-                    rows_with[p] = rows_with.get(p, 0) + 1
-                    if p not in found:
-                        found[p] = {
-                            fld: val for fld, (ref, val) in mt["fields"].items()
-                        }
-            if not found:
-                messagebox.showinfo(
-                    "No rows found",
-                    "None of the Find value(s) were located in a P/N / "
-                    "Part Number column of the Excel files.",
-                )
-                return
-
-            self._build_bom_window(found, files_with, rows_with)
-
-        def _build_bom_window(self, found, files_with, rows_with):
+        def _build_bom_window(self):
             win = tk.Toplevel(self.root)
             win.title("Find & edit Excel rows")
-            win.geometry("680x520")
+            win.geometry("720x560")
             win.transient(self.root)
             win.grab_set()
             win.configure(bg=self.palette["bg"])
 
             ttk.Label(
-                win, wraplength=640, justify="left",
-                text="Edit any field below to a new value. Changes are applied "
-                "to that part number's row in EVERY Excel file that contains "
-                "it. Fields you leave unchanged are not touched.",
+                win, wraplength=690, justify="left",
+                text="Each matched row is shown per file, so you can give a row "
+                "a different value in one file than another. Edit any field, "
+                "then Save. Fields you leave unchanged are not touched. Use "
+                "Refresh after adding files or changing the Find value(s).",
             ).pack(fill="x", padx=10, pady=8)
 
             canvas = tk.Canvas(win, highlightthickness=0,
@@ -2389,43 +2361,94 @@ def launch_gui() -> int:
             canvas.pack(side="left", fill="both", expand=True, padx=(10, 0))
             sb.pack(side="left", fill="y", padx=(0, 10))
 
-            entries: dict = {}
-            for part in found:
-                lf = ttk.LabelFrame(
-                    inner,
-                    text=f"P/N: {part}    (in {len(files_with[part])} file(s), "
-                    f"{rows_with[part]} row(s))",
-                )
-                lf.pack(fill="x", padx=6, pady=6)
-                entries[part] = {}
-                for field in BOM_FIELD_ORDER:
-                    if field == "Part Number":
+            # Each editable row: {file, sheet, part, row, cells:{field:(ref,
+            # orig, entry)}}.
+            self._bom_rows: list = []
+
+            def populate():
+                # Preserve already-entered values across a refresh.
+                snap = {}
+                for r in self._bom_rows:
+                    for _fld, (ref, _orig, e) in r["cells"].items():
+                        try:
+                            snap[(r["file"], r["sheet"], ref)] = e.get()
+                        except tk.TclError:
+                            pass
+                for w in inner.winfo_children():
+                    w.destroy()
+                self._bom_rows = []
+
+                parts = self._find_values()
+                cs = self.case_var.get()
+                any_match = False
+                for f in [x for x in self.files
+                          if detect_format(x) == "xlsx"]:
+                    try:
+                        matches = excel_scan_rows(f, parts, cs)
+                    except Exception:  # noqa: BLE001
+                        matches = []
+                    if not matches:
                         continue
-                    val = found[part].get(field, "")
-                    rowf = ttk.Frame(lf)
-                    rowf.pack(fill="x", padx=6, pady=2)
-                    ttk.Label(rowf, text=field + ":", width=14).pack(side="left")
-                    e = ttk.Entry(rowf)
-                    e.insert(0, val)
-                    e.pack(side="left", fill="x", expand=True)
-                    entries[part][field] = (e, val)
+                    any_match = True
+                    ttk.Label(
+                        inner, text="📄  " + Path(f).name,
+                        font=("Segoe UI", 10, "bold"),
+                        foreground=self.palette["accent"],
+                    ).pack(anchor="w", padx=6, pady=(10, 0))
+                    for mt in matches:
+                        lf = ttk.LabelFrame(
+                            inner,
+                            text=f"P/N: {mt['part']}    (row {mt['row']})",
+                        )
+                        lf.pack(fill="x", padx=12, pady=4)
+                        cells = {}
+                        for field in BOM_FIELD_ORDER:
+                            if field == "Part Number":
+                                continue
+                            cell = mt["fields"].get(field)
+                            if cell is None:
+                                continue
+                            ref, val = cell
+                            rowf = ttk.Frame(lf)
+                            rowf.pack(fill="x", padx=6, pady=2)
+                            ttk.Label(rowf, text=field + ":", width=14).pack(
+                                side="left"
+                            )
+                            e = ttk.Entry(rowf)
+                            e.insert(0, snap.get((f, mt["sheet"], ref), val))
+                            e.pack(side="left", fill="x", expand=True)
+                            cells[field] = (ref, val, e)
+                        self._bom_rows.append({
+                            "file": f, "sheet": mt["sheet"],
+                            "part": mt["part"], "row": mt["row"],
+                            "cells": cells,
+                        })
+                if not any_match:
+                    ttk.Label(
+                        inner, text="No matches for the current Find value(s).",
+                    ).pack(padx=10, pady=12)
+                canvas.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            populate()
 
             def apply():
-                edits = {}
-                for part, flds in entries.items():
-                    changed = {f: e.get() for f, (e, orig) in flds.items()
-                               if e.get() != orig}
-                    if changed:
-                        edits[part] = changed
+                edits: dict = {}  # {file: {sheet: {ref: value}}}
+                n = 0
+                for r in self._bom_rows:
+                    for _fld, (ref, orig, e) in r["cells"].items():
+                        if e.get() != orig:
+                            edits.setdefault(r["file"], {}).setdefault(
+                                r["sheet"], {}
+                            )[ref] = e.get()
+                            n += 1
                 self.bom_edits = edits
-                n = sum(len(v) for v in edits.values())
                 self.bom_status.configure(
-                    text=(f"{n} row edit(s) staged" if n else "")
+                    text=(f"{n} cell edit(s) staged" if n else "")
                 )
                 self.log(
-                    f"Staged {n} Excel field edit(s) across "
-                    f"{len(edits)} part number(s)."
-                    if n else "No Excel field edits staged."
+                    f"Staged {n} Excel cell edit(s) across {len(edits)} file(s)."
+                    if n else "No Excel cell edits staged."
                 )
                 win.destroy()
 
@@ -2437,6 +2460,7 @@ def launch_gui() -> int:
             self._rbtn(btns, "Cancel", win.destroy).pack(
                 side="right", padx=6
             )
+            self._rbtn(btns, "🔄  Refresh", populate).pack(side="left")
 
         # -- Change Log entry ----------------------------------------------
         def open_changelog_editor(self):
@@ -2600,11 +2624,9 @@ def launch_gui() -> int:
                             and detect_format(f) == "xlsx"):
                         merged: dict = {}
                         try:
-                            if bom_edits:
-                                for part, d in build_excel_cell_edits(
-                                    f, bom_edits, case_sensitive
-                                ).items():
-                                    merged.setdefault(part, {}).update(d)
+                            # BOM edits are per-file: {file: {sheet: {ref: val}}}
+                            for sheet, cells in bom_edits.get(f, {}).items():
+                                merged.setdefault(sheet, {}).update(cells)
                             if changelog_entry:
                                 for part, d in build_changelog_cell_edits(
                                     f, changelog_entry

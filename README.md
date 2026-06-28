@@ -134,16 +134,19 @@ its number. Put the part number in a **Find** box, then click
 
 1. Finds the column headed **P/N** / **Part Number** (also `P/n`, etc.) in each
    loaded `.xlsx`, and locates every row whose part number matches a Find value.
-2. Shows that row's other fields under their headers — **Manufacturer**,
-   **Unit Cost**, **Description**, **Qty** (or Quantity), **Notes** (or
-   Comments) — pre-filled with the current values.
-3. Lets you change any of them. When you click **Save edits**, those changes are
-   staged.
+2. Lists each matched row **grouped by file** (e.g. *DOC11111…* then its rows,
+   *DOC22222…* then its rows), with that row's other fields under their headers
+   — **Manufacturer**, **Unit Cost**, **Description**, **Qty** (or Quantity),
+   **Notes** (or Comments) — pre-filled with the current values.
+3. Lets you edit each row **individually per file**, so the same part can get a
+   different Qty (or any value) in one file than another. Click **Save edits**
+   to stage them.
+4. **Refresh** re-runs the lookup — use it after adding files or changing the
+   Find value(s); values you've already typed are kept.
 
-On **Replace & Convert**, the staged changes are written to that part number's
-row in **every** Excel file that contains it (and on every matching row).
-Fields you leave unchanged are not touched, numbers stay numeric, and the P/N
-itself is changed by your normal Find → Replace rule.
+On **Replace & Convert**, each row's staged changes are written to that exact
+cell in that file. Fields you leave unchanged are not touched, numbers stay
+numeric, and the P/N itself is changed by your normal Find → Replace rule.
 
 ### The "Change Log" sheet is protected
 
