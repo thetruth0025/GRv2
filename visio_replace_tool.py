@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.3 (modern UI; author on all sheets)"
+__version__ = "2.4 (dark mode + rounded buttons)"
 
 import argparse
 import datetime
@@ -1734,28 +1734,130 @@ def launch_gui() -> int:
     # Imported lazily so the core logic / CLI work without a display.
     import threading
     import tkinter as tk
+    import tkinter.font as tkfont
     from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+    LIGHT = {
+        "bg": "#eef1f6", "card": "#ffffff", "accent": "#2563eb",
+        "accent_dk": "#1d4ed8", "text": "#1f2933", "muted": "#5b6b7b",
+        "border": "#cbd5e1", "field": "#ffffff", "field_fg": "#1f2933",
+        "btn": "#dbe3ee", "btn_fg": "#1f2933", "btn_hover": "#c7d3e3",
+        "btn_off": "#cdd6e2", "btn_off_fg": "#8a97a8",
+        "banner": "#2563eb", "banner_sub": "#cfe0ff", "sel": "#2563eb",
+    }
+    DARK = {
+        "bg": "#1f2430", "card": "#272d3a", "accent": "#3b82f6",
+        "accent_dk": "#2563eb", "text": "#e6e9ef", "muted": "#9aa6b2",
+        "border": "#3a4150", "field": "#2b3240", "field_fg": "#e6e9ef",
+        "btn": "#3a4150", "btn_fg": "#e6e9ef", "btn_hover": "#49525f",
+        "btn_off": "#333a47", "btn_off_fg": "#6b7585",
+        "banner": "#172554", "banner_sub": "#9db8ff", "sel": "#3b82f6",
+    }
+
+    class RoundedButton(tk.Canvas):
+        """A flat button with rounded corners drawn on a canvas."""
+
+        def __init__(self, parent, text="", command=None, kind="normal",
+                     palette=LIGHT, radius=11, padx=16, pady=8, font=None,
+                     bg_key="bg"):
+            self.palette = palette
+            self.kind = kind
+            self.command = command
+            self.radius = radius
+            self.bg_key = bg_key
+            self._text = text
+            self._enabled = True
+            self._hover = False
+            self.font = font or tkfont.Font(
+                family="Segoe UI", size=10,
+                weight="bold" if kind == "accent" else "normal",
+            )
+            w = self.font.measure(text) + padx * 2
+            h = self.font.metrics("linespace") + pady * 2
+            super().__init__(parent, width=w, height=h, highlightthickness=0,
+                             bd=0, bg=palette[bg_key])
+            self.bind("<Enter>", lambda e: self._set_hover(True))
+            self.bind("<Leave>", lambda e: self._set_hover(False))
+            self.bind("<Button-1>", self._click)
+            self.bind("<Configure>", lambda e: self._draw())
+            self._draw()
+
+        def _fill_fg(self):
+            p = self.palette
+            if not self._enabled:
+                return p["btn_off"], p["btn_off_fg"]
+            if self.kind == "accent":
+                return (p["accent_dk"] if self._hover else p["accent"]), "#ffffff"
+            return (p["btn_hover"] if self._hover else p["btn"]), p["btn_fg"]
+
+        def _draw(self):
+            self.delete("all")
+            w, h, r = int(self["width"]), int(self["height"]), self.radius
+            fill, fg = self._fill_fg()
+            self.configure(bg=self.palette[self.bg_key])
+            pts = [r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
+                   w - r, h, r, h, 0, h, 0, h - r, 0, r, 0, 0]
+            self.create_polygon(pts, smooth=True, splinesteps=16,
+                                 fill=fill, outline=fill)
+            self.create_text(w // 2, h // 2 + 1, text=self._text, fill=fg,
+                             font=self.font)
+
+        def _set_hover(self, v):
+            if self._enabled:
+                self._hover = v
+                self.configure(cursor="hand2" if v else "")
+                self._draw()
+
+        def _click(self, _e):
+            if self._enabled and self.command:
+                self.command()
+
+        def set_enabled(self, v):
+            self._enabled = bool(v)
+            self._hover = False
+            self._draw()
+
+        def set_palette(self, palette):
+            self.palette = palette
+            self._draw()
+
+        def configure_text(self, text):
+            self._text = text
+            self._draw()
 
     class App:
         def __init__(self, root: "tk.Tk"):
             self.root = root
             root.title(f"Visio / Excel Text Replacer   [v{__version__}]")
-            root.geometry("860x780")
-            root.minsize(700, 660)
-            self.colors = self._setup_style()
+            root.geometry("860x800")
+            root.minsize(700, 680)
+            self.dark = False
+            self.palette = LIGHT
+            self._rbuttons: list = []      # rounded buttons to re-theme
+            self._setup_style()
 
-            # Title banner
-            banner = tk.Frame(root, bg=self.colors["accent"])
-            banner.pack(fill="x")
-            tk.Label(
-                banner, text="Visio / Excel Text Replacer",
-                bg=self.colors["accent"], fg="#ffffff",
+            # Title banner (with a Light/Dark toggle)
+            self._banner = tk.Frame(root, bg=self.palette["banner"])
+            self._banner.pack(fill="x")
+            self._banner_title = tk.Label(
+                self._banner, text="Visio / Excel Text Replacer",
+                bg=self.palette["banner"], fg="#ffffff",
                 font=("Segoe UI", 15, "bold"),
-            ).pack(side="left", padx=16, pady=10)
-            tk.Label(
-                banner, text=f"v{__version__}", bg=self.colors["accent"],
-                fg="#cfe0ff", font=("Segoe UI", 9),
-            ).pack(side="left", pady=(14, 0))
+            )
+            self._banner_title.pack(side="left", padx=16, pady=10)
+            self._banner_sub = tk.Label(
+                self._banner, text=f"v{__version__}",
+                bg=self.palette["banner"], fg=self.palette["banner_sub"],
+                font=("Segoe UI", 9),
+            )
+            self._banner_sub.pack(side="left", pady=(14, 0))
+            self.theme_btn = RoundedButton(
+                self._banner, text="🌙  Dark", command=self.toggle_theme,
+                kind="normal", palette=self.palette, radius=14,
+                bg_key="banner", padx=12, pady=6,
+            )
+            self.theme_btn.pack(side="right", padx=14, pady=8)
+            self._rbuttons.append(self.theme_btn)
 
             self.files: List[str] = []
             # Each rule: {frame, find, repl, menubtn, menu, all_var, cat_vars}.
@@ -1791,30 +1893,27 @@ def launch_gui() -> int:
 
             btn_row = ttk.Frame(top)
             btn_row.pack(fill="x", padx=8, pady=2)
-            self.add_btn = ttk.Button(
-                btn_row, text="Add file...", command=self.add_files
+            self.add_btn = self._rbtn(
+                btn_row, "Add file...", self.add_files
             )
             self.add_btn.pack(side="left")
-            self.folder_btn = ttk.Button(
-                btn_row, text="Add folder...", command=self.add_folder
+            self.folder_btn = self._rbtn(
+                btn_row, "Add folder...", self.add_folder
             )
             self.folder_btn.pack(side="left", padx=6)
-            ttk.Button(
-                btn_row, text="Remove selected",
-                command=self.remove_selected_files,
+            self._rbtn(
+                btn_row, "Remove selected", self.remove_selected_files
             ).pack(side="left", padx=6)
-            ttk.Button(
-                btn_row, text="Clear", command=self.clear_files
-            ).pack(side="left")
+            self._rbtn(btn_row, "Clear", self.clear_files).pack(side="left")
 
             list_row = ttk.Frame(top)
             list_row.pack(fill="x", padx=8, pady=(2, 8))
             self.files_box = tk.Listbox(
                 list_row, height=5, selectmode="extended",
-                activestyle="none", bg=self.colors["field"],
-                fg=self.colors["text"], font=("Segoe UI", 10),
+                activestyle="none", bg=self.palette["field"],
+                fg=self.palette["field_fg"], font=("Segoe UI", 10),
                 relief="solid", borderwidth=1,
-                highlightthickness=0, selectbackground=self.colors["accent"],
+                highlightthickness=0, selectbackground=self.palette["sel"],
                 selectforeground="#ffffff",
             )
             self.files_box.pack(side="left", fill="both", expand=True)
@@ -1835,20 +1934,19 @@ def launch_gui() -> int:
             self.add_pair()
             rule_btns = ttk.Frame(mid)
             rule_btns.pack(fill="x", padx=8, pady=(0, 8))
-            ttk.Button(
-                rule_btns, text="+ Add another rule", command=self.add_pair
+            self._rbtn(
+                rule_btns, "+ Add another rule", self.add_pair
             ).pack(side="left")
-            ttk.Button(
-                rule_btns, text="Excel: find & edit rows...",
-                command=self.open_bom_editor,
+            self._rbtn(
+                rule_btns, "Excel: find & edit rows...", self.open_bom_editor
             ).pack(side="left", padx=8)
-            ttk.Button(
-                rule_btns, text="Excel: add Change Log entry...",
-                command=self.open_changelog_editor,
+            self._rbtn(
+                rule_btns, "Excel: add Change Log entry...",
+                self.open_changelog_editor,
             ).pack(side="left")
-            ttk.Button(
-                rule_btns, text="Excel: set Author + date...",
-                command=self.open_author_editor,
+            self._rbtn(
+                rule_btns, "Excel: set Author + date...",
+                self.open_author_editor,
             ).pack(side="left", padx=8)
             self.bom_status = ttk.Label(rule_btns, text="")
             self.bom_status.pack(side="left", padx=8)
@@ -1903,9 +2001,9 @@ def launch_gui() -> int:
             # --- Run -------------------------------------------------------
             run = ttk.Frame(root)
             run.pack(fill="x", **pad)
-            self.run_btn = ttk.Button(
-                run, text="Replace  &  Convert", command=self.run,
-                style="Accent.TButton",
+            self.run_btn = self._rbtn(
+                run, "Replace  &  Convert", self.run, kind="accent",
+                radius=13, padx=22, pady=10,
             )
             self.run_btn.pack(side="left", padx=8)
             self.progress = ttk.Progressbar(
@@ -1918,7 +2016,7 @@ def launch_gui() -> int:
             logf.pack(fill="both", expand=True, **pad)
             self.log_box = scrolledtext.ScrolledText(
                 logf, height=8, state="disabled", wrap="word",
-                bg=self.colors["field"], fg=self.colors["text"],
+                bg=self.palette["field"], fg=self.palette["field_fg"],
                 font=("Consolas", 9), relief="flat", borderwidth=0,
                 highlightthickness=0,
             )
@@ -1934,14 +2032,9 @@ def launch_gui() -> int:
                     "PDF output. Text replacement still works."
                 )
 
-        def _setup_style(self) -> dict:
-            """Apply a modern flat theme; return the color palette."""
-            c = {
-                "bg": "#eef1f6", "card": "#ffffff", "accent": "#2563eb",
-                "accent_dk": "#1d4ed8", "text": "#1f2933",
-                "muted": "#5b6b7b", "border": "#cbd5e1",
-                "field": "#ffffff", "ok": "#16a34a",
-            }
+        def _setup_style(self):
+            """Apply the current palette to the ttk widgets."""
+            c = self.palette
             base = ("Segoe UI", 10)
             style = ttk.Style()
             try:
@@ -1955,36 +2048,59 @@ def launch_gui() -> int:
             style.configure("TLabel", background=c["bg"], foreground=c["text"])
             for w in ("TCheckbutton", "TRadiobutton"):
                 style.configure(w, background=c["bg"], foreground=c["text"])
-                style.map(w, background=[("active", c["bg"])])
+                style.map(w, background=[("active", c["bg"])],
+                          foreground=[("disabled", c["muted"])])
             style.configure("TLabelframe", background=c["bg"],
                             bordercolor=c["border"], relief="solid",
                             borderwidth=1)
             style.configure("TLabelframe.Label", background=c["bg"],
                             foreground=c["accent"],
                             font=("Segoe UI", 10, "bold"))
-            style.configure("TButton", padding=(10, 5), relief="flat",
-                            background="#dbe3ee", foreground=c["text"],
-                            borderwidth=0)
-            style.map("TButton", background=[("active", "#c7d3e3")])
-            style.configure("Accent.TButton", padding=(16, 8),
-                            font=("Segoe UI", 10, "bold"),
-                            background=c["accent"], foreground="#ffffff",
-                            borderwidth=0, relief="flat")
-            style.map("Accent.TButton",
-                      background=[("active", c["accent_dk"]),
-                                  ("pressed", c["accent_dk"]),
-                                  ("disabled", "#9bb4e8")])
             style.configure("TEntry", fieldbackground=c["field"],
-                            bordercolor=c["border"], padding=4)
+                            foreground=c["field_fg"], bordercolor=c["border"],
+                            insertcolor=c["field_fg"], padding=4)
+            style.map("TEntry", fieldbackground=[("disabled", c["bg"])])
             style.configure("TMenubutton", background=c["field"],
-                            foreground=c["text"], padding=(8, 4),
-                            relief="solid", borderwidth=1)
-            style.map("TMenubutton", background=[("active", "#eef2f8")])
-            style.configure("TCombobox", fieldbackground=c["field"])
+                            foreground=c["field_fg"], padding=(8, 4),
+                            arrowcolor=c["text"], relief="solid",
+                            borderwidth=1, bordercolor=c["border"])
+            style.map("TMenubutton", background=[("active", c["btn_hover"])])
+            style.configure("TCombobox", fieldbackground=c["field"],
+                            foreground=c["field_fg"])
             style.configure("Horizontal.TProgressbar",
-                            background=c["accent"], troughcolor=c["bg"],
+                            background=c["accent"], troughcolor=c["card"],
                             bordercolor=c["bg"])
-            return c
+            style.configure("Vertical.TScrollbar", background=c["btn"],
+                            troughcolor=c["bg"], bordercolor=c["bg"],
+                            arrowcolor=c["text"])
+
+        def _rbtn(self, parent, text, command, kind="normal", **kw):
+            b = RoundedButton(parent, text=text, command=command, kind=kind,
+                              palette=self.palette, **kw)
+            self._rbuttons.append(b)
+            return b
+
+        def toggle_theme(self):
+            self.dark = not self.dark
+            self.palette = DARK if self.dark else LIGHT
+            self.theme_btn.configure_text(
+                "☀  Light" if self.dark else "🌙  Dark"
+            )
+            self._setup_style()
+            self._recolor()
+
+        def _recolor(self):
+            c = self.palette
+            self._banner.configure(bg=c["banner"])
+            self._banner_title.configure(bg=c["banner"])
+            self._banner_sub.configure(bg=c["banner"], fg=c["banner_sub"])
+            self.files_box.configure(
+                bg=c["field"], fg=c["field_fg"], selectbackground=c["sel"]
+            )
+            self.log_box.configure(bg=c["field"], fg=c["field_fg"])
+            for b in self._rbuttons:
+                b.set_palette(c)
+            self._refresh_rule_menus()  # recolors the dropdown menus
 
         def _sync_rev_options(self):
             self.revtext_chk.configure(
@@ -1994,8 +2110,10 @@ def launch_gui() -> int:
         # -- file list ------------------------------------------------------
         def on_mode_change(self):
             single = self.mode_var.get() == "single"
-            self.add_btn.configure(text="Choose file..." if single else "Add files...")
-            self.folder_btn.configure(state="disabled" if single else "normal")
+            self.add_btn.configure_text(
+                "Choose file..." if single else "Add files..."
+            )
+            self.folder_btn.set_enabled(not single)
             if single and len(self.files) > 1:
                 self.files = self.files[:1]
                 self.refresh_files_box()
@@ -2064,8 +2182,15 @@ def launch_gui() -> int:
         def _refresh_rule_menus(self):
             """Rebuild every rule's multi-select dropdown of file TYPES."""
             cats = self._present_categories()
+            pal = self.palette
             for rule in self.rule_rows:
                 menu = rule["menu"]
+                menu.configure(
+                    bg=pal["field"], fg=pal["field_fg"],
+                    activebackground=pal["accent"],
+                    activeforeground="#ffffff",
+                    selectcolor=pal["accent"], borderwidth=0,
+                )
                 menu.delete(0, "end")
                 cv = rule["cat_vars"]
                 for c in list(cv):  # drop categories no longer present
@@ -2136,9 +2261,9 @@ def launch_gui() -> int:
                 "menubtn": menubtn, "menu": menu,
                 "all_var": tk.BooleanVar(value=True), "cat_vars": {},
             }
-            ttk.Button(
-                row, text="X", width=3,
-                command=lambda r=rule: self.remove_pair(r),
+            self._rbtn(
+                row, "✕", lambda r=rule: self.remove_pair(r),
+                padx=10, pady=6,
             ).pack(side="left", padx=4)
             self.rule_rows.append(rule)
             self._refresh_rule_menus()
@@ -2161,7 +2286,7 @@ def launch_gui() -> int:
             self.root.after(0, self._log, msg)
 
         def _set_busy(self, busy: bool):
-            self.run_btn.configure(state="disabled" if busy else "normal")
+            self.run_btn.set_enabled(not busy)
             if busy:
                 self.progress.start(12)
             else:
@@ -2242,6 +2367,7 @@ def launch_gui() -> int:
             win.geometry("680x520")
             win.transient(self.root)
             win.grab_set()
+            win.configure(bg=self.palette["bg"])
 
             ttk.Label(
                 win, wraplength=640, justify="left",
@@ -2250,7 +2376,8 @@ def launch_gui() -> int:
                 "it. Fields you leave unchanged are not touched.",
             ).pack(fill="x", padx=10, pady=8)
 
-            canvas = tk.Canvas(win, highlightthickness=0)
+            canvas = tk.Canvas(win, highlightthickness=0,
+                               bg=self.palette["bg"])
             sb = ttk.Scrollbar(win, orient="vertical", command=canvas.yview)
             inner = ttk.Frame(canvas)
             inner.bind(
@@ -2304,10 +2431,10 @@ def launch_gui() -> int:
 
             btns = ttk.Frame(win)
             btns.pack(fill="x", padx=10, pady=10)
-            ttk.Button(btns, text="Save edits", command=apply).pack(
+            self._rbtn(btns, "Save edits", apply, kind="accent").pack(
                 side="right"
             )
-            ttk.Button(btns, text="Cancel", command=win.destroy).pack(
+            self._rbtn(btns, "Cancel", win.destroy).pack(
                 side="right", padx=6
             )
 
@@ -2332,6 +2459,7 @@ def launch_gui() -> int:
             win.title("Add Change Log entry")
             win.transient(self.root)
             win.grab_set()
+            win.configure(bg=self.palette["bg"])
             ttk.Label(
                 win, wraplength=560, justify="left",
                 text="This row is appended to the 'Change Log' sheet of every "
@@ -2367,10 +2495,10 @@ def launch_gui() -> int:
 
             btns = ttk.Frame(win)
             btns.pack(fill="x", padx=10, pady=10)
-            ttk.Button(btns, text="Save entry", command=apply).pack(
+            self._rbtn(btns, "Save entry", apply, kind="accent").pack(
                 side="right"
             )
-            ttk.Button(btns, text="Cancel", command=win.destroy).pack(
+            self._rbtn(btns, "Cancel", win.destroy).pack(
                 side="right", padx=6
             )
 
