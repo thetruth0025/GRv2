@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.2 (file-type grouping + targeting)"
+__version__ = "2.3 (modern UI; author on all sheets)"
 
 import argparse
 import datetime
@@ -514,6 +514,16 @@ def _cell_text(attrs: str, content: str, shared: List[str]) -> Optional[str]:
 
 # -- sheet name -> part, and the protected "Change Log" sheet ---------------
 
+def _resolve_part(base: str, target: str) -> str:
+    """Resolve an OPC relationship Target to an archive part name.
+
+    Targets may be relative to ``base`` (the owning part's folder) or absolute
+    from the package root (a leading '/', as some writers emit)."""
+    if target.startswith("/"):
+        return target.lstrip("/")
+    return posixpath.normpath(posixpath.join(base, target))
+
+
 def _sheet_name_parts(zin: zipfile.ZipFile) -> dict:
     """Map each worksheet's normalized name -> its archive part name."""
     try:
@@ -538,7 +548,7 @@ def _sheet_name_parts(zin: zipfile.ZipFile) -> dict:
         target = rid_target.get(rm.group(1))
         if not target:
             continue
-        part = posixpath.normpath(posixpath.join("xl", target.lstrip("/")))
+        part = _resolve_part("xl", target)
         out[_norm_header(_xml_unescape(nm.group(1)))] = part
     return out
 
@@ -559,7 +569,7 @@ def _drawing_for_sheet(zin: zipfile.ZipFile, sheet_part: str) -> Optional[str]:
     m = re.search(r'Target="([^"]*drawings/drawing\d+\.xml)"', xml)
     if not m:
         return None
-    return posixpath.normpath(posixpath.join(base, m.group(1)))
+    return _resolve_part(base, m.group(1))
 
 
 def _replace_cells_in_sheet(sheet_xml, shared, plain_compiled):
@@ -1106,10 +1116,12 @@ def build_author_edits(path, new_name, run_date=None) -> dict:
     if not new_name or not new_name.strip():
         return {}
     run_date = run_date or datetime.date.today()
+    edits: dict = {}
     with zipfile.ZipFile(path) as z:
         protected = _changelog_part(z)
         shared = _read_shared_strings(z)
         for name in z.namelist():
+            # Update the Author box on EVERY worksheet except the Change Log.
             if not _WORKSHEET_RE.search(name.lower()) or name == protected:
                 continue
             cells = _read_sheet_cells(
@@ -1122,8 +1134,10 @@ def build_author_edits(path, new_name, run_date=None) -> dict:
                     date_val = _run_date_value(
                         cells.get((col + 2, row)), run_date
                     )
-                    return {name: {name_ref: new_name, date_ref: date_val}}
-    return {}
+                    sheet = edits.setdefault(name, {})
+                    sheet[name_ref] = new_name
+                    sheet[date_ref] = date_val
+    return edits
 
 
 # ---------------------------------------------------------------------------
@@ -1216,9 +1230,7 @@ def _xlsx_sheet_display(zin: zipfile.ZipFile) -> dict:
         nm = re.search(r'name="([^"]+)"', sh.group(0))
         rm = re.search(r'r:id="([^"]+)"', sh.group(0))
         if nm and rm and rm.group(1) in rid_target:
-            part = posixpath.normpath(
-                posixpath.join("xl", rid_target[rm.group(1)].lstrip("/"))
-            )
+            part = _resolve_part("xl", rid_target[rm.group(1)])
             out[part] = _xml_unescape(nm.group(1))
     return out
 
@@ -1371,9 +1383,7 @@ def _visio_page_names(zin: zipfile.ZipFile) -> dict:
         nm = re.search(r'\bName="([^"]+)"', block)
         rm = re.search(r'r:id="([^"]+)"', block)
         if nm and rm and rm.group(1) in rid_target:
-            part = posixpath.normpath(
-                posixpath.join("visio/pages", rid_target[rm.group(1)].lstrip("/"))
-            )
+            part = _resolve_part("visio/pages", rid_target[rm.group(1)])
             out[part] = _xml_unescape(nm.group(1))
     return out
 
@@ -1730,8 +1740,22 @@ def launch_gui() -> int:
         def __init__(self, root: "tk.Tk"):
             self.root = root
             root.title(f"Visio / Excel Text Replacer   [v{__version__}]")
-            root.geometry("820x760")
-            root.minsize(680, 640)
+            root.geometry("860x780")
+            root.minsize(700, 660)
+            self.colors = self._setup_style()
+
+            # Title banner
+            banner = tk.Frame(root, bg=self.colors["accent"])
+            banner.pack(fill="x")
+            tk.Label(
+                banner, text="Visio / Excel Text Replacer",
+                bg=self.colors["accent"], fg="#ffffff",
+                font=("Segoe UI", 15, "bold"),
+            ).pack(side="left", padx=16, pady=10)
+            tk.Label(
+                banner, text=f"v{__version__}", bg=self.colors["accent"],
+                fg="#cfe0ff", font=("Segoe UI", 9),
+            ).pack(side="left", pady=(14, 0))
 
             self.files: List[str] = []
             # Each rule: {frame, find, repl, menubtn, menu, all_var, cat_vars}.
@@ -1787,7 +1811,11 @@ def launch_gui() -> int:
             list_row.pack(fill="x", padx=8, pady=(2, 8))
             self.files_box = tk.Listbox(
                 list_row, height=5, selectmode="extended",
-                activestyle="none",
+                activestyle="none", bg=self.colors["field"],
+                fg=self.colors["text"], font=("Segoe UI", 10),
+                relief="solid", borderwidth=1,
+                highlightthickness=0, selectbackground=self.colors["accent"],
+                selectforeground="#ffffff",
             )
             self.files_box.pack(side="left", fill="both", expand=True)
             sb = ttk.Scrollbar(
@@ -1862,27 +1890,37 @@ def launch_gui() -> int:
                 variable=self.revtext_var,
             )
             self.revtext_chk.pack(side="left", padx=8, pady=6)
+
+            opt_row3 = ttk.Frame(opts)
+            opt_row3.pack(fill="x")
             ttk.Checkbutton(
-                opt_row2,
-                text="Generate change summary (for approval review)",
+                opt_row3,
+                text="Generate change summary (before/after, for approval "
+                "review)",
                 variable=self.summary_var,
-            ).pack(side="left", padx=8, pady=6)
+            ).pack(side="left", padx=8, pady=(0, 6))
 
             # --- Run -------------------------------------------------------
             run = ttk.Frame(root)
             run.pack(fill="x", **pad)
             self.run_btn = ttk.Button(
-                run, text="Replace  &  Convert", command=self.run
+                run, text="Replace  &  Convert", command=self.run,
+                style="Accent.TButton",
             )
             self.run_btn.pack(side="left", padx=8)
-            self.progress = ttk.Progressbar(run, mode="indeterminate")
+            self.progress = ttk.Progressbar(
+                run, mode="indeterminate", style="Horizontal.TProgressbar"
+            )
             self.progress.pack(side="left", fill="x", expand=True, padx=8)
 
             # --- Log -------------------------------------------------------
             logf = ttk.LabelFrame(root, text="Status")
             logf.pack(fill="both", expand=True, **pad)
             self.log_box = scrolledtext.ScrolledText(
-                logf, height=8, state="disabled", wrap="word"
+                logf, height=8, state="disabled", wrap="word",
+                bg=self.colors["field"], fg=self.colors["text"],
+                font=("Consolas", 9), relief="flat", borderwidth=0,
+                highlightthickness=0,
             )
             self.log_box.pack(fill="both", expand=True, padx=6, pady=6)
 
@@ -1895,6 +1933,58 @@ def launch_gui() -> int:
                     "unavailable. Install it from libreoffice.org to enable "
                     "PDF output. Text replacement still works."
                 )
+
+        def _setup_style(self) -> dict:
+            """Apply a modern flat theme; return the color palette."""
+            c = {
+                "bg": "#eef1f6", "card": "#ffffff", "accent": "#2563eb",
+                "accent_dk": "#1d4ed8", "text": "#1f2933",
+                "muted": "#5b6b7b", "border": "#cbd5e1",
+                "field": "#ffffff", "ok": "#16a34a",
+            }
+            base = ("Segoe UI", 10)
+            style = ttk.Style()
+            try:
+                style.theme_use("clam")
+            except tk.TclError:
+                pass
+            self.root.configure(bg=c["bg"])
+            style.configure(".", font=base, background=c["bg"],
+                            foreground=c["text"])
+            style.configure("TFrame", background=c["bg"])
+            style.configure("TLabel", background=c["bg"], foreground=c["text"])
+            for w in ("TCheckbutton", "TRadiobutton"):
+                style.configure(w, background=c["bg"], foreground=c["text"])
+                style.map(w, background=[("active", c["bg"])])
+            style.configure("TLabelframe", background=c["bg"],
+                            bordercolor=c["border"], relief="solid",
+                            borderwidth=1)
+            style.configure("TLabelframe.Label", background=c["bg"],
+                            foreground=c["accent"],
+                            font=("Segoe UI", 10, "bold"))
+            style.configure("TButton", padding=(10, 5), relief="flat",
+                            background="#dbe3ee", foreground=c["text"],
+                            borderwidth=0)
+            style.map("TButton", background=[("active", "#c7d3e3")])
+            style.configure("Accent.TButton", padding=(16, 8),
+                            font=("Segoe UI", 10, "bold"),
+                            background=c["accent"], foreground="#ffffff",
+                            borderwidth=0, relief="flat")
+            style.map("Accent.TButton",
+                      background=[("active", c["accent_dk"]),
+                                  ("pressed", c["accent_dk"]),
+                                  ("disabled", "#9bb4e8")])
+            style.configure("TEntry", fieldbackground=c["field"],
+                            bordercolor=c["border"], padding=4)
+            style.configure("TMenubutton", background=c["field"],
+                            foreground=c["text"], padding=(8, 4),
+                            relief="solid", borderwidth=1)
+            style.map("TMenubutton", background=[("active", "#eef2f8")])
+            style.configure("TCombobox", fieldbackground=c["field"])
+            style.configure("Horizontal.TProgressbar",
+                            background=c["accent"], troughcolor=c["bg"],
+                            bordercolor=c["bg"])
+            return c
 
         def _sync_rev_options(self):
             self.revtext_chk.configure(
@@ -2021,7 +2111,7 @@ def launch_gui() -> int:
         # -- rule rows ------------------------------------------------------
         def _header_row(self):
             ttk.Label(
-                self.pairs_frame,
+                self.pairs_frame, wraplength=820, justify="left",
                 text="Type the text to find and its replacement, then choose "
                 "which document type(s) it applies to via 'in' "
                 "(BOM=DOC, System Drawing=DWG, Cable Drawing=CBL).",
