@@ -39,10 +39,11 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "1.8 (Excel BOM row editor)"
+__version__ = "1.9 (Change Log protect + append)"
 
 import argparse
 import os
+import posixpath
 import re
 import shutil
 import string
@@ -99,17 +100,25 @@ def _compile_pairs(
     pairs: Sequence[Tuple[str, str]],
     case_sensitive: bool,
     whole_word: bool,
+    escape: bool = True,
 ) -> List[Tuple["re.Pattern", str]]:
-    """Compile find/replace pairs into (pattern, xml-escaped replacement)."""
+    """Compile find/replace pairs into (pattern, replacement).
+
+    With escape=True the find/replace are XML-escaped (for matching inside raw
+    XML run text); with escape=False they are used as-is (for matching against
+    already-decoded cell text).
+    """
     flags = 0 if case_sensitive else re.IGNORECASE
     compiled: List[Tuple[re.Pattern, str]] = []
     for find, repl in pairs:
         if not find:
             continue
-        pattern = re.escape(xml_escape(find))
+        f = xml_escape(find) if escape else find
+        r = xml_escape(repl) if escape else repl
+        pattern = re.escape(f)
         if whole_word:
             pattern = r"\b" + pattern + r"\b"
-        compiled.append((re.compile(pattern, flags), xml_escape(repl)))
+        compiled.append((re.compile(pattern, flags), r))
     return compiled
 
 
@@ -450,18 +459,6 @@ def _replace_in_blocks(xml_text, block_re, run_re, compiled) -> Tuple[str, int]:
     return block_re.sub(process_block, xml_text), total
 
 
-def replace_in_xlsx_part(name: str, xml_text: str, compiled) -> Tuple[str, int]:
-    """Apply replacements to one .xlsx XML part, by part type."""
-    ln = name.lower()
-    if ln.endswith("sharedstrings.xml"):
-        return _replace_in_blocks(xml_text, _XLSX_SI_BLOCK, _XLSX_T_RUN, compiled)
-    if _WORKSHEET_RE.search(ln):  # inline strings only
-        return _replace_in_blocks(xml_text, _XLSX_IS_BLOCK, _XLSX_T_RUN, compiled)
-    if "/drawings/" in ln and ln.endswith(".xml"):
-        return _replace_in_blocks(xml_text, _XLSX_AP_BLOCK, _XLSX_AT_RUN, compiled)
-    return xml_text, 0
-
-
 def _parse_cell_ref(ref: str) -> Optional[Tuple[int, int]]:
     """'B12' -> (column=2, row=12)."""
     m = re.match(r"([A-Z]+)(\d+)", ref)
@@ -508,6 +505,87 @@ def _cell_text(attrs: str, content: str, shared: List[str]) -> Optional[str]:
     return None
 
 
+# -- sheet name -> part, and the protected "Change Log" sheet ---------------
+
+def _sheet_name_parts(zin: zipfile.ZipFile) -> dict:
+    """Map each worksheet's normalized name -> its archive part name."""
+    try:
+        wb = zin.read("xl/workbook.xml").decode("utf-8", "replace")
+        rels = zin.read("xl/_rels/workbook.xml.rels").decode("utf-8", "replace")
+    except KeyError:
+        return {}
+    rid_target = {}
+    for rel in re.finditer(r"<Relationship\b[^>]*>", rels):
+        s = rel.group(0)
+        idm = re.search(r'Id="([^"]+)"', s)
+        tm = re.search(r'Target="([^"]+)"', s)
+        if idm and tm:
+            rid_target[idm.group(1)] = tm.group(1)
+    out = {}
+    for sh in re.finditer(r"<sheet\b[^>]*>", wb):
+        s = sh.group(0)
+        nm = re.search(r'name="([^"]+)"', s)
+        rm = re.search(r'r:id="([^"]+)"', s)
+        if not nm or not rm:
+            continue
+        target = rid_target.get(rm.group(1))
+        if not target:
+            continue
+        part = posixpath.normpath(posixpath.join("xl", target.lstrip("/")))
+        out[_norm_header(_xml_unescape(nm.group(1)))] = part
+    return out
+
+
+def _changelog_part(zin: zipfile.ZipFile) -> Optional[str]:
+    """The worksheet part for a sheet named 'Change Log' (if any)."""
+    return _sheet_name_parts(zin).get("changelog")
+
+
+def _drawing_for_sheet(zin: zipfile.ZipFile, sheet_part: str) -> Optional[str]:
+    """The drawing part used by a worksheet, via its rels (if any)."""
+    base = posixpath.dirname(sheet_part)
+    rels = f"{base}/_rels/{posixpath.basename(sheet_part)}.rels"
+    try:
+        xml = zin.read(rels).decode("utf-8", "replace")
+    except KeyError:
+        return None
+    m = re.search(r'Target="([^"]*drawings/drawing\d+\.xml)"', xml)
+    if not m:
+        return None
+    return posixpath.normpath(posixpath.join(base, m.group(1)))
+
+
+def _replace_cells_in_sheet(sheet_xml, shared, plain_compiled):
+    """Find/replace within a worksheet's string cells (per-cell, no aliasing).
+
+    Only string cells (shared or inline) are touched; numbers and formulas are
+    left alone. Changed cells become self-contained inline strings.
+    """
+    count = 0
+
+    def repl_cell(m: re.Match) -> str:
+        nonlocal count
+        ref, attrs, content = m.group(1), m.group(2), m.group(3)
+        tm = re.search(r'\bt="([^"]+)"', attrs)
+        t = tm.group(1) if tm else "n"
+        if t not in ("s", "inlineStr"):
+            return m.group(0)
+        text = _cell_text(attrs, content, shared)
+        if text is None:
+            return m.group(0)
+        new_text = text
+        for pat, rep in plain_compiled:
+            new_text, n = pat.subn(lambda mm, r=rep: r, new_text)
+            count += n
+        if new_text == text:
+            return m.group(0)
+        sm = re.search(r'\bs="(\d+)"', attrs)
+        style = f' s="{sm.group(1)}"' if sm else ""
+        return _cell_content_xml(ref, style, new_text)
+
+    return _XLSX_CELL.sub(repl_cell, sheet_xml), count
+
+
 def _find_rev_cell(zin, names, shared, old_letter):
     """Find the worksheet cell holding the revision letter (next to a REV
     label). Returns ((part_name, cell_ref), status)."""
@@ -515,8 +593,9 @@ def _find_rev_cell(zin, names, shared, old_letter):
     best = None  # (score, part, ref)
     no_label_cands = []
     any_cands = False
+    protected = _changelog_part(zin)
     for name in names:
-        if not _WORKSHEET_RE.search(name.lower()):
+        if not _WORKSHEET_RE.search(name.lower()) or name == protected:
             continue
         xml = zin.read(name).decode("utf-8", "replace")
         labels, cands = [], []
@@ -597,7 +676,10 @@ def replace_text_in_xlsx(
     if not zipfile.is_zipfile(in_path):
         raise ValueError(f"'{in_path.name}' is not a valid .xlsx file.")
 
-    compiled = _compile_pairs(pairs, case_sensitive, whole_word)
+    # Cell text is decoded, so match with un-escaped patterns; drawing run text
+    # is raw XML, so match with escaped patterns.
+    cell_compiled = _compile_pairs(pairs, case_sensitive, whole_word, escape=False)
+    draw_compiled = _compile_pairs(pairs, case_sensitive, whole_word, escape=True)
     cell_edits = cell_edits or {}
     by_part: dict[str, int] = {}
     total = 0
@@ -609,31 +691,49 @@ def replace_text_in_xlsx(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(in_path, "r") as zin:
         names = zin.namelist()
+        shared = _read_shared_strings(zin)
+        # The "Change Log" sheet (and its drawing) are never edited by
+        # find/replace -- they must stay intact for traceability.
+        protected = _changelog_part(zin)
+        protected_draw = (_drawing_for_sheet(zin, protected)
+                          if protected else None)
         if do_rev:
-            shared = _read_shared_strings(zin)
             target, rev_status = _find_rev_cell(zin, names, shared, revision[0])
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
-                ln = item.filename.lower()
+                name = item.filename
+                ln = name.lower()
                 if ln.startswith("xl/") and ln.endswith(".xml"):
                     try:
                         text = data.decode("utf-8")
                     except UnicodeDecodeError:
-                        zout.writestr(item.filename, data)
+                        zout.writestr(name, data)
                         continue
                     new_text = text
-                    if compiled:
-                        new_text, count = replace_in_xlsx_part(
-                            item.filename, new_text, compiled
-                        )
+                    is_protected = (name == protected
+                                    or name == protected_draw)
+                    if cell_compiled and not is_protected:
+                        if _WORKSHEET_RE.search(ln):
+                            new_text, count = _replace_cells_in_sheet(
+                                new_text, shared, cell_compiled
+                            )
+                        elif "/drawings/" in ln:
+                            new_text, count = _replace_in_blocks(
+                                new_text, _XLSX_AP_BLOCK, _XLSX_AT_RUN,
+                                draw_compiled,
+                            )
+                        else:
+                            count = 0
                         if count:
-                            by_part[item.filename] = count
+                            by_part[name] = count
                             total += count
-                    for ref, value in cell_edits.get(item.filename, {}).items():
+                    # Explicit cell edits (BOM edits, Change Log append) apply
+                    # even to the protected sheet (the append is intentional).
+                    for ref, value in cell_edits.get(name, {}).items():
                         new_text = _set_or_insert_cell(new_text, ref, value)
                         cells_changed += 1
-                    if target and item.filename == target[0]:
+                    if target and name == target[0]:
                         new_text, changed = _set_cell_text(
                             new_text, target[1], revision[1]
                         )
@@ -641,7 +741,7 @@ def replace_text_in_xlsx(
                             rev_status = "updated"
                     if new_text != text:
                         data = new_text.encode("utf-8")
-                zout.writestr(item.filename, data)
+                zout.writestr(name, data)
 
     return {"total": total, "by_part": by_part, "rev_drawing": rev_status,
             "cells_changed": cells_changed}
@@ -779,8 +879,9 @@ def excel_scan_rows(path, part_numbers, case_sensitive=False):
                     if p]
     with zipfile.ZipFile(path) as z:
         shared = _read_shared_strings(z)
+        protected = _changelog_part(z)
         for name in z.namelist():
-            if not _WORKSHEET_RE.search(name.lower()):
+            if not _WORKSHEET_RE.search(name.lower()) or name == protected:
                 continue
             sheet_xml = z.read(name).decode("utf-8", "replace")
             cells = _read_sheet_cells(sheet_xml, shared)
@@ -835,6 +936,110 @@ def build_excel_cell_edits(path, bom_edits, case_sensitive=False) -> dict:
                 continue  # that column doesn't exist in this sheet
             edits.setdefault(m["sheet"], {})[cell[0]] = new_value
     return edits
+
+
+# ---------------------------------------------------------------------------
+# Excel Change Log: append a new row to the (protected) "Change Log" sheet
+# ---------------------------------------------------------------------------
+
+_CHANGELOG_FIELDS = {
+    "Item": {"item", "itemno", "itemnumber", "no", "line"},
+    "ECN #": {"ecn", "eco", "ecnno", "econo", "ecnnumber", "econumber",
+              "ecn#", "eco#"},
+    "ERB Approval Date": {"erbapprovaldate", "approvaldate", "erbdate",
+                          "dateapproved", "approval", "erbapproval"},
+    "Change Description": {"changedescription", "description", "changedesc",
+                           "desc", "change"},
+    "Change Author": {"changeauthor", "author", "changedby", "by",
+                      "enteredby"},
+}
+CHANGELOG_FIELD_ORDER = ["Item", "ECN #", "ERB Approval Date",
+                         "Change Description", "Change Author"]
+
+
+def _canonical_changelog_field(text: str) -> Optional[str]:
+    n = _norm_header(text)
+    if not n:
+        return None
+    for field, variants in _CHANGELOG_FIELDS.items():
+        if n in variants:
+            return field
+    return None
+
+
+def changelog_info(path):
+    """Inspect the Change Log sheet.
+
+    Returns (part, header_row, {field: column}, next_row) or None if the file
+    has no Change Log sheet / no recognizable header. ``next_row`` is the first
+    empty row after the last entry, judged by the ECN # column.
+    """
+    with zipfile.ZipFile(path) as z:
+        part = _changelog_part(z)
+        if not part:
+            return None
+        try:
+            xml = z.read(part).decode("utf-8", "replace")
+        except KeyError:
+            return None
+        shared = _read_shared_strings(z)
+
+    cells = _read_sheet_cells(xml, shared)
+    rows: dict = {}
+    for (col, row), (ref, txt) in cells.items():
+        rows.setdefault(row, {})[col] = txt
+
+    header_row, colmap = None, {}
+    for row in sorted(rows):
+        cmap, has_ecn = {}, False
+        for col, txt in rows[row].items():
+            if not txt:
+                continue
+            cf = _canonical_changelog_field(txt)
+            if cf:
+                cmap[col] = cf
+                if cf == "ECN #":
+                    has_ecn = True
+        if has_ecn:
+            header_row, colmap = row, cmap
+            break
+    if header_row is None:
+        return None
+
+    field_to_col = {f: c for c, f in colmap.items()}
+    ecn_col = field_to_col.get("ECN #")
+    # Next available row = after the last row that has an ECN # value.
+    last = header_row
+    for row in sorted(rows):
+        if row <= header_row:
+            continue
+        cell = rows[row].get(ecn_col)
+        if cell:  # non-empty ECN # marks a real entry
+            last = row
+    return part, header_row, field_to_col, last + 1
+
+
+def build_changelog_cell_edits(path, entry) -> dict:
+    """Map a new Change Log entry to cell edits on the Change Log sheet.
+
+    entry: {canonical_field: value}. Returns {part: {ref: value}} or {}.
+    """
+    if not entry or not any(v.strip() for v in entry.values()):
+        return {}
+    info = changelog_info(path)
+    if info is None:
+        return {}
+    part, header_row, field_to_col, next_row = info
+    edits = {}
+    for field, value in entry.items():
+        if not value.strip():
+            continue
+        col = field_to_col.get(field)
+        if col is None:
+            continue
+        ref = f"{_col_letters(col)}{next_row}"
+        edits[ref] = value
+    return {part: edits} if edits else {}
 
 
 # ---------------------------------------------------------------------------
@@ -1113,6 +1318,8 @@ def launch_gui() -> int:
             self.rule_rows: List[dict] = []
             # Staged Excel row edits: {part_number: {canonical_field: value}}.
             self.bom_edits: dict = {}
+            # Staged Change Log row to append: {canonical_field: value}.
+            self.changelog_entry: dict = {}
 
             pad = {"padx": 10, "pady": 6}
 
@@ -1183,6 +1390,10 @@ def launch_gui() -> int:
                 rule_btns, text="Excel: find & edit rows...",
                 command=self.open_bom_editor,
             ).pack(side="left", padx=8)
+            ttk.Button(
+                rule_btns, text="Excel: add Change Log entry...",
+                command=self.open_changelog_editor,
+            ).pack(side="left")
             self.bom_status = ttk.Label(rule_btns, text="")
             self.bom_status.pack(side="left", padx=8)
 
@@ -1570,6 +1781,69 @@ def launch_gui() -> int:
                 side="right", padx=6
             )
 
+        # -- Change Log entry ----------------------------------------------
+        def open_changelog_editor(self):
+            excel_files = [f for f in self.files
+                           if detect_format(f) == "xlsx"]
+            if not excel_files:
+                messagebox.showinfo(
+                    "No Excel files", "Add at least one .xlsx file first."
+                )
+                return
+            if not any(changelog_info(f) for f in excel_files):
+                messagebox.showinfo(
+                    "No Change Log",
+                    "None of the Excel files have a sheet named 'Change Log' "
+                    "with recognizable column headers (Item, ECN #, ...).",
+                )
+                return
+
+            win = tk.Toplevel(self.root)
+            win.title("Add Change Log entry")
+            win.transient(self.root)
+            win.grab_set()
+            ttk.Label(
+                win, wraplength=560, justify="left",
+                text="This row is appended to the 'Change Log' sheet of every "
+                "Excel file (at the next free row, found via the ECN # "
+                "column). Leave a field blank to skip it. Leave Item blank to "
+                "keep any pre-filled item number.",
+            ).pack(fill="x", padx=10, pady=8)
+
+            form = ttk.Frame(win)
+            form.pack(fill="x", padx=10, pady=4)
+            entries = {}
+            for field in CHANGELOG_FIELD_ORDER:
+                rowf = ttk.Frame(form)
+                rowf.pack(fill="x", pady=3)
+                ttk.Label(rowf, text=field + ":", width=20).pack(side="left")
+                e = ttk.Entry(rowf, width=44)
+                e.insert(0, self.changelog_entry.get(field, ""))
+                e.pack(side="left", fill="x", expand=True)
+                entries[field] = e
+
+            def apply():
+                entry = {f: e.get() for f, e in entries.items()}
+                if not any(v.strip() for v in entry.values()):
+                    self.changelog_entry = {}
+                    self.bom_status.configure(text="")
+                else:
+                    self.changelog_entry = entry
+                    self.log(
+                        "Staged a Change Log entry (ECN "
+                        f"{entry.get('ECN #', '').strip() or '—'})."
+                    )
+                win.destroy()
+
+            btns = ttk.Frame(win)
+            btns.pack(fill="x", padx=10, pady=10)
+            ttk.Button(btns, text="Save entry", command=apply).pack(
+                side="right"
+            )
+            ttk.Button(btns, text="Cancel", command=win.destroy).pack(
+                side="right", padx=6
+            )
+
         # -- run ------------------------------------------------------------
         def run(self):
             if not self.files:
@@ -1585,13 +1859,13 @@ def launch_gui() -> int:
                 )
                 return
             bump_rev = self.rev_var.get()
-            if not bump_rev and not any(
-                r["find"].get() for r in self.rule_rows
-            ):
+            if (not bump_rev
+                    and not any(r["find"].get() for r in self.rule_rows)
+                    and not self.bom_edits and not self.changelog_entry):
                 messagebox.showwarning(
                     "Nothing to do",
-                    "Enter at least one 'Find' value, or tick "
-                    "'Save copy as next revision'.",
+                    "Enter a 'Find' value, tick 'Save copy as next revision', "
+                    "or stage an Excel row / Change Log edit.",
                 )
                 return
 
@@ -1603,13 +1877,14 @@ def launch_gui() -> int:
                     {f: self.pairs_for_file(f) for f in self.files},
                     self.case_var.get(), self.word_var.get(),
                     self.pdf_var.get(), bump_rev, self.revtext_var.get(),
-                    dict(self.bom_edits),
+                    dict(self.bom_edits), dict(self.changelog_entry),
                 ),
                 daemon=True,
             ).start()
 
         def _worker(self, files, pairs_by_file, case_sensitive, whole_word,
-                    make_pdf, bump_rev, update_rev_text, bom_edits):
+                    make_pdf, bump_rev, update_rev_text, bom_edits,
+                    changelog_entry):
             total_repl = 0
             done = 0
             errors = 0
@@ -1621,15 +1896,26 @@ def launch_gui() -> int:
                     # separators differ between tkinter and Path on Windows).
                     pairs = pairs_by_file.get(f, [])
 
-                    # Excel row edits that land in this file (by cell ref).
+                    # Excel cell edits for this file: BOM row edits plus a
+                    # Change Log append (by cell ref).
                     cell_edits = None
-                    if bom_edits and detect_format(f) == "xlsx":
+                    if (bom_edits or changelog_entry) and \
+                            detect_format(f) == "xlsx":
+                        merged: dict = {}
                         try:
-                            cell_edits = build_excel_cell_edits(
-                                f, bom_edits, case_sensitive
-                            )
+                            if bom_edits:
+                                for part, d in build_excel_cell_edits(
+                                    f, bom_edits, case_sensitive
+                                ).items():
+                                    merged.setdefault(part, {}).update(d)
+                            if changelog_entry:
+                                for part, d in build_changelog_cell_edits(
+                                    f, changelog_entry
+                                ).items():
+                                    merged.setdefault(part, {}).update(d)
                         except Exception:  # noqa: BLE001
-                            cell_edits = None
+                            merged = {}
+                        cell_edits = merged or None
                     has_edits = bool(cell_edits)
 
                     # Decide the copy's name and whether to bump the revision.

@@ -129,6 +129,20 @@ row in **every** Excel file that contains it (and on every matching row).
 Fields you leave unchanged are not touched, numbers stay numeric, and the P/N
 itself is changed by your normal Find → Replace rule.
 
+### The "Change Log" sheet is protected
+
+A sheet named **Change Log** is **never** modified by Find → Replace or by the
+BOM row editor — it's left exactly as-is for traceability (even if your search
+term appears in a change description there).
+
+To add an entry to it, click **Excel: add Change Log entry...** and fill in the
+columns — **Item**, **ECN #** (or **ECO#**), **ERB Approval Date**, **Change
+Description**, **Change Author**. On **Replace & Convert**, that row is
+**appended to the Change Log sheet of every Excel file**, at the next free row.
+The next row is found using the **ECN #** column (so it works even when the Item
+numbers run past the last real entry). Leave **Item** blank to keep any
+pre-filled item number; leave any field blank to skip it.
+
 ---
 
 ## Command-line use (optional / scriptable)
