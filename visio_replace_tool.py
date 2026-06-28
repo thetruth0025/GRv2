@@ -39,9 +39,10 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "1.9 (Change Log protect + append)"
+__version__ = "2.0 (Author box + robust Excel parsing)"
 
 import argparse
+import datetime
 import os
 import posixpath
 import re
@@ -423,7 +424,11 @@ _XLSX_IS_BLOCK = re.compile(r"<is\b[^>]*>.*?</is>", re.DOTALL)
 _XLSX_AP_BLOCK = re.compile(r"<a:p\b[^>]*>.*?</a:p>", re.DOTALL)
 _XLSX_T_RUN = re.compile(r"<t\b[^>]*>(.*?)</t>", re.DOTALL)
 _XLSX_AT_RUN = re.compile(r"<a:t\b[^>]*>(.*?)</a:t>", re.DOTALL)
-_XLSX_CELL = re.compile(r'<c r="([A-Z]+\d+)"([^>]*)>(.*?)</c>', re.DOTALL)
+# Matches a cell either self-closing (<c r=".." .../>) or with content
+# (<c r="..">...</c>). group(3) is None for a self-closing (empty) cell.
+_XLSX_CELL = re.compile(
+    r'<c r="([A-Z]+\d+)"([^>]*?)(?:/>|>(.*?)</c>)', re.DOTALL
+)
 _WORKSHEET_RE = re.compile(r"xl/worksheets/sheet\d+\.xml$", re.IGNORECASE)
 
 
@@ -483,6 +488,8 @@ def _read_shared_strings(zin: zipfile.ZipFile) -> List[str]:
 
 
 def _cell_text(attrs: str, content: str, shared: List[str]) -> Optional[str]:
+    if content is None:  # self-closing (empty) cell
+        return None
     tm = re.search(r'\bt="([^"]+)"', attrs)
     t = tm.group(1) if tm else "n"
     if t == "s":
@@ -943,13 +950,12 @@ def build_excel_cell_edits(path, bom_edits, case_sensitive=False) -> dict:
 # ---------------------------------------------------------------------------
 
 _CHANGELOG_FIELDS = {
-    "Item": {"item", "itemno", "itemnumber", "no", "line"},
+    "Item": {"item", "itemno", "itemnumber"},
     "ECN #": {"ecn", "eco", "ecnno", "econo", "ecnnumber", "econumber",
               "ecn#", "eco#"},
     "ERB Approval Date": {"erbapprovaldate", "approvaldate", "erbdate",
-                          "dateapproved", "approval", "erbapproval"},
-    "Change Description": {"changedescription", "description", "changedesc",
-                           "desc", "change"},
+                          "dateapproved", "erbapproval"},
+    "Change Description": {"changedescription", "changedesc"},
     "Change Author": {"changeauthor", "author", "changedby", "by",
                       "enteredby"},
 }
@@ -958,21 +964,29 @@ CHANGELOG_FIELD_ORDER = ["Item", "ECN #", "ERB Approval Date",
 
 
 def _canonical_changelog_field(text: str) -> Optional[str]:
+    """Match a header to a Change Log field (real headers carry extra text,
+    e.g. 'Change Description (Include Line #s)')."""
     n = _norm_header(text)
     if not n:
         return None
     for field, variants in _CHANGELOG_FIELDS.items():
-        if n in variants:
-            return field
+        for v in variants:
+            if n == v or (len(v) >= 5 and n.startswith(v)):
+                return field
     return None
+
+
+# A real ECN/ECO value (used to find the ECN column when it has no header).
+_ECN_VALUE_RE = re.compile(r"(?i)^\s*(ECN|ECO)\b")
 
 
 def changelog_info(path):
     """Inspect the Change Log sheet.
 
-    Returns (part, header_row, {field: column}, next_row) or None if the file
-    has no Change Log sheet / no recognizable header. ``next_row`` is the first
-    empty row after the last entry, judged by the ECN # column.
+    Returns (part, header_row, {field: column}, next_row) or None. The ECN #
+    column is found by header if present, else by its ECN/ECO data values (some
+    sheets leave it unlabelled). ``next_row`` is the row after the last entry
+    that has an ECN # value -- robust to Item numbers pre-filled past the data.
     """
     with zipfile.ZipFile(path) as z:
         part = _changelog_part(z)
@@ -985,37 +999,40 @@ def changelog_info(path):
         shared = _read_shared_strings(z)
 
     cells = _read_sheet_cells(xml, shared)
-    rows: dict = {}
-    for (col, row), (ref, txt) in cells.items():
-        rows.setdefault(row, {})[col] = txt
 
-    header_row, colmap = None, {}
-    for row in sorted(rows):
-        cmap, has_ecn = {}, False
-        for col, txt in rows[row].items():
-            if not txt:
-                continue
-            cf = _canonical_changelog_field(txt)
-            if cf:
-                cmap[col] = cf
-                if cf == "ECN #":
-                    has_ecn = True
-        if has_ecn:
-            header_row, colmap = row, cmap
-            break
-    if header_row is None:
+    # Headers can be split across the first couple of (often merged) rows.
+    field_to_col: dict = {}
+    header_row = 0
+    for (col, row), (ref, txt) in cells.items():
+        if row > 8 or not txt:
+            continue
+        cf = _canonical_changelog_field(txt)
+        if cf and cf not in field_to_col:
+            field_to_col[cf] = col
+            header_row = max(header_row, row)
+
+    if not any(f in field_to_col for f in
+               ("Change Description", "Change Author", "ERB Approval Date")):
         return None
 
-    field_to_col = {f: c for c, f in colmap.items()}
     ecn_col = field_to_col.get("ECN #")
-    # Next available row = after the last row that has an ECN # value.
+    if ecn_col is None:
+        counts: dict = {}
+        for (col, row), (ref, txt) in cells.items():
+            if row > header_row and txt and _ECN_VALUE_RE.match(str(txt)):
+                counts[col] = counts.get(col, 0) + 1
+        if counts:
+            ecn_col = max(counts, key=counts.get)
+        elif "Item" in field_to_col:
+            ecn_col = field_to_col["Item"] + 1  # column right of Item
+    if ecn_col is None:
+        return None
+    field_to_col["ECN #"] = ecn_col
+
     last = header_row
-    for row in sorted(rows):
-        if row <= header_row:
-            continue
-        cell = rows[row].get(ecn_col)
-        if cell:  # non-empty ECN # marks a real entry
-            last = row
+    for (col, row), (ref, txt) in cells.items():
+        if col == ecn_col and row > header_row and txt and str(txt).strip():
+            last = max(last, row)
     return part, header_row, field_to_col, last + 1
 
 
@@ -1040,6 +1057,73 @@ def build_changelog_cell_edits(path, entry) -> dict:
         ref = f"{_col_letters(col)}{next_row}"
         edits[ref] = value
     return {part: edits} if edits else {}
+
+
+# ---------------------------------------------------------------------------
+# Excel "Author" box: replace the name beside it and stamp today's date
+# ---------------------------------------------------------------------------
+#
+# A title block has a cell labelled "Author:" with the name in the next column
+# and the date in the column after that. We replace the name with a designated
+# one and set the date to the day the script runs, keeping the date's format.
+
+def _excel_serial(d: datetime.date) -> int:
+    """Excel 1900-system serial number for a date."""
+    return (d - datetime.date(1899, 12, 30)).days
+
+
+def _run_date_value(date_cell, run_date: datetime.date) -> str:
+    """The value to write for the date, matching the existing cell's format.
+
+    A numeric (serial) date stays a serial (the cell keeps its date style); a
+    text date is re-rendered in the same textual pattern.
+    """
+    txt = date_cell[1] if date_cell else None
+    if txt is not None and str(txt).strip():
+        s = str(txt).strip()
+        try:
+            float(s)
+            return str(_excel_serial(run_date))  # serial -> serial
+        except ValueError:
+            pass
+        if re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", s):
+            return run_date.strftime("%Y-%m-%d")
+        if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", s):
+            return run_date.strftime("%m/%d/%Y")
+        if re.match(r"^\d{1,2}/\d{1,2}/\d{2}$", s):
+            return run_date.strftime("%m/%d/%y")
+        if re.match(r"^\d{1,2}-\d{1,2}-\d{4}$", s):
+            return run_date.strftime("%m-%d-%Y")
+        return run_date.strftime("%Y-%m-%d")
+    return str(_excel_serial(run_date))  # empty -> serial (keeps any date style)
+
+
+def build_author_edits(path, new_name, run_date=None) -> dict:
+    """Replace the name beside the 'Author' box and stamp the run date.
+
+    Returns {worksheet_part: {name_ref: new_name, date_ref: date_value}} or {}.
+    """
+    if not new_name or not new_name.strip():
+        return {}
+    run_date = run_date or datetime.date.today()
+    with zipfile.ZipFile(path) as z:
+        protected = _changelog_part(z)
+        shared = _read_shared_strings(z)
+        for name in z.namelist():
+            if not _WORKSHEET_RE.search(name.lower()) or name == protected:
+                continue
+            cells = _read_sheet_cells(
+                z.read(name).decode("utf-8", "replace"), shared
+            )
+            for (col, row), (ref, txt) in cells.items():
+                if txt and _norm_header(txt) == "author":
+                    name_ref = f"{_col_letters(col + 1)}{row}"
+                    date_ref = f"{_col_letters(col + 2)}{row}"
+                    date_val = _run_date_value(
+                        cells.get((col + 2, row)), run_date
+                    )
+                    return {name: {name_ref: new_name, date_ref: date_val}}
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -1320,6 +1404,8 @@ def launch_gui() -> int:
             self.bom_edits: dict = {}
             # Staged Change Log row to append: {canonical_field: value}.
             self.changelog_entry: dict = {}
+            # New name for the "Author" box (date is stamped automatically).
+            self.author_name: str = ""
 
             pad = {"padx": 10, "pady": 6}
 
@@ -1394,6 +1480,10 @@ def launch_gui() -> int:
                 rule_btns, text="Excel: add Change Log entry...",
                 command=self.open_changelog_editor,
             ).pack(side="left")
+            ttk.Button(
+                rule_btns, text="Excel: set Author + date...",
+                command=self.open_author_editor,
+            ).pack(side="left", padx=8)
             self.bom_status = ttk.Label(rule_btns, text="")
             self.bom_status.pack(side="left", padx=8)
 
@@ -1844,6 +1934,42 @@ def launch_gui() -> int:
                 side="right", padx=6
             )
 
+        # -- Author box ----------------------------------------------------
+        def open_author_editor(self):
+            from tkinter import simpledialog
+            excel_files = [f for f in self.files
+                           if detect_format(f) == "xlsx"]
+            if not excel_files:
+                messagebox.showinfo(
+                    "No Excel files", "Add at least one .xlsx file first."
+                )
+                return
+            if not any(build_author_edits(f, "x") for f in excel_files):
+                messagebox.showinfo(
+                    "No Author box",
+                    "None of the Excel files have an 'Author' cell with a name "
+                    "cell to its right.",
+                )
+                return
+            name = simpledialog.askstring(
+                "Author name",
+                "Replace the name beside the 'Author' box with:\n"
+                "(the date beside it is set to today automatically, in the "
+                "same format)",
+                initialvalue=self.author_name,
+                parent=self.root,
+            )
+            if name is None:
+                return
+            self.author_name = name.strip()
+            if self.author_name:
+                self.log(
+                    f"Author will be set to '{self.author_name}' "
+                    "(date = today)."
+                )
+            else:
+                self.log("Author update cleared.")
+
         # -- run ------------------------------------------------------------
         def run(self):
             if not self.files:
@@ -1861,11 +1987,12 @@ def launch_gui() -> int:
             bump_rev = self.rev_var.get()
             if (not bump_rev
                     and not any(r["find"].get() for r in self.rule_rows)
-                    and not self.bom_edits and not self.changelog_entry):
+                    and not self.bom_edits and not self.changelog_entry
+                    and not self.author_name):
                 messagebox.showwarning(
                     "Nothing to do",
                     "Enter a 'Find' value, tick 'Save copy as next revision', "
-                    "or stage an Excel row / Change Log edit.",
+                    "or stage an Excel row / Change Log / Author edit.",
                 )
                 return
 
@@ -1878,13 +2005,14 @@ def launch_gui() -> int:
                     self.case_var.get(), self.word_var.get(),
                     self.pdf_var.get(), bump_rev, self.revtext_var.get(),
                     dict(self.bom_edits), dict(self.changelog_entry),
+                    self.author_name,
                 ),
                 daemon=True,
             ).start()
 
         def _worker(self, files, pairs_by_file, case_sensitive, whole_word,
                     make_pdf, bump_rev, update_rev_text, bom_edits,
-                    changelog_entry):
+                    changelog_entry, author_name):
             total_repl = 0
             done = 0
             errors = 0
@@ -1896,11 +2024,11 @@ def launch_gui() -> int:
                     # separators differ between tkinter and Path on Windows).
                     pairs = pairs_by_file.get(f, [])
 
-                    # Excel cell edits for this file: BOM row edits plus a
-                    # Change Log append (by cell ref).
+                    # Excel cell edits for this file: BOM row edits, a Change
+                    # Log append, and the Author name/date (by cell ref).
                     cell_edits = None
-                    if (bom_edits or changelog_entry) and \
-                            detect_format(f) == "xlsx":
+                    if ((bom_edits or changelog_entry or author_name)
+                            and detect_format(f) == "xlsx"):
                         merged: dict = {}
                         try:
                             if bom_edits:
@@ -1911,6 +2039,11 @@ def launch_gui() -> int:
                             if changelog_entry:
                                 for part, d in build_changelog_cell_edits(
                                     f, changelog_entry
+                                ).items():
+                                    merged.setdefault(part, {}).update(d)
+                            if author_name:
+                                for part, d in build_author_edits(
+                                    f, author_name
                                 ).items():
                                     merged.setdefault(part, {}).update(d)
                         except Exception:  # noqa: BLE001

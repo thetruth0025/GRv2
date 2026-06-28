@@ -143,6 +143,15 @@ The next row is found using the **ECN #** column (so it works even when the Item
 numbers run past the last real entry). Leave **Item** blank to keep any
 pre-filled item number; leave any field blank to skip it.
 
+### Excel: Author name + date
+
+Many BOM title blocks have an **Author:** box with the author's name in the cell
+to its right and a date in the next cell. Click **Excel: set Author + date...**
+and type the new name. On **Replace & Convert**, for **every** Excel file the
+name beside the **Author** box is set to your value, and the date beside it is
+stamped with **today's date** — kept in the **same format** as the date that was
+there (an Excel date serial stays a properly-formatted date).
+
 ---
 
 ## Command-line use (optional / scriptable)
