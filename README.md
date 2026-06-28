@@ -22,11 +22,11 @@ as the **next revision letter**, read from the file name:
 
 - `Floor Plan REVA.vsdx` → `Floor Plan REVB.vsdx` (A→B→C … major changes only).
 - It also updates the revision **inside the file**: the single-letter box/cell
-  (e.g. `A`) that sits next to a `REV`/`Revision` label is bumped to match. In
-  Visio that's the text box nearest the `REV` label on the front page; in Excel
-  it's the cell next to the `REV` cell **on every worksheet** that carries the
-  title block (not just the first). The protected **Change Log** sheet is left
-  alone, and stray single letters elsewhere (grid/zone labels) are too.
+  (e.g. `A`) that sits next to a `REV`/`Revision` label is bumped to match. The
+  title block repeats on every page/sheet, so this is updated **on every page
+  of a Visio drawing and every worksheet of an Excel workbook** (not just the
+  first). In Excel the protected **Change Log** sheet is left alone, and stray
+  single letters elsewhere (grid/zone labels) are too.
 - Already at `REVZ`? That file is skipped with a warning (no next letter).
 - No `REVx` in the file name? The copy falls back to `*_edited`.
 
@@ -195,7 +195,10 @@ revision entry...** and the tool:
 3. On **Replace & Convert**, adds the new revision row to **every** Visio file:
    an existing **blank row** in the table is filled if there is one, otherwise a
    new row is **cloned** from the last row (same columns/formatting) and placed
-   just below it.
+   just below it. Because many drawings draw the table grid as a fixed
+   background image that can't be extended, the tool also **draws matching
+   border lines** (the row box plus column dividers) around the appended row so
+   it lines up with the rows above.
 
 Because a Visio "table" is really just positioned text boxes, the detection is
 **conservative**: if it can't confidently locate the table on a file (or can't

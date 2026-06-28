@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.7.1 (Visio revision entry: real-file fixes)"
+__version__ = "2.7.2 (Visio rev: borders + REV box on every sheet)"
 
 import argparse
 import datetime
@@ -479,6 +479,30 @@ def _detect_revtable(page_xml):
     col_tol = (min(gaps) * 0.45) if gaps else 0.5
     header_ids = {c["id"] for c in columns.values()}
 
+    # The full set of header-row cells of THIS table (incl. columns we don't
+    # write to, like ZONE), grown contiguously outward from the detected
+    # columns so stray same-row text elsewhere on the page is excluded. Used to
+    # reconstruct the grid lines for an appended row.
+    header_pool = [c for c in geo
+                   if c["w"] and abs(c["y"] - header_y) <= row_tol]
+    chosen_ids = set(header_ids)
+    header_cells = [c for c in header_pool if c["id"] in chosen_ids] \
+        or list(columns.values())
+    gap_tol = max(col_tol * 0.5, 0.05)
+    changed = True
+    while changed:
+        changed = False
+        lo = min(c["x"] - c["w"] / 2.0 for c in header_cells)
+        hi = max(c["x"] + c["w"] / 2.0 for c in header_cells)
+        for c in header_pool:
+            if c["id"] in chosen_ids:
+                continue
+            cl, cr = c["x"] - c["w"] / 2.0, c["x"] + c["w"] / 2.0
+            if cr >= lo - gap_tol and cl <= hi + gap_tol:
+                header_cells.append(c)
+                chosen_ids.add(c["id"])
+                changed = True
+
     # Assign every other leaf cell to its nearest column (if close enough).
     placed = []  # (field, cell)
     for c in geo:
@@ -548,7 +572,59 @@ def _detect_revtable(page_xml):
     return {
         "col_x": col_x, "header_y": header_y, "rows": data,
         "pitch": pitch, "grow_down": grow_down, "max_id": max_id,
+        "header_cells": header_cells,
     }
+
+
+def _revtable_border_shape(header_cells, new_y, row_h, new_id):
+    """Build a native Visio shape that draws a revision row's grid lines (the
+    outer box plus the vertical column dividers), so an appended row gets the
+    same borders as the rows above -- whose grid is usually a baked-in image
+    that can't be extended. Returns the shape XML, or None if it can't be sized.
+    """
+    edges = sorted(((c["x"] - c["w"] / 2.0, c["x"] + c["w"] / 2.0)
+                    for c in header_cells if c.get("w")), key=lambda e: e[0])
+    if len(edges) < 2:
+        return None
+    left = min(e[0] for e in edges)
+    right = max(e[1] for e in edges)
+    width, height = right - left, row_h
+    bottom = new_y - row_h / 2.0
+    if width <= 0 or height <= 0:
+        return None
+    divs = []
+    for (l1, r1), (l2, r2) in zip(edges, edges[1:]):
+        dx = (r1 + l2) / 2.0 - left
+        if 1e-4 < dx < width - 1e-4:
+            divs.append(dx)
+
+    rows, ix = [], 1
+
+    def add(tag, x, y):
+        nonlocal ix
+        rows.append(f"<Row T='{tag}' IX='{ix}'><Cell N='X' V='{x:.6f}'/>"
+                    f"<Cell N='Y' V='{y:.6f}'/></Row>")
+        ix += 1
+
+    add("MoveTo", 0, 0)  # outer box
+    for x, y in ((width, 0), (width, height), (0, height), (0, 0)):
+        add("LineTo", x, y)
+    for dx in divs:  # interior vertical dividers
+        add("MoveTo", dx, 0)
+        add("LineTo", dx, height)
+
+    geom = ("<Section N='Geometry' IX='0'><Cell N='NoFill' V='1'/>"
+            "<Cell N='NoLine' V='0'/>" + "".join(rows) + "</Section>")
+    return (
+        f"<Shape ID='{new_id}' Type='Shape'>"
+        f"<Cell N='PinX' V='{left:.6f}'/><Cell N='PinY' V='{bottom:.6f}'/>"
+        f"<Cell N='Width' V='{width:.6f}'/><Cell N='Height' V='{height:.6f}'/>"
+        f"<Cell N='LocPinX' V='0' F='Width*0'/>"
+        f"<Cell N='LocPinY' V='0' F='Height*0'/>"
+        f"<Cell N='LineWeight' V='0.01'/><Cell N='LineColor' V='0'/>"
+        f"<Cell N='LinePattern' V='1'/><Cell N='FillPattern' V='0'/>"
+        f"{geom}</Shape>"
+    )
 
 
 # Visio attributes may use single OR double quotes; match either.
@@ -638,6 +714,7 @@ def add_revision_entry_to_page(page_xml: str, entry: dict):
         r'<Cell\b[^>]*?\bN=["\']PinY["\'][^>]*?\bF=["\']')
     inserts = []  # (after_index, new_raw)
     next_id = tbl["max_id"]
+    last_end = 0
     for f in writable:
         cell = last["cells"].get(f)
         if not cell or not cell["id"]:
@@ -659,8 +736,19 @@ def add_revision_entry_to_page(page_xml: str, entry: dict):
             clone, count=1)
         clone = _set_shape_text_raw(clone, values[f])
         inserts.append((span[1], clone))
+        last_end = max(last_end, span[1])
     if not inserts:
         return page_xml, "no_slot"
+
+    # The rows above get their borders from a baked-in grid image that can't be
+    # extended, so draw native grid lines for the new row (best-effort -- if it
+    # can't be built we still add the text). Place it after the row's cells so
+    # the lines sit on top.
+    border = _revtable_border_shape(
+        tbl.get("header_cells") or [], new_y, tbl["pitch"], next_id + 1)
+    if border:
+        inserts.append((last_end, border))
+
     for after, clone in sorted(inserts, reverse=True):
         page_xml = page_xml[:after] + clone + page_xml[after:]
     return page_xml, "appended"
@@ -697,12 +785,13 @@ def replace_text_in_vsdx(
     """Copy a .vsdx applying text replacements; return a report dict.
 
     If ``revision`` is (old_letter, new_letter) and ``update_drawing_rev`` is
-    true, the single-letter revision box on page 1 is bumped to new_letter.
-    If ``rev_entry`` is given, a new row is added to the cover page's revision
-    table.
+    true, the single-letter revision box is bumped to new_letter on *every*
+    page that has one (the title block repeats on each sheet). If ``rev_entry``
+    is given, a new row is added to the cover page's revision table.
 
-    Report: {"total", "by_part", "rev_drawing", "rev_table"}. rev_drawing is one
-    of 'na'/'updated'/'not_found'/'ambiguous'; rev_table is one of
+    Report: {"total", "by_part", "rev_drawing", "rev_sheets", "rev_table"}.
+    rev_drawing is one of 'na'/'updated'/'not_found'/'ambiguous'; rev_sheets is
+    the number of pages whose REV box was bumped; rev_table is one of
     'na'/'filled'/'appended'/'not_found'/'no_slot'.
     """
     in_path = Path(in_path)
@@ -718,6 +807,7 @@ def replace_text_in_vsdx(
     by_part: dict[str, int] = {}
     total = 0
     rev_status = "na"
+    rev_sheets = 0
     table_status = "na"
     do_rev = bool(revision and update_drawing_rev)
     do_table = bool(rev_entry and any(
@@ -742,10 +832,17 @@ def replace_text_in_vsdx(
                         if count:
                             by_part[item.filename] = count
                             total += count
-                        if do_rev and item.filename == first_page:
-                            new_text, rev_status = bump_revision_in_page(
+                        # The REV box sits in the title block on every sheet,
+                        # so bump it on each page, not just the cover.
+                        if do_rev and _PAGE_NAME_RE.search(item.filename):
+                            new_text, st = bump_revision_in_page(
                                 new_text, revision[0], revision[1]
                             )
+                            if st == "updated":
+                                rev_sheets += 1
+                                rev_status = "updated"
+                            elif rev_status == "na":
+                                rev_status = st
                         if do_table and item.filename == first_page:
                             new_text, table_status = add_revision_entry_to_page(
                                 new_text, rev_entry
@@ -756,7 +853,7 @@ def replace_text_in_vsdx(
                 zout.writestr(item.filename, data)
 
     return {"total": total, "by_part": by_part, "rev_drawing": rev_status,
-            "rev_table": table_status}
+            "rev_sheets": rev_sheets, "rev_table": table_status}
 
 
 # ---------------------------------------------------------------------------
@@ -2171,7 +2268,8 @@ HELP_SECTIONS = [
         "* The dialog shows the **columns it detected** in your loaded files. "
         "Fill in **Rev, ECN #, Description, Date, Approved By** (skip any).",
         "* On run, each Visio file gets the new row: an existing **blank row** "
-        "is filled, otherwise a new row is **cloned** below the last one.",
+        "is filled, otherwise a new row is **cloned** below the last one, with "
+        "**matching border lines** drawn around it.",
         "* If no table is confidently found on a file, that file is **left "
         "unchanged** (the Status box says so) — it never risks the drawing.",
     ]),
@@ -2200,7 +2298,9 @@ HELP_SECTIONS = [
         "skipped with a warning. No REVx in the name? The copy is named "
         "*_edited instead.",
         "* The matching letter **inside** the file (next to a REV / Revision "
-        "label) is bumped too.",
+        "label) is bumped too — on **every page** of a Visio drawing and "
+        "**every worksheet** of an Excel workbook, since the title block "
+        "repeats on each sheet.",
     ]),
     ("Appearance", [
         "* Use the **Dark / Light** button (top-right) to switch themes.",
@@ -3352,10 +3452,13 @@ def launch_gui() -> int:
                             )
                         if revision:
                             rd = report["rev_drawing"]
+                            sheets = report.get("rev_sheets", 0)
+                            on = (f" on {sheets} sheet(s)"
+                                  if sheets > 1 else "")
                             note = {
                                 "updated":
                                     f"    REV box {revision[0]} -> "
-                                    f"{revision[1]}",
+                                    f"{revision[1]}{on}",
                                 "not_found":
                                     "    (REV box not found in drawing; file "
                                     "renamed only)",
