@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.7.2 (Visio rev: borders + REV box on every sheet)"
+__version__ = "2.8 (approvals: Visio by REV, Excel by EE/ME/Production)"
 
 import argparse
 import datetime
@@ -576,6 +576,11 @@ def _detect_revtable(page_xml):
     }
 
 
+# Line weight (inches) for drawn revision-row grid lines. 0.003in is ~0.22pt --
+# a fine grid line; raise/lower to taste if it doesn't match a drawing's grid.
+_REV_BORDER_WEIGHT = "0.003"
+
+
 def _revtable_border_shape(header_cells, new_y, row_h, new_id):
     """Build a native Visio shape that draws a revision row's grid lines (the
     outer box plus the vertical column dividers), so an appended row gets the
@@ -621,7 +626,8 @@ def _revtable_border_shape(header_cells, new_y, row_h, new_id):
         f"<Cell N='Width' V='{width:.6f}'/><Cell N='Height' V='{height:.6f}'/>"
         f"<Cell N='LocPinX' V='0' F='Width*0'/>"
         f"<Cell N='LocPinY' V='0' F='Height*0'/>"
-        f"<Cell N='LineWeight' V='0.01'/><Cell N='LineColor' V='0'/>"
+        f"<Cell N='LineWeight' V='{_REV_BORDER_WEIGHT}'/>"
+        f"<Cell N='LineColor' V='0'/>"
         f"<Cell N='LinePattern' V='1'/><Cell N='FillPattern' V='0'/>"
         f"{geom}</Shape>"
     )
@@ -754,6 +760,66 @@ def add_revision_entry_to_page(page_xml: str, entry: dict):
     return page_xml, "appended"
 
 
+def add_approval_to_page(page_xml: str, rev_letter: str, name: str):
+    """Write an approver's name into the 'Approved By' cell of the revision-row
+    whose REV letter is ``rev_letter``. Returns (xml, status): 'approved',
+    'row_not_found' (no row with that letter), 'no_column' (table has no
+    Approved By column) or 'not_found' (no table)."""
+    if not rev_letter or not rev_letter.strip() or not name or not name.strip():
+        return page_xml, "na"
+    want = rev_letter.strip().upper()
+    tbl = _detect_revtable(page_xml)
+    if tbl is None:
+        return page_xml, "not_found"
+    if "Approved By" not in tbl["col_x"]:
+        return page_xml, "no_column"
+
+    target = None
+    for row in tbl["rows"]:
+        rc = row["cells"].get("Rev")
+        if rc and rc["text"].strip().upper() == want:
+            target = row
+            break
+    if target is None:
+        return page_xml, "row_not_found"
+
+    # The cell already exists for that column on that row: just set its text.
+    cell = target["cells"].get("Approved By")
+    if cell and cell["id"]:
+        span = _leaf_shape_span(page_xml, cell["id"])
+        if span:
+            raw = page_xml[span[0]:span[1]]
+            new_raw = _set_shape_text_raw(raw, name.strip())
+            return page_xml[:span[0]] + new_raw + page_xml[span[1]:], "approved"
+
+    # No Approved By cell on that row yet -> clone one from another row that has
+    # it, repositioned to this row's Y (PinX already = the Approved By column).
+    donor = next((r["cells"]["Approved By"] for r in tbl["rows"]
+                  if r is not target and r["cells"].get("Approved By")
+                  and r["cells"]["Approved By"]["id"]), None)
+    if not donor:
+        return page_xml, "no_column"
+    span = _leaf_shape_span(page_xml, donor["id"])
+    if not span:
+        return page_xml, "no_column"
+    raw = page_xml[span[0]:span[1]]
+    piny_re = re.compile(
+        r'(<Cell\b[^>]*?\bN=["\']PinY["\'][^>]*?\bV=)(["\'])[^"\']*\2')
+    if re.search(r'<Cell\b[^>]*?\bN=["\']PinY["\'][^>]*?\bF=["\']', raw) \
+            or not piny_re.search(raw):
+        return page_xml, "no_column"
+    new_id = tbl["max_id"] + 1
+    clone = re.sub(r'(<Shape\b[^>]*\bID=)(["\'])\d+\2',
+                   lambda m: f"{m.group(1)}{m.group(2)}{new_id}{m.group(2)}",
+                   raw, count=1)
+    clone = re.sub(r'\s+(?:UniqueID|NameU|Name)=(["\'])[^"\']*\1', "", clone)
+    clone = piny_re.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}{target['y']:.6f}{m.group(2)}",
+        clone, count=1)
+    clone = _set_shape_text_raw(clone, name.strip())
+    return page_xml[:span[1]] + clone + page_xml[span[1]:], "approved"
+
+
 def vsdx_revtable_columns(path) -> Optional[List[str]]:
     """The revision-table column names detected on a .vsdx cover page (in
     canonical order), or None if no table is found. Used to confirm/preview
@@ -772,6 +838,28 @@ def vsdx_revtable_columns(path) -> Optional[List[str]]:
     return [f for f in REVTABLE_FIELD_ORDER if f in tbl["col_x"]]
 
 
+def vsdx_revtable_rev_letters(path) -> List[str]:
+    """The REV letters present in the cover-page revision table (e.g.
+    ['A','B','C','D']), for the approval dialog. [] if no table/letters."""
+    try:
+        with zipfile.ZipFile(path) as z:
+            page = _first_page_part(z.namelist())
+            if not page:
+                return []
+            xml = z.read(page).decode("utf-8", "replace")
+    except (zipfile.BadZipFile, OSError, KeyError):
+        return []
+    tbl = _detect_revtable(xml)
+    if not tbl:
+        return []
+    out = []
+    for row in tbl["rows"]:
+        rc = row["cells"].get("Rev")
+        if rc and rc["text"].strip():
+            out.append(rc["text"].strip())
+    return out
+
+
 def replace_text_in_vsdx(
     in_path: str | os.PathLike,
     out_path: str | os.PathLike,
@@ -781,18 +869,22 @@ def replace_text_in_vsdx(
     revision: Optional[Tuple[str, str]] = None,
     update_drawing_rev: bool = False,
     rev_entry: Optional[dict] = None,
+    approval: Optional[dict] = None,
 ) -> dict:
     """Copy a .vsdx applying text replacements; return a report dict.
 
     If ``revision`` is (old_letter, new_letter) and ``update_drawing_rev`` is
     true, the single-letter revision box is bumped to new_letter on *every*
     page that has one (the title block repeats on each sheet). If ``rev_entry``
-    is given, a new row is added to the cover page's revision table.
+    is given, a new row is added to the cover page's revision table. If
+    ``approval`` is {'rev': letter, 'name': name}, that name is written into the
+    Approved By cell of the matching revision row.
 
-    Report: {"total", "by_part", "rev_drawing", "rev_sheets", "rev_table"}.
-    rev_drawing is one of 'na'/'updated'/'not_found'/'ambiguous'; rev_sheets is
-    the number of pages whose REV box was bumped; rev_table is one of
-    'na'/'filled'/'appended'/'not_found'/'no_slot'.
+    Report: {"total", "by_part", "rev_drawing", "rev_sheets", "rev_table",
+    "approval"}. rev_drawing is one of 'na'/'updated'/'not_found'/'ambiguous';
+    rev_sheets is the number of pages whose REV box was bumped; rev_table is one
+    of 'na'/'filled'/'appended'/'not_found'/'no_slot'; approval is one of
+    'na'/'approved'/'row_not_found'/'no_column'/'not_found'.
     """
     in_path = Path(in_path)
     out_path = Path(out_path)
@@ -809,14 +901,17 @@ def replace_text_in_vsdx(
     rev_status = "na"
     rev_sheets = 0
     table_status = "na"
+    approval_status = "na"
     do_rev = bool(revision and update_drawing_rev)
     do_table = bool(rev_entry and any(
         v and v.strip() for v in rev_entry.values()))
+    do_approval = bool(approval and approval.get("rev") and
+                       approval.get("name"))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(in_path, "r") as zin:
         first_page = (_first_page_part(zin.namelist())
-                      if (do_rev or do_table) else None)
+                      if (do_rev or do_table or do_approval) else None)
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -847,13 +942,18 @@ def replace_text_in_vsdx(
                             new_text, table_status = add_revision_entry_to_page(
                                 new_text, rev_entry
                             )
+                        if do_approval and item.filename == first_page:
+                            new_text, approval_status = add_approval_to_page(
+                                new_text, approval["rev"], approval["name"]
+                            )
                         if new_text != text:
                             data = new_text.encode("utf-8")
                 # Preserve the original name; recompress with deflate.
                 zout.writestr(item.filename, data)
 
     return {"total": total, "by_part": by_part, "rev_drawing": rev_status,
-            "rev_sheets": rev_sheets, "rev_table": table_status}
+            "rev_sheets": rev_sheets, "rev_table": table_status,
+            "approval": approval_status}
 
 
 # ---------------------------------------------------------------------------
@@ -1600,6 +1700,66 @@ def build_author_edits(path, new_name, run_date=None) -> dict:
     return edits
 
 
+# Discipline approval boxes: a cell labelled with the discipline (EE / ME /
+# Production) has the approver's name in the next cell and a date after that.
+APPROVAL_DISCIPLINES = ["EE", "ME", "Production"]
+_APPROVAL_LABELS = {
+    "EE": {"ee", "eeapproval", "electrical", "electricalengineer",
+           "electricalengineering", "elecengineer", "eeengineer"},
+    "ME": {"me", "meapproval", "mechanical", "mechanicalengineer",
+           "mechanicalengineering", "mecheng", "mechengineer"},
+    "Production": {"production", "prod", "manufacturing", "mfg",
+                   "productionapproval", "prodapproval", "mfgapproval"},
+}
+
+
+def build_approval_edits(path, discipline, new_name, run_date=None) -> dict:
+    """Write an approver's name (and today's date) beside the EE/ME/Production
+    label on every worksheet except the Change Log.
+
+    The label cell's text must match the chosen ``discipline``; the name goes in
+    the next column and the date in the one after, matching the existing date's
+    format. Returns {worksheet_part: {name_ref: name, date_ref: date}} or {}.
+    """
+    if not new_name or not new_name.strip() or not discipline:
+        return {}
+    variants = _APPROVAL_LABELS.get(discipline)
+    if not variants:
+        return {}
+    run_date = run_date or datetime.date.today()
+    edits: dict = {}
+    with zipfile.ZipFile(path) as z:
+        protected = _changelog_part(z)
+        shared = _read_shared_strings(z)
+        for name in z.namelist():
+            if not _WORKSHEET_RE.search(name.lower()) or name == protected:
+                continue
+            cells = _read_sheet_cells(
+                z.read(name).decode("utf-8", "replace"), shared
+            )
+            for (col, row), (ref, txt) in cells.items():
+                if txt and _norm_header(txt) in variants:
+                    name_ref = f"{_col_letters(col + 1)}{row}"
+                    date_ref = f"{_col_letters(col + 2)}{row}"
+                    date_val = _run_date_value(
+                        cells.get((col + 2, row)), run_date
+                    )
+                    sheet = edits.setdefault(name, {})
+                    sheet[name_ref] = new_name
+                    sheet[date_ref] = date_val
+    return edits
+
+
+def xlsx_approval_disciplines(path) -> List[str]:
+    """Which of EE/ME/Production have a label cell present in the workbook
+    (outside the Change Log). For the approval dialog."""
+    found = []
+    for disc in APPROVAL_DISCIPLINES:
+        if build_approval_edits(path, disc, "x"):
+            found.append(disc)
+    return found
+
+
 # ---------------------------------------------------------------------------
 # File category (by file name) + format detection + dispatch
 # ---------------------------------------------------------------------------
@@ -1647,7 +1807,7 @@ def replace_text_in_file(
     in_path, out_path, pairs,
     case_sensitive=True, whole_word=False,
     revision=None, update_drawing_rev=False,
-    cell_edits=None, rev_entry=None,
+    cell_edits=None, rev_entry=None, approval=None,
 ) -> dict:
     """Dispatch to the Visio or Excel engine based on the file type."""
     fmt = detect_format(in_path)
@@ -1655,7 +1815,7 @@ def replace_text_in_file(
         return replace_text_in_vsdx(
             in_path, out_path, pairs, case_sensitive, whole_word,
             revision=revision, update_drawing_rev=update_drawing_rev,
-            rev_entry=rev_entry,
+            rev_entry=rev_entry, approval=approval,
         )
     if fmt == "xlsx":
         return replace_text_in_xlsx(
@@ -2202,9 +2362,12 @@ HELP_SECTIONS = [
         "(.vsdx)** and **Excel workbooks (.xlsx)** at once, saves each result "
         "as a new **next-revision** copy (your originals are never changed), "
         "and writes a **change summary** you can hand to an approver.",
-        "It also has Excel helpers: edit a part's whole BOM row, append a "
-        "Change Log entry, and stamp the Author box with a name and today's "
-        "date.",
+        "It also has per-format helpers: edit a part's whole Excel BOM row, "
+        "append a Change Log entry, stamp the Author box, add a row to a Visio "
+        "revision table, and **approve** drawings/workbooks in bulk.",
+        "* **Approvals** let one approver sign off **every** loaded file at "
+        "once — by REV letter in Visio drawings, or by discipline (EE / ME / "
+        "Production) in Excel workbooks — without opening each file by hand.",
     ]),
     ("Before you start", [
         "* Your originals are never modified — every result is a separate copy.",
@@ -2261,6 +2424,15 @@ HELP_SECTIONS = [
         "box is replaced and the date beside it is set to **today** (kept in "
         "the same format).",
     ]),
+    ("Step 2 (Excel only) — Approve (EE / ME / Production)", [
+        "Click **Excel: approve (EE/ME/Prod)...** to sign off as an approver. "
+        "Pick the **discipline** (EE, ME, or Production) and type your name.",
+        "* The dialog shows which **approval boxes were found** in your files.",
+        "* On run, your name goes in the cell **beside that discipline's "
+        "label** and **today's date** in the next cell (kept in the existing "
+        "date's format), on **every sheet except the Change Log**, in every "
+        "loaded Excel file.",
+    ]),
     ("Step 2 (Visio only) — Add a revision entry", [
         "Click **Visio: add revision entry...** to add a row to the "
         "**revision-history table** on a drawing's cover page (the chart in a "
@@ -2272,6 +2444,14 @@ HELP_SECTIONS = [
         "**matching border lines** drawn around it.",
         "* If no table is confidently found on a file, that file is **left "
         "unchanged** (the Status box says so) — it never risks the drawing.",
+    ]),
+    ("Step 2 (Visio only) — Approve a revision", [
+        "Click **Visio: approve revision...** to sign off a specific revision "
+        "without opening the drawing. Enter the **REV letter** you're approving "
+        "and your **name**.",
+        "* The dialog lists the **revision letters found** in the table.",
+        "* On run, your name is written into the **Approved** column of the row "
+        "with that REV letter, in every loaded Visio file's revision table.",
     ]),
     ("Step 3 — Options", [
         "* **Case sensitive** / **Whole word only** — control matching.",
@@ -2523,6 +2703,10 @@ def launch_gui() -> int:
             self.author_name: str = ""
             # Staged Visio revision-table row: {canonical_field: value}.
             self.visio_rev_entry: dict = {}
+            # Staged Visio approval: {"rev": letter, "name": approver}.
+            self.visio_approval: dict = {}
+            # Staged Excel approval: {"discipline": EE/ME/Production, "name":..}.
+            self.excel_approval: dict = {}
 
             pad = {"padx": 10, "pady": 6}
 
@@ -2593,23 +2777,35 @@ def launch_gui() -> int:
             self.bom_status = ttk.Label(rule_btns, text="")
             self.bom_status.pack(side="left", padx=8)
 
-            # Per-format helper editors get their own row so they never clip.
-            helper_btns = ttk.Frame(mid)
-            helper_btns.pack(fill="x", padx=8, pady=(0, 8))
+            # Per-format helper editors, grouped by file type onto two rows so
+            # they never clip.
+            excel_btns = ttk.Frame(mid)
+            excel_btns.pack(fill="x", padx=8, pady=(0, 4))
             self._rbtn(
-                helper_btns, "Excel: find & edit rows...", self.open_bom_editor
+                excel_btns, "Excel: find & edit rows...", self.open_bom_editor
             ).pack(side="left")
             self._rbtn(
-                helper_btns, "Excel: add Change Log entry...",
+                excel_btns, "Excel: add Change Log entry...",
                 self.open_changelog_editor,
             ).pack(side="left", padx=8)
             self._rbtn(
-                helper_btns, "Excel: set Author + date...",
+                excel_btns, "Excel: set Author + date...",
                 self.open_author_editor,
             ).pack(side="left")
             self._rbtn(
-                helper_btns, "Visio: add revision entry...",
+                excel_btns, "Excel: approve (EE/ME/Prod)...",
+                self.open_excel_approval,
+            ).pack(side="left", padx=8)
+
+            visio_btns = ttk.Frame(mid)
+            visio_btns.pack(fill="x", padx=8, pady=(0, 8))
+            self._rbtn(
+                visio_btns, "Visio: add revision entry...",
                 self.open_visio_rev_editor,
+            ).pack(side="left")
+            self._rbtn(
+                visio_btns, "Visio: approve revision...",
+                self.open_visio_approval,
             ).pack(side="left", padx=8)
 
             # --- 3. Options ------------------------------------------------
@@ -3310,6 +3506,129 @@ def launch_gui() -> int:
                 side="right", padx=6
             )
 
+        # -- Visio approval (sign off an existing revision row) ------------
+        def open_visio_approval(self):
+            vsdx_files = [f for f in self.files if detect_format(f) == "vsdx"]
+            if not vsdx_files:
+                messagebox.showinfo(
+                    "No Visio files", "Add at least one .vsdx file first."
+                )
+                return
+            letters = sorted({l for f in vsdx_files
+                              for l in vsdx_revtable_rev_letters(f)})
+            win = tk.Toplevel(self.root)
+            win.title("Approve a Visio revision")
+            win.transient(self.root)
+            win.grab_set()
+            win.configure(bg=self.palette["bg"])
+            avail = (f"Revision letters found: {', '.join(letters)}."
+                     if letters else "No revision letters were detected; you "
+                     "can still enter one.")
+            ttk.Label(
+                win, wraplength=560, justify="left",
+                text="Sign off a revision: your name is written into the "
+                "Approved column of the row with the REV letter you enter, in "
+                "the cover-page revision table of every loaded Visio file.\n\n"
+                + avail,
+            ).pack(fill="x", padx=10, pady=8)
+
+            form = ttk.Frame(win)
+            form.pack(fill="x", padx=10, pady=4)
+            r1 = ttk.Frame(form)
+            r1.pack(fill="x", pady=3)
+            ttk.Label(r1, text="REV letter:", width=14).pack(side="left")
+            rev_e = ttk.Entry(r1, width=10)
+            rev_e.insert(0, self.visio_approval.get("rev", ""))
+            rev_e.pack(side="left")
+            r2 = ttk.Frame(form)
+            r2.pack(fill="x", pady=3)
+            ttk.Label(r2, text="Approver name:", width=14).pack(side="left")
+            name_e = ttk.Entry(r2, width=40)
+            name_e.insert(0, self.visio_approval.get("name", ""))
+            name_e.pack(side="left", fill="x", expand=True)
+
+            def apply():
+                rev = rev_e.get().strip()
+                name = name_e.get().strip()
+                if not rev or not name:
+                    self.visio_approval = {}
+                    self.log("Visio approval cleared.")
+                else:
+                    self.visio_approval = {"rev": rev, "name": name}
+                    self.log(
+                        f"Staged Visio approval: REV {rev} by {name}."
+                    )
+                win.destroy()
+
+            btns = ttk.Frame(win)
+            btns.pack(fill="x", padx=10, pady=10)
+            self._rbtn(btns, "Save", apply, kind="accent").pack(side="right")
+            self._rbtn(btns, "Cancel", win.destroy).pack(side="right", padx=6)
+
+        # -- Excel approval (EE / ME / Production sign off) ----------------
+        def open_excel_approval(self):
+            excel_files = [f for f in self.files if detect_format(f) == "xlsx"]
+            if not excel_files:
+                messagebox.showinfo(
+                    "No Excel files", "Add at least one .xlsx file first."
+                )
+                return
+            found = sorted({d for f in excel_files
+                            for d in xlsx_approval_disciplines(f)},
+                           key=APPROVAL_DISCIPLINES.index)
+            win = tk.Toplevel(self.root)
+            win.title("Approve Excel files")
+            win.transient(self.root)
+            win.grab_set()
+            win.configure(bg=self.palette["bg"])
+            avail = (f"Approval boxes found: {', '.join(found)}."
+                     if found else "No EE/ME/Production approval boxes were "
+                     "detected; nothing will change unless one is present.")
+            ttk.Label(
+                win, wraplength=560, justify="left",
+                text="Sign off as approver: your name goes in the cell beside "
+                "the discipline's label and today's date in the next cell "
+                "(same format as the existing date), on every sheet except the "
+                "Change Log, in every loaded Excel file.\n\n" + avail,
+            ).pack(fill="x", padx=10, pady=8)
+
+            form = ttk.Frame(win)
+            form.pack(fill="x", padx=10, pady=4)
+            r1 = ttk.Frame(form)
+            r1.pack(fill="x", pady=3)
+            ttk.Label(r1, text="Discipline:", width=14).pack(side="left")
+            disc_var = tk.StringVar(
+                value=self.excel_approval.get("discipline",
+                                              APPROVAL_DISCIPLINES[0]))
+            for d in APPROVAL_DISCIPLINES:
+                ttk.Radiobutton(r1, text=d, value=d,
+                                variable=disc_var).pack(side="left", padx=6)
+            r2 = ttk.Frame(form)
+            r2.pack(fill="x", pady=3)
+            ttk.Label(r2, text="Approver name:", width=14).pack(side="left")
+            name_e = ttk.Entry(r2, width=40)
+            name_e.insert(0, self.excel_approval.get("name", ""))
+            name_e.pack(side="left", fill="x", expand=True)
+
+            def apply():
+                name = name_e.get().strip()
+                disc = disc_var.get()
+                if not name:
+                    self.excel_approval = {}
+                    self.log("Excel approval cleared.")
+                else:
+                    self.excel_approval = {"discipline": disc, "name": name}
+                    self.log(
+                        f"Staged Excel approval: {disc} by {name} "
+                        "(date = today)."
+                    )
+                win.destroy()
+
+            btns = ttk.Frame(win)
+            btns.pack(fill="x", padx=10, pady=10)
+            self._rbtn(btns, "Save", apply, kind="accent").pack(side="right")
+            self._rbtn(btns, "Cancel", win.destroy).pack(side="right", padx=6)
+
         # -- run ------------------------------------------------------------
         def run(self):
             if not self.files:
@@ -3328,12 +3647,13 @@ def launch_gui() -> int:
             if (not bump_rev
                     and not any(r["find"].get() for r in self.rule_rows)
                     and not self.bom_edits and not self.changelog_entry
-                    and not self.author_name and not self.visio_rev_entry):
+                    and not self.author_name and not self.visio_rev_entry
+                    and not self.visio_approval and not self.excel_approval):
                 messagebox.showwarning(
                     "Nothing to do",
                     "Enter a 'Find' value, tick 'Save copy as next revision', "
                     "or stage an Excel row / Change Log / Author / Visio "
-                    "revision edit.",
+                    "revision / approval edit.",
                 )
                 return
 
@@ -3347,7 +3667,8 @@ def launch_gui() -> int:
                     self.pdf_var.get(), bump_rev, self.revtext_var.get(),
                     dict(self.bom_edits), dict(self.changelog_entry),
                     self.author_name, self.summary_var.get(),
-                    dict(self.visio_rev_entry),
+                    dict(self.visio_rev_entry), dict(self.visio_approval),
+                    dict(self.excel_approval),
                 ),
                 daemon=True,
             ).start()
@@ -3355,7 +3676,7 @@ def launch_gui() -> int:
         def _worker(self, files, pairs_by_file, case_sensitive, whole_word,
                     make_pdf, bump_rev, update_rev_text, bom_edits,
                     changelog_entry, author_name, make_summary,
-                    visio_rev_entry):
+                    visio_rev_entry, visio_approval, excel_approval):
             total_repl = 0
             done = 0
             errors = 0
@@ -3369,10 +3690,11 @@ def launch_gui() -> int:
                     pairs = pairs_by_file.get(f, [])
 
                     # Excel cell edits for this file: BOM row edits, a Change
-                    # Log append, and the Author name/date (by cell ref).
+                    # Log append, the Author name/date, and an EE/ME/Production
+                    # approval name+date (all by cell ref).
                     cell_edits = None
-                    if ((bom_edits or changelog_entry or author_name)
-                            and detect_format(f) == "xlsx"):
+                    if ((bom_edits or changelog_entry or author_name
+                         or excel_approval) and detect_format(f) == "xlsx"):
                         merged: dict = {}
                         try:
                             # BOM edits are per-file: {file: {sheet: {ref: val}}}
@@ -3388,10 +3710,23 @@ def launch_gui() -> int:
                                     f, author_name
                                 ).items():
                                     merged.setdefault(part, {}).update(d)
+                            if excel_approval:
+                                for part, d in build_approval_edits(
+                                    f, excel_approval.get("discipline"),
+                                    excel_approval.get("name"),
+                                ).items():
+                                    merged.setdefault(part, {}).update(d)
                         except Exception:  # noqa: BLE001
                             merged = {}
                         cell_edits = merged or None
-                    has_edits = bool(cell_edits)
+
+                    # A Visio revision-table row / approval apply only to .vsdx.
+                    is_vsdx = detect_format(f) == "vsdx"
+                    rev_entry = visio_rev_entry if (visio_rev_entry
+                                                    and is_vsdx) else None
+                    appr = visio_approval if (visio_approval
+                                              and is_vsdx) else None
+                    has_edits = bool(cell_edits or rev_entry or appr)
 
                     # Decide the copy's name and whether to bump the revision.
                     revision = None
@@ -3422,11 +3757,6 @@ def launch_gui() -> int:
                             src.stem + "_edited" + src.suffix
                         )
 
-                    # A Visio revision-table row applies only to .vsdx files.
-                    rev_entry = (visio_rev_entry
-                                 if (visio_rev_entry
-                                     and detect_format(f) == "vsdx") else None)
-
                     try:
                         report = replace_text_in_file(
                             src, out_vsdx, pairs,
@@ -3436,6 +3766,7 @@ def launch_gui() -> int:
                             update_drawing_rev=update_rev_text,
                             cell_edits=cell_edits,
                             rev_entry=rev_entry,
+                            approval=appr,
                         )
                         total_repl += report["total"]
                         msg = (
@@ -3485,6 +3816,24 @@ def launch_gui() -> int:
                             }.get(report.get("rev_table"))
                             if tnote:
                                 self.log(tnote)
+                        if appr:
+                            anote = {
+                                "approved":
+                                    f"    revision {appr['rev']}: approved by "
+                                    f"{appr['name']}",
+                                "row_not_found":
+                                    f"    (no revision row '{appr['rev']}' "
+                                    "found; approval skipped)",
+                                "no_column":
+                                    "    (revision table has no Approved By "
+                                    "column; approval skipped)",
+                                "not_found":
+                                    "    (revision table not found; approval "
+                                    "skipped)",
+                                "na": None,
+                            }.get(report.get("approval"))
+                            if anote:
+                                self.log(anote)
                         last_output = out_vsdx
 
                         if make_summary:

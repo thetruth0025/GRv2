@@ -207,6 +207,29 @@ and the Status box says so — it never risks corrupting a drawing. If your
 template uses unusual column labels, share a sample `.vsdx` so the detection can
 be tuned to it.
 
+### Approvals (sign off many files at once)
+
+An approver can sign off **every** loaded file in one click, without opening
+each drawing/workbook by hand.
+
+**Visio — approve a revision.** Click **Visio: approve revision...**, enter the
+**REV letter** you're approving and your **name**. The dialog lists the revision
+letters it found. On **Replace & Convert**, your name is written into the
+**Approved** column of the row with that REV letter, in each loaded Visio file's
+cover-page revision table. (If that row had no Approved cell yet, one is created
+from a sibling row so the formatting matches.)
+
+**Excel — approve by discipline.** Click **Excel: approve (EE/ME/Prod)...**,
+pick the **discipline** (**EE**, **ME**, or **Production**) and type your
+**name**. The dialog shows which approval boxes it found. On **Replace &
+Convert**, for **every** Excel file your name is placed in the cell **beside
+that discipline's label** and **today's date** in the next cell — kept in the
+**same format** as the existing date — on **every sheet except the Change Log**.
+
+Discipline labels are matched flexibly (e.g. `EE`/`Electrical`, `ME`/
+`Mechanical`, `Production`/`Prod`/`MFG`). A file with no matching label is left
+unchanged.
+
 ### Change summary (for approval review)
 
 With **Generate change summary** ticked (on by default), the tool writes a
