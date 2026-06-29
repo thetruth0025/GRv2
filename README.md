@@ -152,10 +152,11 @@ its number. Put the part number in a **Find** box, then click
    to stage them. The editor opens in its **own window** on top of the tool.
    - A **Show find value(s)** dropdown lets you filter the list to one or more
      of the find values (useful when many rules produce a lot of matches).
-   - **Copy 1st down** buttons (**Manufacturer**, **Qty**, **Description**) copy
-     the first shown row's value into the rest of that **find value's** rows, so
-     you can fill every instance of a part from the first one. With find values
-     selected in the dropdown, the copy is limited to those.
+   - **Copy 1st down** buttons (**Manufacturer**, **Unit Cost**, **Description**,
+     **Qty**) copy the first shown row's value into the rest of that **find
+     value's** rows, so you can fill every instance of a part from the first
+     one. With find values selected in the dropdown, the copy is limited to
+     those.
    - **Reset fields** restores every field to the originally found data.
 4. **Refresh** re-runs the lookup — use it after adding files or changing the
    Find value(s); values you've already typed are kept.

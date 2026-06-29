@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.11 (BOM editor: find-value filter, copy-down, reset fields)"
+__version__ = "2.11.1 (BOM copy-down: add Unit Cost)"
 
 import argparse
 import datetime
@@ -2424,9 +2424,10 @@ HELP_SECTIONS = [
         "row — you can set a different value per file.",
         "* The **Show find value(s)** dropdown filters the list to one or more "
         "find values (handy when many rules produce a lot of matches).",
-        "* The **Copy 1st down** buttons (Manufacturer / Qty / Description) "
-        "copy the first shown row's value into the rest of that **find "
-        "value's** rows — fill all instances of a part from the first one.",
+        "* The **Copy 1st down** buttons (Manufacturer / Unit Cost / "
+        "Description / Qty) copy the first shown row's value into the rest of "
+        "that **find value's** rows — fill all instances of a part from the "
+        "first one.",
         "* **Reset fields** puts every field back to the originally found "
         "data. **Refresh lookup** re-scans; **Save edits** stages the changes. "
         "Numbers stay numeric.",
@@ -3312,7 +3313,7 @@ def launch_gui() -> int:
             ttk.Label(
                 crow, text="Copy 1st down (per find value):"
             ).pack(side="left")
-            for _fld in ("Manufacturer", "Qty", "Description"):
+            for _fld in ("Manufacturer", "Unit Cost", "Description", "Qty"):
                 self._rbtn(
                     crow, _fld, lambda fld=_fld: copy_down(fld),
                     kind="green", radius=9, padx=10, pady=5,
