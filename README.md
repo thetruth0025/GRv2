@@ -261,14 +261,20 @@ can start from scratch on a new file or batch. It asks for confirmation first.
 ### Change summary (for approval review)
 
 With **Generate change summary** ticked (on by default), the tool writes a
-**`Change_Summary_<timestamp>.html`** document next to the edited files and opens
-it. Files are **grouped by document type** (BOM / System Drawing / Cable
-Drawing), and for every file it lists each change as **Location · Before · After** —
-including text replacements, BOM row edits, the Author name/date, the appended
-Change Log row, and the revision bump. Cells are labelled by their column or
-title-block label (e.g. *P/N*, *Unit Cost*, *Author*, *Revision*), and dates are
-shown as real dates. An approver can review every change in one document without
-opening each file, and can print it to PDF.
+**`Change_Summary_<timestamp>.html`** document next to the edited files (or in
+your output folder) and opens it. Files are **grouped by document type** (BOM /
+System Drawing / Cable Drawing), then by file, and for every file it lists each
+change as **Change (where) · Before · After** — including text replacements, BOM
+row edits, the Author name/date, the appended Change Log row, and the revision
+bump. Cells are labelled by their column or title-block label (e.g. *P/N*, *Unit
+Cost*, *Author*, *Revision*), and dates are shown as real dates.
+
+**Identical changes are grouped into a single line.** A change that happens the
+same way across many sheets/pages — most notably the **REV bump**, which touches
+every sheet — appears once, noting whether it occurred on **all sheets** or on
+specific named sheets, instead of one row per sheet. This keeps the summary fast
+to review. An approver can check every change in one document without opening
+each file, and can print it to PDF.
 
 ---
 

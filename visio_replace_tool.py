@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.11.1 (BOM copy-down: add Unit Cost)"
+__version__ = "2.12 (change summary: group identical changes by sheet)"
 
 import argparse
 import datetime
@@ -2087,22 +2087,67 @@ def generate_change_summary(records, summary_path, run_dt=None) -> Path:
         head = (f'<h3>{_html.escape(r["input"])}</h3>'
                 f'<div class="sub">saved as <b>{_html.escape(r["output"])}</b>'
                 f'{rev}</div>')
-        if not r["changes"]:
+        changes = r["changes"]
+        if not changes:
             return head + ('<p class="none">No content changes '
                            '(copied as-is).</p>')
+        noun = "sheet" if any("!" in c["location"] for c in changes) else "page"
+
+        # Collapse identical changes (same field + before + after) into one
+        # row, collecting every place they happened, so a change repeated on
+        # many sheets (e.g. the REV bump) is a single line, not one per sheet.
+        groups: dict = {}
+        order: list = []
+        all_sheets: list = []
+        for c in changes:
+            loc = c["location"]
+            sheet = loc.split("!", 1)[0] if "!" in loc else loc
+            if sheet and sheet not in all_sheets:
+                all_sheets.append(sheet)
+            k = (c.get("field", "") or "", c["before"], c["after"])
+            g = groups.get(k)
+            if g is None:
+                g = {"field": k[0], "before": c["before"],
+                     "after": c["after"], "locs": []}
+                groups[k] = g
+                order.append(k)
+            if loc not in g["locs"]:
+                g["locs"].append(loc)
+
+        def where(locs) -> str:
+            if len(locs) == 1:
+                return _html.escape(locs[0])
+            sheets: list = []
+            for loc in locs:
+                s = loc.split("!", 1)[0] if "!" in loc else loc
+                if s not in sheets:
+                    sheets.append(s)
+            if len(sheets) == 1:
+                return (f'{_html.escape(sheets[0])} '
+                        f'<span class="dim">({len(locs)} cells)</span>')
+            if len(all_sheets) > 1 and set(sheets) == set(all_sheets):
+                return f'<b>all {len(sheets)} {noun}s</b>'
+            shown = ", ".join(_html.escape(s) for s in sheets[:12])
+            if len(sheets) > 12:
+                shown += f' <span class="dim">+{len(sheets) - 12} more</span>'
+            return f'{len(sheets)} {noun}s: {shown}'
+
         trs = []
-        for c in r["changes"]:
-            loc = _html.escape(c["location"])
-            if c.get("field"):
-                loc += (f'<br><span class="field">'
-                        f'{_html.escape(c["field"])}</span>')
+        for k in order:
+            g = groups[k]
+            loc_html = ""
+            if g["field"]:
+                loc_html += (f'<span class="field">'
+                             f'{_html.escape(g["field"])}</span><br>')
+            loc_html += f'<span class="where">{where(g["locs"])}</span>'
             trs.append(
-                f'<tr><td class="loc">{loc}</td>'
-                f'<td class="before">{_html.escape(c["before"]) or "&nbsp;"}</td>'
-                f'<td class="after">{_html.escape(c["after"]) or "&nbsp;"}</td></tr>'
+                f'<tr><td class="loc">{loc_html}</td>'
+                f'<td class="before">{_html.escape(g["before"]) or "&nbsp;"}</td>'
+                f'<td class="after">{_html.escape(g["after"]) or "&nbsp;"}</td>'
+                f'</tr>'
             )
-        return (head + '<table><thead><tr><th>Location</th><th>Before</th>'
-                '<th>After</th></tr></thead><tbody>'
+        return (head + '<table><thead><tr><th>Change (where)</th>'
+                '<th>Before</th><th>After</th></tr></thead><tbody>'
                 + "".join(trs) + '</tbody></table>')
 
     # Group files by document type (BOM / System Drawing / Cable Drawing).
@@ -2139,8 +2184,10 @@ def generate_change_summary(records, summary_path, run_dt=None) -> Path:
  th, td {{ border: 1px solid #ccc; padding: 6px 9px; text-align: left;
           vertical-align: top; font-size: 0.92em; }}
  th {{ background:#f3f3f3; }}
- td.loc {{ white-space: nowrap; font-family: Consolas, monospace; }}
- .field {{ color:#0066aa; font-family: Segoe UI, Arial; font-size:0.85em; }}
+ td.loc {{ font-family: Segoe UI, Arial; max-width: 40%; }}
+ .field {{ color:#0066aa; font-weight:600; font-size:0.92em; }}
+ .where {{ color:#333; font-size:0.9em; }}
+ .dim {{ color:#888; }}
  td.before {{ background:#fff3f3; }}
  td.after {{ background:#f1fbf1; }}
  .none {{ color:#777; font-style: italic; }}
@@ -2500,10 +2547,14 @@ HELP_SECTIONS = [
         "on a new file or batch.",
     ]),
     ("The change summary", [
-        "An HTML document grouped by document type. For each file it lists "
-        "every change as **Location / Before / After** — text replacements, "
-        "BOM edits, the Author name+date, the appended Change Log row, and the "
-        "revision bump. Print it to PDF for sign-off.",
+        "An HTML document grouped by **document type**, then **file**. For each "
+        "file it lists changes as **Change (where) / Before / After** — text "
+        "replacements, BOM edits, the Author name+date, the appended Change Log "
+        "row, and the revision bump. Print it to PDF for sign-off.",
+        "* **Identical changes are grouped into one line.** A change repeated "
+        "across sheets/pages (like the REV bump) shows once, noting **all "
+        "sheets** or the **specific sheets** it happened on — so the summary is "
+        "quick to review instead of one line per sheet.",
     ]),
     ("Revisions", [
         "* The revision letter is read from the **file name** (e.g. REVA).",
