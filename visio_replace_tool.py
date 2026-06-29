@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.10 (BOM sheet sub-header + Reset all button)"
+__version__ = "2.11 (BOM editor: find-value filter, copy-down, reset fields)"
 
 import argparse
 import datetime
@@ -2422,8 +2422,14 @@ HELP_SECTIONS = [
         "it was found on.",
         "* Edit **Manufacturer, Unit Cost, Description, Qty, Notes** for each "
         "row — you can set a different value per file.",
-        "* **Refresh lookup** re-scans after you add files or change the Find "
-        "value; **Save edits** stages them. Numbers stay numeric.",
+        "* The **Show find value(s)** dropdown filters the list to one or more "
+        "find values (handy when many rules produce a lot of matches).",
+        "* The **Copy 1st down** buttons (Manufacturer / Qty / Description) "
+        "copy the first shown row's value into the rest of that **find "
+        "value's** rows — fill all instances of a part from the first one.",
+        "* **Reset fields** puts every field back to the originally found "
+        "data. **Refresh lookup** re-scans; **Save edits** stages the changes. "
+        "Numbers stay numeric.",
     ]),
     ("Step 2 (Excel only) — Change Log entry", [
         "Click **Excel: add Change Log entry...** and fill in **Item, ECN #** "
@@ -3252,28 +3258,72 @@ def launch_gui() -> int:
             self._build_bom_window()
 
         def _build_bom_window(self):
+            pal = self.palette
             win = tk.Toplevel(self.root)
             win.title("Find & edit Excel rows")
-            win.geometry("720x560")
+            win.geometry("840x640")
+            win.minsize(660, 480)
             win.transient(self.root)
             win.grab_set()
-            win.configure(bg=self.palette["bg"])
+            win.configure(bg=pal["bg"])
+
+            # Persistent state, kept across filtering / refresh.
+            #   all  : every scanned match (excel_scan_rows dict + 'file')
+            #   orig : (file, sheet, ref) -> original value
+            #   cur  : (file, sheet, ref) -> current (edited) value
+            #   rows : currently displayed entries [{key, field, entry}]
+            state = {"all": [], "orig": {}, "cur": {}, "rows": []}
+            filter_vars: dict = {}  # find value -> BooleanVar (dropdown)
+
+            def key(mt, ref):
+                return (mt["file"], mt["sheet"], ref)
+
+            def capture():
+                for r in state["rows"]:
+                    try:
+                        state["cur"][r["key"]] = r["entry"].get()
+                    except tk.TclError:
+                        pass
+
+            def shown_finds():
+                sel = [fv for fv, v in filter_vars.items() if v.get()]
+                return set(sel) if sel else set(filter_vars)  # none = all
 
             ttk.Label(
-                win, wraplength=690, justify="left",
-                text="Each matched row is shown per file, so you can give a row "
-                "a different value in one file than another. Edit any field, "
-                "then Save. Fields you leave unchanged are not touched. Use "
-                "Refresh after adding files or changing the Find value(s).",
-            ).pack(side="top", fill="x", padx=10, pady=8)
+                win, wraplength=810, justify="left",
+                text="Each matched row is shown per file and sheet. Use the "
+                "dropdown to show only certain find values. The 'Copy 1st down' "
+                "buttons copy the first shown row's value into the rest of that "
+                "find value's rows. Edit any field, then Save.",
+            ).pack(side="top", fill="x", padx=10, pady=(8, 4))
+
+            # --- filter dropdown -----------------------------------------
+            frow = ttk.Frame(win)
+            frow.pack(side="top", fill="x", padx=10, pady=(0, 2))
+            ttk.Label(frow, text="Show find value(s):").pack(side="left")
+            filt_btn = ttk.Menubutton(frow, text="All", width=22)
+            filt_menu = tk.Menu(filt_btn, tearoff=0)
+            filt_btn["menu"] = filt_menu
+            filt_btn.pack(side="left", padx=(4, 0))
+
+            # --- copy-down buttons ---------------------------------------
+            crow = ttk.Frame(win)
+            crow.pack(side="top", fill="x", padx=10, pady=(0, 4))
+            ttk.Label(
+                crow, text="Copy 1st down (per find value):"
+            ).pack(side="left")
+            for _fld in ("Manufacturer", "Qty", "Description"):
+                self._rbtn(
+                    crow, _fld, lambda fld=_fld: copy_down(fld),
+                    kind="green", radius=9, padx=10, pady=5,
+                ).pack(side="left", padx=3)
 
             bottom = ttk.Frame(win)
             bottom.pack(side="bottom", fill="x", padx=10, pady=10)
 
             body = ttk.Frame(win)
             body.pack(side="top", fill="both", expand=True)
-            canvas = tk.Canvas(body, highlightthickness=0,
-                               bg=self.palette["bg"])
+            canvas = tk.Canvas(body, highlightthickness=0, bg=pal["bg"])
             sb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
             inner = ttk.Frame(canvas)
             inner.bind(
@@ -3285,62 +3335,57 @@ def launch_gui() -> int:
             canvas.pack(side="left", fill="both", expand=True, padx=(10, 0))
             sb.pack(side="left", fill="y", padx=(0, 10))
 
-            # Each editable row: {file, sheet, part, row, cells:{field:(ref,
-            # orig, entry)}}.
-            self._bom_rows: list = []
+            def update_filter_label():
+                sel = [fv for fv, v in filter_vars.items() if v.get()]
+                if not sel:
+                    filt_btn["text"] = "All"
+                elif len(sel) == 1:
+                    filt_btn["text"] = sel[0]
+                else:
+                    filt_btn["text"] = f"{len(sel)} selected"
 
-            def populate():
-                # Preserve already-entered values across a refresh.
-                snap = {}
-                for r in self._bom_rows:
-                    for _fld, (ref, _orig, e) in r["cells"].items():
-                        try:
-                            snap[(r["file"], r["sheet"], ref)] = e.get()
-                        except tk.TclError:
-                            pass
+            def render():
                 for w in inner.winfo_children():
                     w.destroy()
-                self._bom_rows = []
-
-                parts = self._find_values()
-                cs = self.case_var.get()
-                any_match = False
-                for f in [x for x in self.files
-                          if detect_format(x) == "xlsx"]:
-                    try:
-                        matches = excel_scan_rows(f, parts, cs)
-                    except Exception:  # noqa: BLE001
-                        matches = []
-                    if not matches:
-                        continue
-                    any_match = True
+                state["rows"] = []
+                finds = shown_finds()
+                matches = [mt for mt in state["all"]
+                           if mt["matched"] in finds]
+                if not matches:
+                    ttk.Label(
+                        inner,
+                        text="No matching rows for the current selection.",
+                    ).pack(padx=10, pady=12)
+                    canvas.update_idletasks()
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+                    return
+                by_file: dict = {}
+                for mt in matches:
+                    by_file.setdefault(mt["file"], []).append(mt)
+                for f, fmatches in by_file.items():
                     ttk.Label(
                         inner, text="📄  " + Path(f).name,
                         font=("Segoe UI", 10, "bold"),
-                        foreground=self.palette["accent"],
+                        foreground=pal["accent"],
                     ).pack(anchor="w", padx=6, pady=(10, 0))
-                    # Group this file's matches by the sheet they were found on,
-                    # so each sheet gets a sub-header (added info -- the per-row
-                    # P/N and row line below is unchanged).
                     by_sheet: dict = {}
-                    for mt in matches:
-                        key = (mt["sheet"], mt.get("sheet_name") or "")
-                        by_sheet.setdefault(key, []).append(mt)
-                    for (sheet_part, sheet_name), sheet_matches in \
-                            by_sheet.items():
-                        if sheet_name:
+                    for mt in fmatches:
+                        by_sheet.setdefault(
+                            (mt["sheet"], mt.get("sheet_name") or ""), []
+                        ).append(mt)
+                    for (sp, sn), smatches in by_sheet.items():
+                        if sn:
                             ttk.Label(
-                                inner, text="     Sheet:  " + sheet_name,
+                                inner, text="     Sheet:  " + sn,
                                 font=("Segoe UI", 9, "bold"),
-                                foreground=self.palette["muted"],
+                                foreground=pal["muted"],
                             ).pack(anchor="w", padx=12, pady=(4, 0))
-                        for mt in sheet_matches:
+                        for mt in smatches:
                             lf = ttk.LabelFrame(
                                 inner,
                                 text=f"P/N: {mt['part']}    (row {mt['row']})",
                             )
                             lf.pack(fill="x", padx=12, pady=4)
-                            cells = {}
                             for field in BOM_FIELD_ORDER:
                                 if field == "Part Number":
                                     continue
@@ -3348,40 +3393,112 @@ def launch_gui() -> int:
                                 if cell is None:
                                     continue
                                 ref, val = cell
+                                k = key(mt, ref)
                                 rowf = ttk.Frame(lf)
                                 rowf.pack(fill="x", padx=6, pady=2)
                                 ttk.Label(
                                     rowf, text=field + ":", width=14
                                 ).pack(side="left")
                                 e = ttk.Entry(rowf)
-                                e.insert(
-                                    0, snap.get((f, mt["sheet"], ref), val)
-                                )
+                                e.insert(0, state["cur"].get(k, val))
                                 e.pack(side="left", fill="x", expand=True)
-                                cells[field] = (ref, val, e)
-                            self._bom_rows.append({
-                                "file": f, "sheet": mt["sheet"],
-                                "part": mt["part"], "row": mt["row"],
-                                "cells": cells,
-                            })
-                if not any_match:
-                    ttk.Label(
-                        inner, text="No matches for the current Find value(s).",
-                    ).pack(padx=10, pady=12)
+                                state["rows"].append(
+                                    {"key": k, "field": field, "entry": e}
+                                )
                 canvas.update_idletasks()
                 canvas.configure(scrollregion=canvas.bbox("all"))
 
-            populate()
+            def filter_changed():
+                capture()
+                update_filter_label()
+                render()
+
+            def show_all():
+                for v in filter_vars.values():
+                    v.set(False)
+                filter_changed()
+
+            def rebuild_filter_menu():
+                finds = sorted({mt["matched"] for mt in state["all"]})
+                for fv in list(filter_vars):
+                    if fv not in finds:
+                        del filter_vars[fv]
+                for fv in finds:
+                    filter_vars.setdefault(fv, tk.BooleanVar(value=False))
+                filt_menu.configure(
+                    bg=pal["field"], fg=pal["field_fg"],
+                    activebackground=pal["accent"],
+                    activeforeground="#ffffff",
+                    selectcolor=pal["accent"], borderwidth=0,
+                )
+                filt_menu.delete(0, "end")
+                filt_menu.add_command(label="(show all)", command=show_all)
+                filt_menu.add_separator()
+                for fv in finds:
+                    filt_menu.add_checkbutton(
+                        label=fv, variable=filter_vars[fv],
+                        command=filter_changed,
+                    )
+                update_filter_label()
+
+            def copy_down(field):
+                capture()
+                n = 0
+                for fv in shown_finds():
+                    rows_fv = [mt for mt in state["all"]
+                               if mt["matched"] == fv
+                               and mt["fields"].get(field)]
+                    if len(rows_fv) < 2:
+                        continue
+                    src = key(rows_fv[0], rows_fv[0]["fields"][field][0])
+                    val = state["cur"].get(src, "")
+                    for mt in rows_fv[1:]:
+                        k = key(mt, mt["fields"][field][0])
+                        if state["cur"].get(k) != val:
+                            state["cur"][k] = val
+                            n += 1
+                render()
+                self.log(
+                    f"Copied the first {field} value down to {n} row(s)."
+                    if n else f"Nothing to copy for {field}."
+                )
+
+            def reset_fields():
+                state["cur"] = dict(state["orig"])
+                render()
+                self.log("Reset all BOM fields to the originally found data.")
+
+            def scan():
+                capture()
+                parts = self._find_values()
+                cs = self.case_var.get()
+                state["all"] = []
+                for f in [x for x in self.files
+                          if detect_format(x) == "xlsx"]:
+                    try:
+                        state["all"].extend(excel_scan_rows(f, parts, cs))
+                    except Exception:  # noqa: BLE001
+                        pass
+                for mt in state["all"]:
+                    for _fld, (ref, val) in mt["fields"].items():
+                        k = key(mt, ref)
+                        state["orig"].setdefault(k, val)
+                        state["cur"].setdefault(k, state["orig"][k])
+                rebuild_filter_menu()
+                render()
 
             def apply():
+                capture()
                 edits: dict = {}  # {file: {sheet: {ref: value}}}
                 n = 0
-                for r in self._bom_rows:
-                    for _fld, (ref, orig, e) in r["cells"].items():
-                        if e.get() != orig:
-                            edits.setdefault(r["file"], {}).setdefault(
-                                r["sheet"], {}
-                            )[ref] = e.get()
+                for mt in state["all"]:
+                    for _fld, (ref, _v) in mt["fields"].items():
+                        k = key(mt, ref)
+                        cur, orig = state["cur"].get(k), state["orig"].get(k)
+                        if cur is not None and cur != orig:
+                            edits.setdefault(mt["file"], {}).setdefault(
+                                mt["sheet"], {}
+                            )[ref] = cur
                             n += 1
                 self.bom_edits = edits
                 self.bom_status.configure(
@@ -3393,13 +3510,18 @@ def launch_gui() -> int:
                 )
                 win.destroy()
 
+            scan()
+
             self._rbtn(bottom, "Save edits", apply, kind="accent").pack(
                 side="right"
             )
             self._rbtn(bottom, "Cancel", win.destroy).pack(
                 side="right", padx=6
             )
-            self._rbtn(bottom, "Refresh lookup", populate).pack(side="left")
+            self._rbtn(bottom, "Refresh lookup", scan).pack(side="left")
+            self._rbtn(
+                bottom, "Reset fields", reset_fields, kind="orange",
+            ).pack(side="left", padx=6)
 
         # -- Change Log entry ----------------------------------------------
         def open_changelog_editor(self):
