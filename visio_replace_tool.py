@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.12 (change summary: group identical changes by sheet)"
+__version__ = "2.12.1 (Visio diff matches shapes by ID; clean additions)"
 
 import argparse
 import datetime
@@ -2023,12 +2023,25 @@ def _visio_page_names(zin: zipfile.ZipFile) -> dict:
     return out
 
 
-def _visio_text_blocks(xml_text: str) -> list:
-    """Visible text of each <Text> block, in order."""
-    out = []
-    for m in _TEXT_BLOCK_RE.finditer(xml_text):
-        visible = _TAG_SPLIT_RE.sub("", m.group(2))
-        out.append(_xml_unescape(visible).strip())
+def _visio_shape_texts(xml_text: str) -> dict:
+    """{shape ID: visible text} for every shape that carries its own <Text>.
+
+    Keying by shape ID (rather than by document position) lets the diff line up
+    the same shape before/after even when other shapes were inserted -- e.g.
+    when a revision row is added -- so it doesn't report phantom changes.
+    """
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return {}
+    ns = root.tag[: root.tag.index("}") + 1] if root.tag.startswith("{") else ""
+    out = {}
+    for sh in root.iter(ns + "Shape"):
+        sid = sh.get("ID")
+        text_el = sh.find(ns + "Text")
+        if sid is None or text_el is None:
+            continue
+        out[sid] = "".join(text_el.itertext()).strip()
     return out
 
 
@@ -2041,16 +2054,24 @@ def _diff_vsdx(in_path, out_path) -> list:
         for part in sorted(parts,
                            key=lambda n: int(re.search(r"(\d+)", n).group())):
             try:
-                bi = _visio_text_blocks(zi.read(part).decode("utf-8", "replace"))
-                bo = _visio_text_blocks(zo.read(part).decode("utf-8", "replace"))
+                ti = _visio_shape_texts(zi.read(part).decode("utf-8", "replace"))
+                to = _visio_shape_texts(zo.read(part).decode("utf-8", "replace"))
             except KeyError:
                 continue
             label = page_names.get(part) or Path(part).stem
-            for bef, aft in zip(bi, bo):
+            # Edited or removed shapes (matched by ID), then newly added shapes.
+            for sid, bef in ti.items():
+                aft = to.get(sid, "")
                 if bef != aft and (bef or aft):
                     changes.append({
                         "location": label, "field": "",
                         "before": bef, "after": aft,
+                    })
+            for sid, aft in to.items():
+                if sid not in ti and aft:
+                    changes.append({
+                        "location": label, "field": "",
+                        "before": "", "after": aft,
                     })
     return changes
 
