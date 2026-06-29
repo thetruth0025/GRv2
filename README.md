@@ -199,8 +199,12 @@ revision entry...** and the tool:
    (a generous set of spellings: `REV`, `REVISION`, `DESCRIPTION`/`REASON FOR
    CHANGE`, `DATE`, `APPROVED`/`BY`/`ENGINEER`, `ECN`/`ECO`, …) and their
    on-page geometry, and shows you **which columns it detected**.
-2. Lets you fill in **Rev**, **ECN #**, **Description**, **Date**, and **Approved
-   By** (leave any blank to skip it).
+2. Lets you fill in **ECN #**, **Description**, **Date**, and **Approved By**
+   (leave any blank to skip it) — these are the **same for every file**. You do
+   **not** type the **REV**: it's filled **automatically per file** with that
+   file's own **next revision letter**, so a batch of drawings at different
+   revisions each gets its correct next letter (e.g. a `REVD` file gets an `E`
+   row, a `REVF` file gets a `G` row).
 3. On **Replace & Convert**, adds the new revision row to **every** Visio file:
    an existing **blank row** in the table is filled if there is one, otherwise a
    new row is **cloned** from the last row (same columns/formatting) and placed
@@ -329,7 +333,10 @@ python visio_replace_tool.py in.vsdx -f Dev -r Prod -o out.vsdx \
 - **Format:** supports the modern **`.vsdx`** format. For legacy binary `.vsd`
   files, open them in Visio and *Save As* `.vsdx` first.
 - **Split text is handled:** Visio often stores a label as several formatting
-  runs (e.g. `Old ` `<cp/>` `Server`). Search terms are matched across those
-  runs, so `Old Server` is still found and replaced.
+  runs (e.g. `Old ` `<cp/>` `Server`), sometimes even across paragraph markers.
+  Search terms are matched across those runs, so `Old Server` is still found and
+  replaced — and the replacement is collapsed onto **one line**, dropping the
+  stray run/paragraph markers that used to push part of the new text onto a
+  second line.
 - The original file is never modified; results are written to new files
   (the next-revision copy, or `*_edited.vsdx` / `*_edited.pdf`).

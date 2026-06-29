@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.12.1 (Visio diff matches shapes by ID; clean additions)"
+__version__ = "2.13 (one-line replace; per-file REV in Visio revision rows)"
 
 import argparse
 import datetime
@@ -64,6 +64,8 @@ from typing import List, Optional, Sequence, Tuple
 # .vsdx archive. We only edit the character data inside those blocks.
 _TEXT_BLOCK_RE = re.compile(r"(<Text\b[^>]*>)(.*?)(</Text>)", re.DOTALL)
 _TAG_SPLIT_RE = re.compile(r"(<[^>]*>)")
+# Visio inline formatting markers: <cp/> character, <pp/> paragraph, <tp/> tab.
+_FMT_MARKER_RE = re.compile(r"<(?:cp|pp|tp)\b", re.IGNORECASE)
 
 
 def xml_escape(text: str) -> str:
@@ -170,11 +172,30 @@ def replace_in_xml(
         parts = _TAG_SPLIT_RE.split(inner)
         text_indices = list(range(0, len(parts), 2))
         segs = [parts[i] for i in text_indices]
+        orig_segs = list(segs)
 
-        total += _replace_across_runs(segs, compiled)
+        n = _replace_across_runs(segs, compiled)
+        if not n:
+            return open_tag + inner + close_tag
+        total += n
 
         for idx, i in enumerate(text_indices):
             parts[i] = segs[idx]
+
+        # When a match spanned several runs, the replacement lands in the first
+        # run and the later runs are consumed -- but any <cp/>/<pp/>/<tp/> marker
+        # that sat between them stays. A leftover <pp/> there is a stray
+        # paragraph break that pushes part of the replacement onto a second
+        # line. Drop a marker whose following run was consumed by the replace
+        # (had real text, now blank/whitespace); boundary markers are kept.
+        consumed = [orig_segs[k].strip() != "" and segs[k].strip() == ""
+                    for k in range(len(segs))]
+        for t in range(1, len(parts), 2):
+            if not _FMT_MARKER_RE.match(parts[t]):
+                continue
+            run_after = (t + 1) // 2
+            if run_after < len(consumed) and consumed[run_after]:
+                parts[t] = ""
         return open_tag + "".join(parts) + close_tag
 
     new_text = _TEXT_BLOCK_RE.sub(process_block, xml_text)
@@ -2527,11 +2548,14 @@ HELP_SECTIONS = [
         "Click **Visio: add revision entry...** to add a row to the "
         "**revision-history table** on a drawing's cover page (the chart in a "
         "corner with REV / DESCRIPTION / DATE / APPROVED columns).",
-        "* The dialog shows the **columns it detected** in your loaded files. "
-        "Fill in **Rev, ECN #, Description, Date, Approved By** (skip any).",
-        "* On run, each Visio file gets the new row: an existing **blank row** "
-        "is filled, otherwise a new row is **cloned** below the last one, with "
-        "**matching border lines** drawn around it.",
+        "* The dialog shows the **columns it detected**. Fill in **ECN #, "
+        "Description, Date, Approved By** (skip any) — the same for every file.",
+        "* The **REV** column is filled **automatically per file** with that "
+        "file's own next revision letter, so a whole batch each gets its "
+        "correct next letter (you don't type it).",
+        "* On run, **every** Visio file gets the new row: an existing **blank "
+        "row** is filled, otherwise a new row is **cloned** below the last one, "
+        "with **matching border lines** drawn around it.",
         "* If no table is confidently found on a file, that file is **left "
         "unchanged** (the Status box says so) — it never risks the drawing.",
     ]),
@@ -3728,27 +3752,32 @@ def launch_gui() -> int:
             win.transient(self.root)
             win.grab_set()
             win.configure(bg=self.palette["bg"])
+            note = ("The new row is added to every loaded Visio file's "
+                    "revision table. The **REV** column is filled automatically "
+                    "with each file's own next revision letter — so a batch of "
+                    "files each gets its correct next letter. The other fields "
+                    "below are the same for every file (leave any blank).")
             if detected:
                 found = "; ".join(
                     f"{n}: {', '.join(cols)}" for n, cols in detected.items()
                 )
-                info = ("A new row is added to the revision table on each "
-                        "Visio file's cover page (an existing blank row is "
-                        "filled, otherwise a new row is cloned below the last "
-                        "one). Leave a field blank to skip it.\n\nDetected "
-                        f"columns — {found}")
+                info = note + f"\n\nDetected columns — {found}"
             else:
-                info = ("No revision table was detected, but you can still "
-                        "stage an entry; any file where the table is found at "
-                        "run time will get the row, others are left unchanged.")
+                info = (note + "\n\nNo revision table was detected yet; any "
+                        "file where the table is found at run time will get the "
+                        "row, others are left unchanged.")
             ttk.Label(
-                win, wraplength=580, justify="left", text=info,
+                win, wraplength=580, justify="left",
+                text=info.replace("**", ""),
             ).pack(fill="x", padx=10, pady=8)
 
             form = ttk.Frame(win)
             form.pack(fill="x", padx=10, pady=4)
+            # "Rev" is filled per-file at run time, so it isn't entered here.
             entries = {}
             for field in REVTABLE_FIELD_ORDER:
+                if field == "Rev":
+                    continue
                 rowf = ttk.Frame(form)
                 rowf.pack(fill="x", pady=3)
                 ttk.Label(rowf, text=field + ":", width=14).pack(side="left")
@@ -3764,10 +3793,9 @@ def launch_gui() -> int:
                     self.log("Visio revision entry cleared.")
                 else:
                     self.visio_rev_entry = entry
-                    rev = entry.get("Rev", "").strip()
                     self.log(
-                        "Staged a Visio revision-table entry"
-                        + (f" (REV {rev})." if rev else ".")
+                        "Staged a Visio revision-table entry "
+                        "(REV auto-filled per file)."
                     )
                 win.destroy()
 
@@ -4059,11 +4087,12 @@ def launch_gui() -> int:
 
                     # A Visio revision-table row / approval apply only to .vsdx.
                     is_vsdx = detect_format(f) == "vsdx"
-                    rev_entry = visio_rev_entry if (visio_rev_entry
-                                                    and is_vsdx) else None
+                    staged_rev_entry = (visio_rev_entry
+                                        if (visio_rev_entry and is_vsdx)
+                                        else None)
                     appr = visio_approval if (visio_approval
                                               and is_vsdx) else None
-                    has_edits = bool(cell_edits or rev_entry or appr)
+                    has_edits = bool(cell_edits or staged_rev_entry or appr)
                     # An approval signs off an existing revision -- it must NOT
                     # bump the revision; the copy is named "*_approved_<date>".
                     is_approving = bool(appr) or excel_approved
@@ -4105,6 +4134,19 @@ def launch_gui() -> int:
                     # Redirect every output to the chosen folder, if any.
                     if out_dir:
                         out_vsdx = Path(out_dir) / out_vsdx.name
+
+                    # Build this file's revision-table row: the REV column uses
+                    # THIS file's own next revision letter (so each file in a
+                    # batch gets its correct next letter); the other fields are
+                    # shared across all files.
+                    rev_entry = None
+                    if staged_rev_entry:
+                        rev_entry = {k: v for k, v in staged_rev_entry.items()
+                                     if k != "Rev"}
+                        next_letter = (revision[1] if revision
+                                       else revision_output_path(src)[2])
+                        if next_letter:
+                            rev_entry["Rev"] = next_letter
 
                     try:
                         report = replace_text_in_file(
@@ -4150,11 +4192,13 @@ def launch_gui() -> int:
                             if note:
                                 self.log(note)
                         if rev_entry:
+                            rl = rev_entry.get("Rev", "")
+                            added = (f"    revision table: row "
+                                     + (f"REV {rl} " if rl else "")
+                                     + "added")
                             tnote = {
-                                "filled":
-                                    "    revision table: new row added",
-                                "appended":
-                                    "    revision table: new row added",
+                                "filled": added,
+                                "appended": added,
                                 "not_found":
                                     "    (revision table not found on the "
                                     "cover page; left unchanged)",
