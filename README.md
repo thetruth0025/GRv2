@@ -213,8 +213,21 @@ revision entry...** and the tool:
    border lines** (the row box plus column dividers) around the appended row so
    it lines up with the rows above.
 
-Because a Visio "table" is really just positioned text boxes, the detection is
-**conservative**: if it can't confidently locate the table on a file (or can't
+Some drawings don't store the revision table as native Visio text boxes at all —
+they keep it as an **embedded Excel worksheet** (an OLE object shown in the
+corner). The tool handles those too: it scans the drawing's embedded
+worksheets, finds the one whose header row is a revision table (a **REV** column
+plus **DESCRIPTION / DATE / APPROVED**, …), and writes the new entry straight
+into that worksheet — filling the first **pre-formatted blank row** that's
+already there for the next revision (or adding one if the table is full). The
+Status box reports it as an *embedded sheet*. No grid lines are drawn for these,
+because the worksheet supplies its own borders.
+
+Because a Visio "table" is really just positioned text boxes (or an embedded
+sheet), the detection is **conservative**: a real revision-history table must
+have a **REV/LTR** column, which is what tells it apart from the title-block
+sign-off block (DRAWN BY / CHECKED BY / ENGINEER / APPROVED BY with dates) and
+from BOM tables. If it can't confidently locate the table on a file (or can't
 find a safe place to add the row), that file is **left completely unchanged**
 and the Status box says so — it never risks corrupting a drawing. If your
 template uses unusual column labels, share a sample `.vsdx` so the detection can
@@ -229,8 +242,9 @@ each drawing/workbook by hand.
 **REV letter** you're approving and your **name**. The dialog lists the revision
 letters it found. On **Replace & Convert**, your name is written into the
 **Approved** column of the row with that REV letter, in each loaded Visio file's
-cover-page revision table. (If that row had no Approved cell yet, one is created
-from a sibling row so the formatting matches.)
+cover-page revision table — whether that table is native Visio text cells or an
+embedded Excel worksheet. (For a native table, if that row had no Approved cell
+yet, one is created from a sibling row so the formatting matches.)
 
 **Excel — approve by discipline.** Click **Excel: approve (EE/ME/Prod)...**,
 pick the **discipline** (**EE**, **ME**, or **Production**) and type your

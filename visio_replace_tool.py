@@ -39,10 +39,11 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.13.2 (looser rev-table row detection + per-file diagnostics)"
+__version__ = "2.14.0 (revision tables in embedded Excel OLE objects)"
 
 import argparse
 import datetime
+import io
 import os
 import posixpath
 import re
@@ -484,6 +485,11 @@ def _detect_revtable(page_xml):
     if best is None or best[0] < 2:
         return None
     _n, header_y, columns = best  # columns: {field: cell}
+    # A real revision-history table has a Rev/Ltr column. Requiring it rejects
+    # the title-block sign-off block (DRAWN BY/CHECKED BY/... each paired with a
+    # DATE), which otherwise looks like a 2-column "Date + Approved By" table.
+    if "Rev" not in columns:
+        return None
     col_x = {f: c["x"] for f, c in columns.items()}
 
     # Column tolerance from the smallest gap between adjacent columns.
@@ -847,6 +853,307 @@ def add_approval_to_page(page_xml: str, rev_letter: str, name: str):
     return page_xml[:span[1]] + clone + page_xml[span[1]:], "approved"
 
 
+_EMBED_XLSX_RE = re.compile(r"visio/embeddings/.*\.xlsx$", re.IGNORECASE)
+
+
+def _localname(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def _xml_escape(text: str) -> str:
+    return (text.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _col_index(letter: str) -> int:
+    """A->1, B->2, ... AA->27."""
+    n = 0
+    for ch in letter:
+        n = n * 26 + (ord(ch) - ord("A") + 1)
+    return n
+
+
+def _xlsx_replace_member(raw: bytes, member: str, new_text: str) -> bytes:
+    """Return a copy of the .xlsx byte blob with one part's text replaced."""
+    src = zipfile.ZipFile(io.BytesIO(raw))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        for it in src.infolist():
+            data = src.read(it.filename)
+            if it.filename == member:
+                data = new_text.encode("utf-8")
+            zout.writestr(it, data)
+    return buf.getvalue()
+
+
+def _set_xlsx_cell_inline(sheet_xml: str, ref: str, value: str) -> str:
+    """Set worksheet cell ``ref`` (e.g. 'B5') to ``value`` as an inline string,
+    preserving the cell's existing style attribute. Inserts the cell in column
+    order if its row has no such cell yet."""
+    esc = _xml_escape(value)
+    new_cell = (f'<c r="{ref}"{{attrs}} t="inlineStr">'
+                f'<is><t xml:space="preserve">{esc}</t></is></c>')
+
+    def _clean_attrs(attrs: str) -> str:
+        # Drop any existing type attribute; keep the style (s=...) and the rest.
+        return re.sub(r'\s+t="[^"]*"', "", attrs)
+
+    m = re.search(r'<c r="%s"([^>]*?)/>' % re.escape(ref), sheet_xml)
+    if m:
+        return (sheet_xml[:m.start()]
+                + new_cell.format(attrs=_clean_attrs(m.group(1)))
+                + sheet_xml[m.end():])
+    m = re.search(r'<c r="%s"([^>]*?)>.*?</c>' % re.escape(ref), sheet_xml,
+                  re.S)
+    if m:
+        return (sheet_xml[:m.start()]
+                + new_cell.format(attrs=_clean_attrs(m.group(1)))
+                + sheet_xml[m.end():])
+
+    # The cell doesn't exist yet: insert it in column order within its row.
+    col = re.match(r"[A-Z]+", ref).group(0)
+    rownum = re.search(r"\d+", ref).group(0)
+    rm = re.search(r'(<row r="%s"[^>]*>)(.*?)(</row>)' % re.escape(rownum),
+                   sheet_xml, re.S)
+    if not rm:
+        return sheet_xml  # row missing; give up rather than corrupt the sheet
+    body = rm.group(2)
+    cells = list(re.finditer(r'<c r="([A-Z]+)\d+"[^>]*?(?:/>|>.*?</c>)', body,
+                             re.S))
+    insert_at = len(body)
+    for cm in cells:
+        if _col_index(cm.group(1)) > _col_index(col):
+            insert_at = cm.start()
+            break
+    new = new_cell.format(attrs="")
+    body = body[:insert_at] + new + body[insert_at:]
+    return (sheet_xml[:rm.start()] + rm.group(1) + body + rm.group(3)
+            + sheet_xml[rm.end():])
+
+
+def _embedded_revtable_info(xlsx_bytes: bytes):
+    """Inspect an embedded .xlsx (an OLE object inside a .vsdx). If its sheet
+    looks like a revision-history table (a Rev column plus >=2 more known
+    columns), return a dict describing it; else None.
+
+    dict: {sheet_member, sheet_xml, col_field (col_letter->field), rev_col,
+    header_row, data_revs [(rownum, rev_value)], blank_row, last_data_row}.
+    """
+    try:
+        z = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+    except (zipfile.BadZipFile, OSError):
+        return None
+    names = z.namelist()
+    sheet_member = next(
+        (n for n in names if re.match(r"xl/worksheets/sheet\d+\.xml$", n)),
+        None)
+    if not sheet_member:
+        return None
+    sst: List[str] = []
+    if "xl/sharedStrings.xml" in names:
+        try:
+            sroot = ET.fromstring(z.read("xl/sharedStrings.xml"))
+        except ET.ParseError:
+            sroot = None
+        if sroot is not None:
+            for si in sroot:
+                if _localname(si.tag) == "si":
+                    sst.append("".join(
+                        t.text or "" for t in si.iter()
+                        if _localname(t.tag) == "t"))
+    try:
+        sheet_xml = z.read(sheet_member).decode("utf-8", "replace")
+    except (KeyError, OSError):
+        return None
+    try:
+        wroot = ET.fromstring(sheet_xml)
+    except ET.ParseError:
+        return None
+
+    rows: dict[int, list[Tuple[str, Optional[str]]]] = {}
+    for c in wroot.iter():
+        if _localname(c.tag) != "c":
+            continue
+        ref = c.get("r")
+        if not ref:
+            continue
+        cm = re.match(r"([A-Z]+)(\d+)", ref)
+        if not cm:
+            continue
+        col, rownum = cm.group(1), int(cm.group(2))
+        raw_v = None
+        for ch in c:
+            ln = _localname(ch.tag)
+            if ln == "v":
+                raw_v = ch.text
+            elif ln == "is":
+                raw_v = "".join(x.text or "" for x in ch.iter()
+                                if _localname(x.tag) == "t")
+        val = raw_v
+        if c.get("t") == "s" and raw_v is not None and raw_v.isdigit():
+            idx = int(raw_v)
+            val = sst[idx] if idx < len(sst) else ""
+        rows.setdefault(rownum, []).append((col, val))
+
+    # Header row: the row naming the most distinct revision columns.
+    header_row = None
+    col_field: dict[str, str] = {}
+    best = 0
+    for rn in sorted(rows):
+        fields: dict[str, str] = {}
+        for col, val in rows[rn]:
+            cf = _canonical_revtable_field(val or "")
+            if cf and col not in fields:
+                fields[col] = cf
+        distinct = len(set(fields.values()))
+        if distinct > best:
+            best, header_row, col_field = distinct, rn, fields
+    # Require a Rev column plus >=2 more known columns; this rejects the
+    # title-block sign-off block (Approved By + Date only) and BOM tables.
+    if header_row is None or len(set(col_field.values())) < 3:
+        return None
+    rev_col = next((c for c, f in col_field.items() if f == "Rev"), None)
+    if not rev_col:
+        return None
+
+    table_rows = sorted(
+        rn for rn in rows
+        if rn > header_row and any(col == rev_col for col, _ in rows[rn]))
+    data_revs = []
+    for rn in table_rows:
+        rv = dict(rows[rn]).get(rev_col)
+        data_revs.append((rn, rv))
+    blank_row = next((rn for rn, rv in data_revs if not (rv or "").strip()),
+                     None)
+    return {
+        "sheet_member": sheet_member,
+        "sheet_xml": sheet_xml,
+        "col_field": col_field,
+        "rev_col": rev_col,
+        "header_row": header_row,
+        "data_revs": data_revs,
+        "blank_row": blank_row,
+        "last_data_row": table_rows[-1] if table_rows else header_row,
+    }
+
+
+def _embedded_revtable_member(zin: zipfile.ZipFile) -> Optional[str]:
+    """The embedding member whose worksheet is a revision table, or None.
+    Some drawings store the revision history as an embedded Excel OLE object
+    rather than native Visio text cells."""
+    members = sorted(n for n in zin.namelist() if _EMBED_XLSX_RE.search(n))
+    for m in members:
+        try:
+            if _embedded_revtable_info(zin.read(m)) is not None:
+                return m
+        except (KeyError, OSError):
+            continue
+    return None
+
+
+def embedded_revtable_columns(xlsx_bytes: bytes) -> Optional[List[str]]:
+    info = _embedded_revtable_info(xlsx_bytes)
+    if not info:
+        return None
+    present = set(info["col_field"].values())
+    return [f for f in REVTABLE_FIELD_ORDER if f in present]
+
+
+def embedded_revtable_rev_letters(xlsx_bytes: bytes) -> List[str]:
+    info = _embedded_revtable_info(xlsx_bytes)
+    if not info:
+        return []
+    return [(rv or "").strip() for _rn, rv in info["data_revs"]
+            if (rv or "").strip()]
+
+
+def add_revision_entry_to_embedded(xlsx_bytes: bytes, entry: dict):
+    """Add a revision row to an embedded-Excel revision table. Returns
+    (bytes, status): 'filled' (reused a pre-formatted blank row), 'appended'
+    (added a new row), 'not_found' or 'na'."""
+    values = {f: v.strip() for f, v in (entry or {}).items()
+              if v and v.strip()}
+    if not values:
+        return xlsx_bytes, "na"
+    info = _embedded_revtable_info(xlsx_bytes)
+    if not info:
+        return xlsx_bytes, "not_found"
+    writable = {col: f for col, f in info["col_field"].items()
+                if f in values}
+    if not writable:
+        return xlsx_bytes, "not_found"
+
+    sheet_xml = info["sheet_xml"]
+    target = info["blank_row"]
+    status = "filled"
+    if target is None:
+        # No pre-formatted blank row left: clone the last data row's cells
+        # onto a fresh row just below it so the new entry keeps the grid.
+        target = info["last_data_row"] + 1
+        sheet_xml = _append_embedded_row(
+            sheet_xml, info["last_data_row"], target)
+        status = "appended"
+    for col, f in writable.items():
+        sheet_xml = _set_xlsx_cell_inline(sheet_xml, f"{col}{target}",
+                                          values[f])
+    return _xlsx_replace_member(xlsx_bytes, info["sheet_member"],
+                                sheet_xml), status
+
+
+def _append_embedded_row(sheet_xml: str, src_row: int, new_row: int) -> str:
+    """Clone worksheet row ``src_row`` as a blank row numbered ``new_row``
+    (preserving cell styles, clearing values) and extend the sheet dimension."""
+    rm = re.search(r'<row r="%d"[^>]*>.*?</row>' % src_row, sheet_xml, re.S)
+    if not rm:
+        return sheet_xml
+    block = rm.group(0)
+    block = re.sub(r'(<row r=")%d(")' % src_row,
+                   lambda m: f"{m.group(1)}{new_row}{m.group(2)}", block,
+                   count=1)
+
+    # Renumber each cell's row and strip its value, keeping the style attr.
+    def _blank_cell(m):
+        attrs = re.sub(r'\s+t="[^"]*"', "", m.group(2))
+        return f'<c r="{m.group(1)}{new_row}"{attrs}/>'
+
+    block = re.sub(r'<c r="([A-Z]+)%d"([^>]*?)(?:/>|>.*?</c>)' % src_row,
+                   _blank_cell, block, flags=re.S)
+    sheet_xml = sheet_xml[:rm.end()] + block + sheet_xml[rm.end():]
+    # Extend <dimension ref="A1:Jn"> if the new row is past the current end.
+    def _bump_dim(m):
+        start, end = m.group(1), m.group(2)
+        cm = re.match(r"([A-Z]+)(\d+)", end)
+        if cm and int(cm.group(2)) < new_row:
+            end = f"{cm.group(1)}{new_row}"
+        return f'<dimension ref="{start}:{end}"'
+    sheet_xml = re.sub(r'<dimension ref="([A-Z]+\d+):([A-Z]+\d+)"',
+                       _bump_dim, sheet_xml, count=1)
+    return sheet_xml
+
+
+def add_approval_to_embedded(xlsx_bytes: bytes, rev_letter: str, name: str):
+    """Write an approver's name into the Approved By cell of the embedded
+    revision row whose REV letter matches. Returns (bytes, status)."""
+    if not rev_letter or not rev_letter.strip() or not name or not name.strip():
+        return xlsx_bytes, "na"
+    info = _embedded_revtable_info(xlsx_bytes)
+    if not info:
+        return xlsx_bytes, "not_found"
+    appr_col = next((c for c, f in info["col_field"].items()
+                     if f == "Approved By"), None)
+    if not appr_col:
+        return xlsx_bytes, "no_column"
+    want = rev_letter.strip().upper()
+    target = next((rn for rn, rv in info["data_revs"]
+                   if (rv or "").strip().upper() == want), None)
+    if target is None:
+        return xlsx_bytes, "row_not_found"
+    sheet_xml = _set_xlsx_cell_inline(info["sheet_xml"],
+                                      f"{appr_col}{target}", name.strip())
+    return _xlsx_replace_member(xlsx_bytes, info["sheet_member"],
+                                sheet_xml), "approved"
+
+
 def _revtable_page_part(zin: zipfile.ZipFile) -> Optional[str]:
     """The page archive member that actually holds the revision table.
 
@@ -886,23 +1193,38 @@ def vsdx_revtable_columns(path) -> Optional[List[str]]:
     or None if no table is found. Used to preview what the 'add revision entry'
     feature will write to."""
     tbl = _revtable_for_path(path)
-    if not tbl:
-        return None
-    return [f for f in REVTABLE_FIELD_ORDER if f in tbl["col_x"]]
+    if tbl:
+        return [f for f in REVTABLE_FIELD_ORDER if f in tbl["col_x"]]
+    # Fall back to a revision table stored as an embedded Excel OLE object.
+    try:
+        with zipfile.ZipFile(path) as z:
+            m = _embedded_revtable_member(z)
+            if m:
+                return embedded_revtable_columns(z.read(m))
+    except (zipfile.BadZipFile, OSError, KeyError):
+        pass
+    return None
 
 
 def vsdx_revtable_rev_letters(path) -> List[str]:
     """The REV letters present in the revision table (e.g. ['A','B','C','D']),
     for the approval dialog. [] if no table/letters."""
     tbl = _revtable_for_path(path)
-    if not tbl:
-        return []
-    out = []
-    for row in tbl["rows"]:
-        rc = row["cells"].get("Rev")
-        if rc and rc["text"].strip():
-            out.append(rc["text"].strip())
-    return out
+    if tbl:
+        out = []
+        for row in tbl["rows"]:
+            rc = row["cells"].get("Rev")
+            if rc and rc["text"].strip():
+                out.append(rc["text"].strip())
+        return out
+    try:
+        with zipfile.ZipFile(path) as z:
+            m = _embedded_revtable_member(z)
+            if m:
+                return embedded_revtable_rev_letters(z.read(m))
+    except (zipfile.BadZipFile, OSError, KeyError):
+        pass
+    return []
 
 
 def replace_text_in_vsdx(
@@ -956,6 +1278,7 @@ def replace_text_in_vsdx(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     page_count = 0
     table_page = None
+    table_embed = None
     with zipfile.ZipFile(in_path, "r") as zin:
         page_count = sum(1 for n in zin.namelist()
                          if _PAGE_NAME_RE.search(n))
@@ -963,6 +1286,10 @@ def replace_text_in_vsdx(
         # table (often not page1.xml -- part numbers follow creation order).
         if do_table or do_approval:
             table_page = _revtable_page_part(zin)
+            # Some drawings keep the revision history as an embedded Excel OLE
+            # object instead of native Visio text cells -- handle that too.
+            if not table_page:
+                table_embed = _embedded_revtable_member(zin)
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -999,13 +1326,28 @@ def replace_text_in_vsdx(
                             )
                         if new_text != text:
                             data = new_text.encode("utf-8")
+                elif table_embed and item.filename == table_embed:
+                    # The revision table is an embedded Excel OLE object; edit
+                    # its worksheet bytes directly.
+                    if do_table:
+                        data, table_status = add_revision_entry_to_embedded(
+                            data, rev_entry)
+                    if do_approval:
+                        data, approval_status = add_approval_to_embedded(
+                            data, approval["rev"], approval["name"])
                 # Preserve the original name; recompress with deflate.
                 zout.writestr(item.filename, data)
 
+    if table_page:
+        table_loc = Path(table_page).name
+    elif table_embed:
+        table_loc = f"embedded sheet {Path(table_embed).name}"
+    else:
+        table_loc = None
     return {"total": total, "by_part": by_part, "rev_drawing": rev_status,
             "rev_sheets": rev_sheets, "rev_table": table_status,
             "approval": approval_status, "page_count": page_count,
-            "rev_table_page": (Path(table_page).name if table_page else None)}
+            "rev_table_page": table_loc}
 
 
 # ---------------------------------------------------------------------------
