@@ -223,6 +223,14 @@ already there for the next revision (or adding one if the table is full). The
 Status box reports it as an *embedded sheet*. No grid lines are drawn for these,
 because the worksheet supplies its own borders.
 
+Visio shows an embedded object from a **cached picture** and only refreshes it
+when you double-click the object — so editing the worksheet alone would leave
+the drawing looking unchanged until you opened the table by hand. To avoid that,
+the tool also patches that cached picture (the metafile Visio displays),
+**drawing the new row's text straight into it** using the table's own font and
+spacing. The result: the new revision row (and any approval) shows up
+**automatically** when the drawing is opened — no manual refresh needed.
+
 Because a Visio "table" is really just positioned text boxes (or an embedded
 sheet), the detection is **conservative**: a real revision-history table must
 have a **REV/LTR** column, which is what tells it apart from the title-block

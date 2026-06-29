@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.14.0 (revision tables in embedded Excel OLE objects)"
+__version__ = "2.15.0 (auto-refresh embedded-Excel revision tables in Visio)"
 
 import argparse
 import datetime
@@ -49,6 +49,7 @@ import posixpath
 import re
 import shutil
 import string
+import struct
 import subprocess
 import sys
 import tempfile
@@ -1154,6 +1155,244 @@ def add_approval_to_embedded(xlsx_bytes: bytes, rev_letter: str, name: str):
                                 sheet_xml), "approved"
 
 
+# --- Cached OLE presentation (EMF) -------------------------------------------
+#
+# Visio displays an embedded Excel object from a *cached* picture -- an EMF
+# metafile linked from the embedding's .rels -- and only re-renders it when the
+# object is activated (double-clicked) in Visio. So after editing the worksheet
+# data we must also patch that EMF, or the drawing keeps showing the old table
+# until the user opens it by hand. The EMF already draws the grid for the blank
+# rows; we just inject the new row's text (EMR_EXTTEXTOUTW records), reusing the
+# metafile's own measured glyph widths so spacing matches.
+
+_EMF_EXTTEXTOUTW = 84
+
+
+def _emf_text_records(emf: bytes):
+    """Parse the EXTTEXTOUTW records out of an EMF. Each item:
+    {off, size, bounds, refx, refy, nchars, text, dx}."""
+    out = []
+    off = 0
+    n = len(emf)
+    while off + 8 <= n:
+        rtype, rsize = struct.unpack_from("<II", emf, off)
+        if rsize < 8 or rsize % 4 or off + rsize > n:
+            break
+        if rtype == _EMF_EXTTEXTOUTW and rsize >= 76:
+            bounds = struct.unpack_from("<4i", emf, off + 8)
+            refx, refy = struct.unpack_from("<2i", emf, off + 36)
+            nch, off_str = struct.unpack_from("<II", emf, off + 44)
+            off_dx = struct.unpack_from("<I", emf, off + 72)[0]
+            try:
+                text = emf[off + off_str:off + off_str + nch * 2].decode(
+                    "utf-16-le", "replace")
+            except Exception:  # noqa: BLE001
+                text = ""
+            dx = (list(struct.unpack_from("<%di" % nch, emf, off + off_dx))
+                  if off_dx and nch else [])
+            out.append({"off": off, "size": rsize, "bounds": bounds,
+                        "refx": refx, "refy": refy, "nchars": nch,
+                        "text": text, "dx": dx})
+        off += rsize
+    return out
+
+
+def _emf_char_widths(records):
+    """Build a glyph-advance lookup from the metafile's own text, plus a
+    sensible default, so synthesised rows are spaced like the existing ones."""
+    acc: dict[str, list] = {}
+    for r in records:
+        for ch, d in zip(r["text"], r["dx"]):
+            acc.setdefault(ch, []).append(d)
+    widths = {c: round(sum(v) / len(v)) for c, v in acc.items()}
+    all_dx = [d for v in acc.values() for d in v]
+    default = round(sorted(all_dx)[len(all_dx) // 2]) if all_dx else 8
+    return widths, default
+
+
+def _emf_rows(records):
+    """Cluster text records into rows by their Y, and pick out the header row
+    (the one naming the most revision columns). Returns (header, data_rows)
+    where header is (y, {field: x}) and data_rows is [(y, [records])]."""
+    ys = sorted({r["refy"] for r in records})
+    bands: list = []
+    for y in ys:
+        if bands and y - bands[-1][-1] <= 5:
+            bands[-1].append(y)
+        else:
+            bands.append([y])
+    rows = []
+    for band in bands:
+        cells = [r for r in records if r["refy"] in band]
+        rows.append((min(band), cells))
+    rows.sort()
+    header = None
+    for y, cells in rows:
+        fields = {}
+        for c in cells:
+            f = _canonical_revtable_field(c["text"])
+            if f:
+                fields.setdefault(f, c["refx"])
+        if header is None or len(fields) > len(header[1]):
+            header = (y, fields)
+    if header is None or "Rev" not in header[1]:
+        return None, []
+    data_rows = [(y, cells) for y, cells in rows if y > header[0]]
+    return header, data_rows
+
+
+def _build_emf_text_record(emf: bytes, tmpl, new_text: str, new_y: int,
+                           charw, default_w) -> bytes:
+    """Clone an EXTTEXTOUTW record at a new Y with new text, keeping the
+    template's font/colour/graphics state (its leading 76 bytes)."""
+    fixed = bytearray(emf[tmpl["off"]:tmpl["off"] + 76])
+    dy = new_y - tmpl["refy"]
+    dx = [charw.get(ch, default_w) for ch in new_text]
+    width = sum(dx)
+    left = tmpl["refx"]
+    struct.pack_into("<4i", fixed, 8, left, tmpl["bounds"][1] + dy,
+                     left + width, tmpl["bounds"][3] + dy)   # rclBounds
+    struct.pack_into("<2i", fixed, 36, tmpl["refx"], new_y)  # ptlReference
+    strb = new_text.encode("utf-16-le")
+    if len(strb) % 4:
+        strb += b"\x00" * (4 - len(strb) % 4)
+    struct.pack_into("<I", fixed, 44, len(new_text))         # nChars
+    struct.pack_into("<I", fixed, 48, 76)                    # offString
+    struct.pack_into("<I", fixed, 72, 76 + len(strb))        # offDx
+    dxb = struct.pack("<%di" % len(dx), *dx) if dx else b""
+    rec = bytes(fixed) + strb + dxb
+    return rec[:4] + struct.pack("<I", len(rec)) + rec[8:]   # nSize
+
+
+def _emf_set_counts(emf: bytearray, byte_delta: int, record_delta: int):
+    n_bytes, n_records = struct.unpack_from("<II", emf, 48)
+    struct.pack_into("<II", emf, 48, n_bytes + byte_delta,
+                     n_records + record_delta)
+
+
+def add_revision_row_to_emf(emf: bytes, entry: dict) -> Optional[bytes]:
+    """Inject the new revision row's text into the cached EMF so Visio shows it
+    without the user activating the object. Returns patched bytes, or None if
+    the metafile couldn't be patched (caller then leaves it as-is)."""
+    values = {f: v.strip() for f, v in (entry or {}).items()
+              if v and v.strip()}
+    if not values:
+        return None
+    try:
+        records = _emf_text_records(emf)
+        if not records:
+            return None
+        header, data_rows = _emf_rows(records)
+        if not data_rows:
+            return None
+        charw, default_w = _emf_char_widths(records)
+        pitch = (data_rows[1][0] - data_rows[0][0] if len(data_rows) > 1
+                 else data_rows[0][0] - header[0])
+        if pitch <= 0:
+            return None
+        _last_y, last_cells = data_rows[-1]
+        head_cols = header[1]
+        additions = b""
+        added = 0
+        insert_at = 0
+        for cell in last_cells:
+            insert_at = max(insert_at, cell["off"] + cell["size"])
+            field = min(head_cols, key=lambda f: abs(head_cols[f] - cell["refx"]))
+            if field not in values:
+                continue
+            additions += _build_emf_text_record(
+                emf, cell, values[field], cell["refy"] + pitch,
+                charw, default_w)
+            added += 1
+        if not added:
+            return None
+        out = bytearray(emf[:insert_at] + additions + emf[insert_at:])
+        _emf_set_counts(out, len(additions), added)
+        # Make sure the metafile bounds include the new row.
+        bounds = list(struct.unpack_from("<4i", out, 8))
+        bottom = data_rows[-1][0] + 2 * pitch
+        if bottom > bounds[3]:
+            bounds[3] = bottom
+            struct.pack_into("<4i", out, 8, *bounds)
+        return bytes(out)
+    except (struct.error, ValueError, IndexError):
+        return None
+
+
+def approve_revision_in_emf(emf: bytes, rev_letter: str,
+                            name: str) -> Optional[bytes]:
+    """Write an approver's name into the cached EMF's Approved cell for the row
+    with ``rev_letter``. Returns patched bytes, or None if not patchable."""
+    if not rev_letter or not rev_letter.strip() or not name or not name.strip():
+        return None
+    try:
+        records = _emf_text_records(emf)
+        if not records:
+            return None
+        header, data_rows = _emf_rows(records)
+        if not data_rows or "Approved By" not in header[1] \
+                or "Rev" not in header[1]:
+            return None
+        charw, default_w = _emf_char_widths(records)
+        rev_x = header[1]["Rev"]
+        appr_x = header[1]["Approved By"]
+        want = rev_letter.strip().upper()
+        target_row = None
+        for y, cells in data_rows:
+            rev_cell = min(cells, key=lambda c: abs(c["refx"] - rev_x))
+            if rev_cell["text"].strip().upper() == want:
+                target_row = (y, cells)
+                break
+        if target_row is None:
+            return None
+        y, cells = target_row
+        appr_cell = min(cells, key=lambda c: abs(c["refx"] - appr_x))
+        if abs(appr_cell["refx"] - appr_x) <= max(20, (appr_x - rev_x) // 4):
+            # That row has an Approved cell (blank or filled): overwrite it.
+            new_rec = _build_emf_text_record(emf, appr_cell, name.strip(),
+                                             appr_cell["refy"], charw,
+                                             default_w)
+            out = bytearray(emf[:appr_cell["off"]] + new_rec
+                            + emf[appr_cell["off"] + appr_cell["size"]:])
+            _emf_set_counts(out, len(new_rec) - appr_cell["size"], 0)
+            return bytes(out)
+        # No Approved cell drawn on that row: add one, cloning the Rev cell's
+        # style at the Approved column's X.
+        rev_cell = min(cells, key=lambda c: abs(c["refx"] - rev_x))
+        tmpl = dict(rev_cell)
+        tmpl["refx"] = appr_x
+        tmpl["bounds"] = (appr_x, rev_cell["bounds"][1], appr_x,
+                          rev_cell["bounds"][3])
+        new_rec = _build_emf_text_record(emf, tmpl, name.strip(), y,
+                                         charw, default_w)
+        insert_at = appr_cell["off"] + appr_cell["size"]
+        out = bytearray(emf[:insert_at] + new_rec + emf[insert_at:])
+        _emf_set_counts(out, len(new_rec), 1)
+        return bytes(out)
+    except (struct.error, ValueError, IndexError):
+        return None
+
+
+def _embedded_revtable_emf_member(zin: zipfile.ZipFile,
+                                  xlsx_member: str) -> Optional[str]:
+    """The cached-presentation EMF linked from an embedded worksheet's .rels."""
+    rels = posixpath.join(posixpath.dirname(xlsx_member), "_rels",
+                          posixpath.basename(xlsx_member) + ".rels")
+    names = set(zin.namelist())
+    if rels not in names:
+        return None
+    try:
+        text = zin.read(rels).decode("utf-8", "replace")
+    except (KeyError, OSError):
+        return None
+    m = re.search(r'Target="([^"]*\.emf)"', text, re.IGNORECASE)
+    if not m:
+        return None
+    resolved = posixpath.normpath(
+        posixpath.join(posixpath.dirname(xlsx_member), m.group(1)))
+    return resolved if resolved in names else None
+
+
 def _revtable_page_part(zin: zipfile.ZipFile) -> Optional[str]:
     """The page archive member that actually holds the revision table.
 
@@ -1279,6 +1518,7 @@ def replace_text_in_vsdx(
     page_count = 0
     table_page = None
     table_embed = None
+    table_embed_emf = None
     with zipfile.ZipFile(in_path, "r") as zin:
         page_count = sum(1 for n in zin.namelist()
                          if _PAGE_NAME_RE.search(n))
@@ -1287,9 +1527,14 @@ def replace_text_in_vsdx(
         if do_table or do_approval:
             table_page = _revtable_page_part(zin)
             # Some drawings keep the revision history as an embedded Excel OLE
-            # object instead of native Visio text cells -- handle that too.
+            # object instead of native Visio text cells -- handle that too, and
+            # patch its cached presentation (EMF) so the change shows without
+            # the user having to open the object in Visio.
             if not table_page:
                 table_embed = _embedded_revtable_member(zin)
+                if table_embed:
+                    table_embed_emf = _embedded_revtable_emf_member(
+                        zin, table_embed)
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -1335,6 +1580,18 @@ def replace_text_in_vsdx(
                     if do_approval:
                         data, approval_status = add_approval_to_embedded(
                             data, approval["rev"], approval["name"])
+                elif table_embed_emf and item.filename == table_embed_emf:
+                    # Patch the cached EMF presentation to match the edit, so
+                    # Visio shows the new row/approval without re-activating.
+                    if do_table:
+                        patched = add_revision_row_to_emf(data, rev_entry)
+                        if patched is not None:
+                            data = patched
+                    if do_approval:
+                        patched = approve_revision_in_emf(
+                            data, approval["rev"], approval["name"])
+                        if patched is not None:
+                            data = patched
                 # Preserve the original name; recompress with deflate.
                 zout.writestr(item.filename, data)
 
