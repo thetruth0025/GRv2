@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.13 (one-line replace; per-file REV in Visio revision rows)"
+__version__ = "2.13.1 (find the revision table on any page, not just page 1)"
 
 import argparse
 import datetime
@@ -254,14 +254,6 @@ def revision_output_path(in_path: str | os.PathLike):
 
     new_stem = p.stem[: m.start(3)] + nxt + p.stem[m.end(3):]
     return p.with_name(new_stem + p.suffix), old, nxt, "ok"
-
-
-def _first_page_part(names: Sequence[str]) -> Optional[str]:
-    """The archive member for page 1 (lowest-numbered page)."""
-    pages = [n for n in names if _PAGE_NAME_RE.search(n)]
-    if not pages:
-        return None
-    return min(pages, key=lambda n: int(_PAGE_NAME_RE.search(n).group(1)))
 
 
 def _cell_value(shape_el, ns: str, name: str) -> Optional[float]:
@@ -851,36 +843,54 @@ def add_approval_to_page(page_xml: str, rev_letter: str, name: str):
     return page_xml[:span[1]] + clone + page_xml[span[1]:], "approved"
 
 
-def vsdx_revtable_columns(path) -> Optional[List[str]]:
-    """The revision-table column names detected on a .vsdx cover page (in
-    canonical order), or None if no table is found. Used to confirm/preview
-    what the 'add revision entry' feature will write to."""
+def _revtable_page_part(zin: zipfile.ZipFile) -> Optional[str]:
+    """The page archive member that actually holds the revision table.
+
+    Visio page part numbers (page1.xml, page2.xml, ...) follow creation order,
+    NOT the display order -- so the cover/title page that carries the revision
+    table is often not page1.xml. We scan the pages (lowest number first) and
+    return the first one where a table is detected, instead of assuming page 1.
+    """
+    parts = [n for n in zin.namelist() if _PAGE_NAME_RE.search(n)]
+    parts.sort(key=lambda n: int(_PAGE_NAME_RE.search(n).group(1)))
+    for n in parts:
+        try:
+            xml = zin.read(n).decode("utf-8", "replace")
+        except KeyError:
+            continue
+        if _detect_revtable(xml) is not None:
+            return n
+    return None
+
+
+def _revtable_for_path(path):
+    """Detect the revision table on whichever page holds it. Returns the
+    _detect_revtable dict, or None."""
     try:
         with zipfile.ZipFile(path) as z:
-            page = _first_page_part(z.namelist())
+            page = _revtable_page_part(z)
             if not page:
                 return None
             xml = z.read(page).decode("utf-8", "replace")
     except (zipfile.BadZipFile, OSError, KeyError):
         return None
-    tbl = _detect_revtable(xml)
+    return _detect_revtable(xml)
+
+
+def vsdx_revtable_columns(path) -> Optional[List[str]]:
+    """The revision-table column names detected on a .vsdx (in canonical order),
+    or None if no table is found. Used to preview what the 'add revision entry'
+    feature will write to."""
+    tbl = _revtable_for_path(path)
     if not tbl:
         return None
     return [f for f in REVTABLE_FIELD_ORDER if f in tbl["col_x"]]
 
 
 def vsdx_revtable_rev_letters(path) -> List[str]:
-    """The REV letters present in the cover-page revision table (e.g.
-    ['A','B','C','D']), for the approval dialog. [] if no table/letters."""
-    try:
-        with zipfile.ZipFile(path) as z:
-            page = _first_page_part(z.namelist())
-            if not page:
-                return []
-            xml = z.read(page).decode("utf-8", "replace")
-    except (zipfile.BadZipFile, OSError, KeyError):
-        return []
-    tbl = _detect_revtable(xml)
+    """The REV letters present in the revision table (e.g. ['A','B','C','D']),
+    for the approval dialog. [] if no table/letters."""
+    tbl = _revtable_for_path(path)
     if not tbl:
         return []
     out = []
@@ -941,8 +951,10 @@ def replace_text_in_vsdx(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(in_path, "r") as zin:
-        first_page = (_first_page_part(zin.namelist())
-                      if (do_rev or do_table or do_approval) else None)
+        # The revision table / approval go on whichever page actually has the
+        # table (often not page1.xml -- part numbers follow creation order).
+        table_page = (_revtable_page_part(zin)
+                      if (do_table or do_approval) else None)
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -969,11 +981,11 @@ def replace_text_in_vsdx(
                                 rev_status = "updated"
                             elif rev_status == "na":
                                 rev_status = st
-                        if do_table and item.filename == first_page:
+                        if do_table and item.filename == table_page:
                             new_text, table_status = add_revision_entry_to_page(
                                 new_text, rev_entry
                             )
-                        if do_approval and item.filename == first_page:
+                        if do_approval and item.filename == table_page:
                             new_text, approval_status = add_approval_to_page(
                                 new_text, approval["rev"], approval["name"]
                             )
