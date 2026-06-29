@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.13.1 (find the revision table on any page, not just page 1)"
+__version__ = "2.13.2 (looser rev-table row detection + per-file diagnostics)"
 
 import argparse
 import datetime
@@ -546,7 +546,11 @@ def _detect_revtable(page_xml):
     # the contiguous, mostly-complete rows -- this excludes stray title-block
     # text that sits far from the table.
     ncols = len(col_x)
-    need = max(2, ncols - 1)  # a real row fills almost every column
+    # A data row must fill at least about half the columns -- enough to exclude
+    # stray single-cell alignments, but lenient for tables whose rows leave some
+    # columns blank (no cell shape). The contiguous walk below is what actually
+    # rejects far-away spurious rows.
+    need = max(2, (ncols + 1) // 2)
     qual = [r for r in rows
             if len(r["cells"]) >= need and abs(r["y"] - header_y) > 1e-6]
     if not qual:
@@ -950,11 +954,15 @@ def replace_text_in_vsdx(
                        approval.get("name"))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    page_count = 0
+    table_page = None
     with zipfile.ZipFile(in_path, "r") as zin:
+        page_count = sum(1 for n in zin.namelist()
+                         if _PAGE_NAME_RE.search(n))
         # The revision table / approval go on whichever page actually has the
         # table (often not page1.xml -- part numbers follow creation order).
-        table_page = (_revtable_page_part(zin)
-                      if (do_table or do_approval) else None)
+        if do_table or do_approval:
+            table_page = _revtable_page_part(zin)
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -996,7 +1004,8 @@ def replace_text_in_vsdx(
 
     return {"total": total, "by_part": by_part, "rev_drawing": rev_status,
             "rev_sheets": rev_sheets, "rev_table": table_status,
-            "approval": approval_status}
+            "approval": approval_status, "page_count": page_count,
+            "rev_table_page": (Path(table_page).name if table_page else None)}
 
 
 # ---------------------------------------------------------------------------
@@ -4205,18 +4214,21 @@ def launch_gui() -> int:
                                 self.log(note)
                         if rev_entry:
                             rl = rev_entry.get("Rev", "")
-                            added = (f"    revision table: row "
+                            tp = report.get("rev_table_page") or "?"
+                            added = (f"    revision table (on {tp}): row "
                                      + (f"REV {rl} " if rl else "")
                                      + "added")
+                            npg = report.get("page_count", 0)
                             tnote = {
                                 "filled": added,
                                 "appended": added,
                                 "not_found":
-                                    "    (revision table not found on the "
-                                    "cover page; left unchanged)",
+                                    f"    (NO revision table detected on any of "
+                                    f"this file's {npg} page(s); left "
+                                    "unchanged)",
                                 "no_slot":
-                                    "    (revision table found, but no safe "
-                                    "place to add a row; left unchanged)",
+                                    f"    (revision table found on {tp} but no "
+                                    "safe place to add a row; left unchanged)",
                                 "na": None,
                             }.get(report.get("rev_table"))
                             if tnote:
