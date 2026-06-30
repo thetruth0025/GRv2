@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.6 (approval: fix Approved-column placement + auto-detect latest rev)"
+__version__ = "2.16.7 (scrollable main window; fits any screen)"
 
 import argparse
 import datetime
@@ -4071,13 +4071,19 @@ def launch_gui() -> int:
             root.title(f"Visio / Excel Text Replacer   [v{__version__}]")
             # The window is sized in pixels, so grow it to match the display's
             # DPI (otherwise it's tiny and cramped on high-DPI screens now that
-            # the app renders at the real resolution).
+            # the app renders at the real resolution) -- but never larger than
+            # the screen, so the window (and its scrollbar) always fit. The form
+            # itself scrolls, so a small window is fine.
             try:
                 scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
             except Exception:  # noqa: BLE001
                 scale = 1.0
-            root.geometry(f"{int(980 * scale)}x{int(820 * scale)}")
-            root.minsize(int(800 * scale), int(680 * scale))
+            sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+            w = min(int(980 * scale), sw - 60)
+            h = min(int(820 * scale), sh - 100)
+            root.geometry(f"{w}x{h}")
+            root.minsize(min(int(720 * scale), sw - 60),
+                         min(int(420 * scale), sh - 100))
             self.dark = False
             self.palette = LIGHT
             self._rbuttons: list = []      # rounded buttons to re-theme
@@ -4138,9 +4144,60 @@ def launch_gui() -> int:
 
             pad = {"padx": 10, "pady": 6}
 
+            # --- scrollable body: the whole form lives in a canvas so it can be
+            # scrolled when the window is shorter than the content (otherwise
+            # the Run button at the bottom is unreachable on small screens).
+            self._scroll_outer = tk.Frame(root, bg=self.palette["bg"])
+            self._scroll_outer.pack(fill="both", expand=True)
+            self._scroll_canvas = tk.Canvas(
+                self._scroll_outer, highlightthickness=0, bd=0,
+                bg=self.palette["bg"])
+            _vbar = ttk.Scrollbar(
+                self._scroll_outer, orient="vertical",
+                command=self._scroll_canvas.yview)
+            self._scroll_canvas.configure(yscrollcommand=_vbar.set)
+            _vbar.pack(side="right", fill="y")
+            self._scroll_canvas.pack(side="left", fill="both", expand=True)
+            self.body = ttk.Frame(self._scroll_canvas)
+            _body_id = self._scroll_canvas.create_window(
+                (0, 0), window=self.body, anchor="nw")
+
+            def _fit_scroll(_e=None):
+                self._scroll_canvas.configure(
+                    scrollregion=self._scroll_canvas.bbox("all"))
+
+            def _fit_width(e):
+                self._scroll_canvas.itemconfigure(_body_id, width=e.width)
+
+            self.body.bind("<Configure>", _fit_scroll)
+            self._scroll_canvas.bind("<Configure>", _fit_width)
+
+            def _on_wheel(e):
+                # Scroll the form; let the log box / file list keep their own
+                # wheel, and ignore wheel events that belong to a dialog.
+                try:
+                    if e.widget.winfo_toplevel() is not self.root:
+                        return
+                    if e.widget.winfo_class() in ("Text", "Listbox",
+                                                  "TCombobox"):
+                        return
+                except Exception:  # noqa: BLE001
+                    return
+                if getattr(e, "num", None) == 4:
+                    n = -1
+                elif getattr(e, "num", None) == 5:
+                    n = 1
+                else:
+                    n = -1 if getattr(e, "delta", 0) > 0 else 1
+                self._scroll_canvas.yview_scroll(n * 2, "units")
+
+            root.bind_all("<MouseWheel>", _on_wheel)   # Windows / macOS
+            root.bind_all("<Button-4>", _on_wheel)     # Linux wheel up
+            root.bind_all("<Button-5>", _on_wheel)     # Linux wheel down
+
             # --- 1. Files --------------------------------------------------
             top = ttk.LabelFrame(
-                root, text="1.  Files (.vsdx Visio / .xlsx Excel)"
+                self.body, text="1.  Files (.vsdx Visio / .xlsx Excel)"
             )
             top.pack(fill="x", **pad)
 
@@ -4190,7 +4247,7 @@ def launch_gui() -> int:
 
             # --- 2. Find / replace rules -----------------------------------
             mid = ttk.LabelFrame(
-                root, text="2.  Find  ->  Replace with  (and which files)"
+                self.body, text="2.  Find  ->  Replace with  (and which files)"
             )
             mid.pack(fill="x", **pad)
             self.pairs_frame = ttk.Frame(mid)
@@ -4241,7 +4298,7 @@ def launch_gui() -> int:
             ).pack(side="left")
 
             # --- 3. Options ------------------------------------------------
-            opts = ttk.LabelFrame(root, text="3.  Options")
+            opts = ttk.LabelFrame(self.body, text="3.  Options")
             opts.pack(fill="x", **pad)
             self.case_var = tk.BooleanVar(value=False)
             self.word_var = tk.BooleanVar(value=False)
@@ -4306,7 +4363,7 @@ def launch_gui() -> int:
             self.out_dir_lbl.pack(side="left", padx=6)
 
             # --- Run -------------------------------------------------------
-            run = ttk.Frame(root)
+            run = ttk.Frame(self.body)
             run.pack(fill="x", **pad)
             self.run_btn = self._rbtn(
                 run, "Replace  &  Convert", self.run, kind="accent",
@@ -4323,7 +4380,7 @@ def launch_gui() -> int:
             self.progress.pack(side="left", fill="x", expand=True, padx=8)
 
             # --- Log -------------------------------------------------------
-            logf = ttk.LabelFrame(root, text="Status")
+            logf = ttk.LabelFrame(self.body, text="Status")
             logf.pack(fill="both", expand=True, **pad)
             self.log_box = scrolledtext.ScrolledText(
                 logf, height=8, state="disabled", wrap="word",
@@ -4410,6 +4467,8 @@ def launch_gui() -> int:
             )
             self.log_box.configure(bg=c["field"], fg=c["field_fg"])
             self.out_dir_lbl.configure(foreground=c["muted"])
+            self._scroll_outer.configure(bg=c["bg"])
+            self._scroll_canvas.configure(bg=c["bg"])
             self._rbuttons = [b for b in self._rbuttons if b.winfo_exists()]
             for b in self._rbuttons:
                 b.set_palette(c)
