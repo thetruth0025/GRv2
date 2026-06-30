@@ -195,6 +195,13 @@ rows*, with the same window, buttons and behaviour. Put a part number in a
    - **Reset fields** to restore the originally found data;
    - **Refresh lookup** to re-scan after adding files or changing Find values.
 
+The **Part Number** itself is changed by your normal **Find → Replace** rule:
+when a Find value matches a row's part number, that cell is replaced with the
+Replace value (the other fields are edited in the window above). A part number
+written **"<P/N> or equiv."** still matches a Find value of just the part number
+— and the **whole** cell (including the "or equiv.") is replaced with your
+Replace value. (To keep "or equiv.", include it in the Replace box.)
+
 On **Replace & Convert**, each change is written to that cell in the embedded
 worksheet **and drawn into the table's cached picture**, so the new value shows
 when the drawing is opened — no need to double-click the table in Visio. (A

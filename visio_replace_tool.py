@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.1 (sharper high-DPI UI, anti-aliased buttons)"
+__version__ = "2.16.2 (Visio parts-table part-number replace + 'or equiv.' match)"
 
 import argparse
 import datetime
@@ -1424,6 +1424,16 @@ VISIO_BOM_EDIT_FIELDS = ["Ref/DES #", "Cable Name", "Description",
                          "Manufacturer", "Qty/Length", "Unit"]
 VISIO_BOM_COPYDOWN = ["Manufacturer", "Description", "Qty/Length", "Unit"]
 
+# Part numbers in the parts table are sometimes written "<P/N> or equiv." -- a
+# Find value that names just the part number should still match such a cell.
+_OR_EQUIV_RE = re.compile(r"\s*\bor\s+equiv(?:alent)?\.?\s*$", re.IGNORECASE)
+
+
+def _strip_or_equiv(text: str) -> str:
+    """Drop a trailing 'or equiv.'/'or equivalent' so the bare part number is
+    left for matching (e.g. 'AL10 or equiv.' -> 'AL10')."""
+    return _OR_EQUIV_RE.sub("", text or "").strip()
+
 
 def _canonical_bom_field(text: str) -> Optional[str]:
     n = _norm_header(text)
@@ -1615,7 +1625,10 @@ def visio_bom_scan_rows(path, part_numbers, case_sensitive=False):
                 pnval = (rows[rn].get(pn_col) or "").strip()
                 if not pnval:
                     continue
-                cmp_val = pnval if case_sensitive else pnval.lower()
+                # Match against the bare part number, ignoring a trailing
+                # "or equiv." so "AL10 or equiv." still matches Find "AL10".
+                base = _strip_or_equiv(pnval)
+                cmp_val = base if case_sensitive else base.lower()
                 hit = next((o for o, t in targets if t == cmp_val), None)
                 if hit is None:
                     continue
@@ -1660,6 +1673,51 @@ def build_visio_bom_edits(path, bom_edits, case_sensitive=False) -> dict:
                 "old": old, "new": new_value, "pn": m["part"],
                 "item": m.get("item", ""), "row_index": m.get("row_index")})
     return out
+
+
+def build_visio_pn_replacements(path, pairs, case_sensitive=False) -> dict:
+    """Find/Replace applied to the Part Number column of the parts tables.
+
+    For each find->replace pair, any parts-table row whose Part Number matches
+    the find value (ignoring a trailing 'or equiv.') has its **whole** Part
+    Number cell replaced with the replacement value. Returns the same shape as
+    build_visio_bom_edits so the two can be merged."""
+    out: dict = {}
+    repl = {}
+    for find, replace in pairs or []:
+        if find and find not in repl:
+            repl[find] = replace
+    if not repl:
+        return out
+    for m in visio_bom_scan_rows(path, list(repl.keys()), case_sensitive):
+        new_value = repl.get(m["matched"])
+        if new_value is None:
+            continue
+        cell = m["fields"].get("Part Number")
+        if cell is None:
+            continue
+        ref, old = cell  # old is the full cell, e.g. "AL10 or equiv."
+        if new_value == old:
+            continue
+        col = re.match(r"[A-Z]+", ref).group(0)
+        entry = out.setdefault(m["embed"], {"emf": m["emf"], "cells": []})
+        entry["cells"].append({
+            "ref": ref, "col": col, "row": m["row"], "field": "Part Number",
+            "old": old, "new": new_value, "pn": m["part"],
+            "item": m.get("item", ""), "row_index": m.get("row_index")})
+    return out
+
+
+def _merge_bom_edit_dicts(*dicts) -> dict:
+    """Merge several {embed: {emf, cells}} maps into one (concatenating cells)."""
+    merged: dict = {}
+    for d in dicts:
+        for embed, ed in (d or {}).items():
+            m = merged.setdefault(embed, {"emf": ed.get("emf"), "cells": []})
+            if not m.get("emf"):
+                m["emf"] = ed.get("emf")
+            m["cells"].extend(ed.get("cells", []))
+    return merged
 
 
 def _emf_bom_header(records):
@@ -3613,6 +3671,11 @@ HELP_SECTIONS = [
         "**Copy 1st down** buttons (Manufacturer / Description / Qty/Length / "
         "Unit), **Reset fields**, and **Refresh lookup**. Opens in its own "
         "window.",
+        "* The **Part Number** itself is changed by your normal **Find -> "
+        "Replace** rule: a row whose part number matches the Find value has "
+        "that cell set to the Replace value. A cell written **'<P/N> or "
+        "equiv.'** still matches the bare part number, and the whole cell is "
+        "replaced (put 'or equiv.' in the Replace box to keep it).",
         "* On run, each change is written to the embedded worksheet **and "
         "drawn into the table's cached picture**, so it shows when the drawing "
         "opens — no need to double-click the table in Visio.",
@@ -5522,8 +5585,23 @@ def launch_gui() -> int:
                                         else None)
                     appr = visio_approval if (visio_approval
                                               and is_vsdx) else None
-                    vbom = (visio_bom_edits.get(f)
-                            if (visio_bom_edits and is_vsdx) else None)
+                    # Parts-table edits = the staged field edits from the
+                    # editor PLUS Part Number replacements driven by the
+                    # Find->Replace rules (the embedded tables aren't reached by
+                    # the generic text engine).
+                    vbom = None
+                    if is_vsdx:
+                        staged_vbom = (visio_bom_edits.get(f)
+                                       if visio_bom_edits else None)
+                        pn_repl = {}
+                        if pairs:
+                            try:
+                                pn_repl = build_visio_pn_replacements(
+                                    f, pairs, case_sensitive)
+                            except Exception:  # noqa: BLE001
+                                pn_repl = {}
+                        merged = _merge_bom_edit_dicts(staged_vbom, pn_repl)
+                        vbom = merged or None
                     has_edits = bool(cell_edits or staged_rev_entry or appr
                                      or vbom)
                     # An approval signs off an existing revision -- it must NOT
