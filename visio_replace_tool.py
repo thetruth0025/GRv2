@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.4 (summary lists sheets/pages in natural order)"
+__version__ = "2.16.5 (font-native spacing for text drawn into OLE pictures)"
 
 import argparse
 import datetime
@@ -1244,11 +1244,17 @@ def _emf_rows(records):
 def _build_emf_text_record(emf: bytes, tmpl, new_text: str, new_y: int,
                            charw, default_w) -> bytes:
     """Clone an EXTTEXTOUTW record at a new Y with new text, keeping the
-    template's font/colour/graphics state (its leading 76 bytes)."""
+    template's font/colour/graphics state (its leading 76 bytes).
+
+    We deliberately emit NO intercharacter-spacing (Dx) array (offDx = 0). With
+    no Dx, the text is laid out with the font's own glyph advances -- exactly
+    what Excel uses when it draws the cell -- so the spacing matches instead of
+    relying on our estimated per-glyph widths. The estimated width is still used
+    only for the bounding rectangle, which is just a hint and doesn't affect how
+    the characters are spaced."""
     fixed = bytearray(emf[tmpl["off"]:tmpl["off"] + 76])
     dy = new_y - tmpl["refy"]
-    dx = [charw.get(ch, default_w) for ch in new_text]
-    width = sum(dx)
+    width = sum(charw.get(ch, default_w) for ch in new_text)  # bounds hint only
     left = tmpl["refx"]
     struct.pack_into("<4i", fixed, 8, left, tmpl["bounds"][1] + dy,
                      left + width, tmpl["bounds"][3] + dy)   # rclBounds
@@ -1258,9 +1264,8 @@ def _build_emf_text_record(emf: bytes, tmpl, new_text: str, new_y: int,
         strb += b"\x00" * (4 - len(strb) % 4)
     struct.pack_into("<I", fixed, 44, len(new_text))         # nChars
     struct.pack_into("<I", fixed, 48, 76)                    # offString
-    struct.pack_into("<I", fixed, 72, 76 + len(strb))        # offDx
-    dxb = struct.pack("<%di" % len(dx), *dx) if dx else b""
-    rec = bytes(fixed) + strb + dxb
+    struct.pack_into("<I", fixed, 72, 0)                     # offDx = 0 (none)
+    rec = bytes(fixed) + strb
     return rec[:4] + struct.pack("<I", len(rec)) + rec[8:]   # nSize
 
 
