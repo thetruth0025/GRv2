@@ -153,7 +153,9 @@ Options:
 - **Use installed Visio/Excel for PDF (best quality)** — *on by default.* On
   **Windows** with Visio/Excel installed (and `pywin32`), each file is exported
   through the app's own *Export as PDF*, which gives the best fidelity and
-  **correct "Sheet X of Y" page numbers**. If that isn't available (non-Windows,
+  **correct "Sheet X of Y" page numbers**. It exports **every page/sheet**, with
+  each **Visio page fit to a single PDF page** (no tiling) and each **Excel
+  sheet fit to one page wide**. If that isn't available (non-Windows,
   apps not installed, or pywin32 missing) it **falls back to LibreOffice** —
   which renders "Sheet X of Y" as "Sheet 0 of Y". Turn this off to always use
   LibreOffice. The **Status** log reports which engine ran for each file. From

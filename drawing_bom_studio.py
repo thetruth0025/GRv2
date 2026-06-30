@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.22.0 (native Visio/Excel PDF export, toggle-switch options)"
+__version__ = "2.22.1 (native PDF: all pages/sheets, each fit to one page)"
 
 import argparse
 import datetime
@@ -4463,21 +4463,55 @@ class NativePdfExporter:
             return self._export_excel(in_path, out)
         return None
 
+    @staticmethod
+    def _const(name, default):
+        """A COM enum value by name (populated by EnsureDispatch), else the
+        documented integer fallback."""
+        try:
+            from win32com.client import constants
+            return getattr(constants, name)
+        except Exception:  # noqa: BLE001
+            return default
+
+    def _fit_visio_pages(self, doc):
+        """Set every page's print setup to 'fit to 1 sheet across by 1 down',
+        so each Visio page becomes exactly one PDF page (no tiling)."""
+        try:
+            pages = doc.Pages
+            count = pages.Count
+        except Exception:  # noqa: BLE001
+            return
+        for i in range(1, count + 1):
+            try:
+                ps = pages.Item(i).PageSheet
+            except Exception:  # noqa: BLE001
+                continue
+            for cell, formula in (("PrintProps.OnPage", "TRUE"),
+                                  ("PrintProps.PagesX", "1"),
+                                  ("PrintProps.PagesY", "1")):
+                try:
+                    ps.Cells(cell).FormulaForceU = formula
+                except Exception:  # noqa: BLE001
+                    pass
+
     def _export_visio(self, in_path, out):
         app = self._visio_app()
+        fmt = self._const("visFixedFormatPDF", 1)
+        intent = self._const("visDocExIntentPrint", 1)
+        prange = self._const("visPrintAll", 0)      # ALL pages
+        # Open writable (macros disabled) so we can adjust each page's print
+        # setup; we never save, so the source copy is untouched.
+        doc = app.Documents.OpenEx(str(in_path), 128)
         try:
-            from win32com.client import constants as C
-            fmt, intent, prange = (C.visFixedFormatPDF, C.visDocExIntentPrint,
-                                   C.visPrintAll)
-        except Exception:  # noqa: BLE001 - late binding: use documented ints
-            fmt, intent, prange = 1, 1, 0
-        # OpenEx flags: read-only (2) + macros disabled (128).
-        doc = app.Documents.OpenEx(str(in_path), 2 + 128)
-        try:
+            self._fit_visio_pages(doc)
             if out.exists():
                 out.unlink()
             doc.ExportAsFixedFormat(fmt, str(out), intent, prange)
         finally:
+            try:
+                doc.Saved = True   # no "save changes?" prompt on close
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 doc.Close()
             except Exception:  # noqa: BLE001
@@ -4488,15 +4522,26 @@ class NativePdfExporter:
 
     def _export_excel(self, in_path, out):
         app = self._excel_app()
+        typ = self._const("xlTypePDF", 0)
+        wb = app.Workbooks.Open(str(in_path), 0, False)  # UpdateLinks=0, RW
         try:
-            from win32com.client import constants as C
-            typ = C.xlTypePDF
-        except Exception:  # noqa: BLE001
-            typ = 0  # xlTypePDF
-        wb = app.Workbooks.Open(str(in_path), 0, True)  # UpdateLinks=0, RO
-        try:
+            # Fit every sheet's columns to one page wide (rows flow down as
+            # needed), so nothing is cut off the right edge of the PDF.
+            try:
+                for ws in wb.Worksheets:
+                    setup = ws.PageSetup
+                    for attr, val in (("Zoom", False),
+                                      ("FitToPagesWide", 1),
+                                      ("FitToPagesTall", False)):
+                        try:
+                            setattr(setup, attr, val)
+                        except Exception:  # noqa: BLE001
+                            pass
+            except Exception:  # noqa: BLE001
+                pass
             if out.exists():
                 out.unlink()
+            # Workbook-level export = every (visible) sheet in the file.
             wb.ExportAsFixedFormat(typ, str(out))
         finally:
             try:
@@ -4903,8 +4948,10 @@ HELP_SECTIONS = [
         "* **Case sensitive** / **Whole word only** — control matching.",
         "* **Also export PDF** — off by default. With **Use installed "
         "Visio/Excel for PDF** on (the default), it exports through the "
-        "installed apps for best quality on Windows and falls back to "
-        "LibreOffice; turn it off to always use LibreOffice.",
+        "installed apps for best quality on Windows: **every page / sheet**, "
+        "with each **Visio page fit to one PDF page** and each **Excel sheet "
+        "fit to one page wide**. Falls back to LibreOffice; turn it off to "
+        "always use LibreOffice.",
         "* **Save copy as next revision (REVx -> next)** — name each copy "
         "as the next letter (REVA -> REVB) and bump the REV box inside the "
         "file. On by default. (Ignored for a file you're approving — those are "
@@ -6128,6 +6175,12 @@ def launch_gui() -> int:
                 self._log(
                     "PDF: will use installed Visio/Excel for best quality "
                     "(LibreOffice as fallback)."
+                )
+            elif sys.platform == "win32":
+                self._log(
+                    "Tip: install the pywin32 package (pip install pywin32) to "
+                    "export PDFs through your installed Visio/Excel — all pages, "
+                    "best quality. Using LibreOffice until then."
                 )
             elif find_libreoffice() is None:
                 self._log(
