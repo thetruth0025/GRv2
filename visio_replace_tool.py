@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.7 (scrollable main window; fits any screen)"
+__version__ = "2.16.8 (feature buttons wrap so none are clipped)"
 
 import argparse
 import datetime
@@ -4215,18 +4215,14 @@ def launch_gui() -> int:
 
             btn_row = ttk.Frame(top)
             btn_row.pack(fill="x", padx=8, pady=2)
-            self.add_btn = self._rbtn(
-                btn_row, "Add file...", self.add_files
-            )
-            self.add_btn.pack(side="left")
+            self.add_btn = self._rbtn(btn_row, "Add file...", self.add_files)
             self.folder_btn = self._rbtn(
-                btn_row, "Add folder...", self.add_folder
-            )
-            self.folder_btn.pack(side="left", padx=6)
-            self._rbtn(
-                btn_row, "Remove selected", self.remove_selected_files
-            ).pack(side="left", padx=6)
-            self._rbtn(btn_row, "Clear", self.clear_files).pack(side="left")
+                btn_row, "Add folder...", self.add_folder)
+            _rm_btn = self._rbtn(
+                btn_row, "Remove selected", self.remove_selected_files)
+            _clr_btn = self._rbtn(btn_row, "Clear", self.clear_files)
+            self._make_flow(
+                btn_row, [self.add_btn, self.folder_btn, _rm_btn, _clr_btn])
 
             list_row = ttk.Frame(top)
             list_row.pack(fill="x", padx=8, pady=(2, 8))
@@ -4262,40 +4258,31 @@ def launch_gui() -> int:
             self.bom_status = ttk.Label(rule_btns, text="")
             self.bom_status.pack(side="left", padx=8)
 
-            # Per-format helper editors, grouped by file type onto two rows so
-            # they never clip.
+            # Per-format helper editors. Each row wraps to as many lines as
+            # needed so no button is ever clipped at the window edge.
             excel_btns = ttk.Frame(mid)
             excel_btns.pack(fill="x", padx=8, pady=(0, 4))
-            self._rbtn(
-                excel_btns, "Excel: find & edit rows...", self.open_bom_editor
-            ).pack(side="left")
-            self._rbtn(
-                excel_btns, "Excel: add Change Log entry...",
-                self.open_changelog_editor,
-            ).pack(side="left", padx=8)
-            self._rbtn(
-                excel_btns, "Excel: set Author + date...",
-                self.open_author_editor,
-            ).pack(side="left")
-            self._rbtn(
-                excel_btns, "Excel: approve (EE/ME/Prod)...",
-                self.open_excel_approval, kind="green",
-            ).pack(side="left", padx=8)
+            self._make_flow(excel_btns, [
+                self._rbtn(excel_btns, "Excel: find & edit rows...",
+                           self.open_bom_editor),
+                self._rbtn(excel_btns, "Excel: add Change Log entry...",
+                           self.open_changelog_editor),
+                self._rbtn(excel_btns, "Excel: set Author + date...",
+                           self.open_author_editor),
+                self._rbtn(excel_btns, "Excel: approve (EE/ME/Prod)...",
+                           self.open_excel_approval, kind="green"),
+            ])
 
             visio_btns = ttk.Frame(mid)
             visio_btns.pack(fill="x", padx=8, pady=(0, 8))
-            self._rbtn(
-                visio_btns, "Visio: find & edit rows...",
-                self.open_visio_bom_editor,
-            ).pack(side="left")
-            self._rbtn(
-                visio_btns, "Visio: add revision entry...",
-                self.open_visio_rev_editor,
-            ).pack(side="left", padx=8)
-            self._rbtn(
-                visio_btns, "Visio: approve revision...",
-                self.open_visio_approval, kind="green",
-            ).pack(side="left")
+            self._make_flow(visio_btns, [
+                self._rbtn(visio_btns, "Visio: find & edit rows...",
+                           self.open_visio_bom_editor),
+                self._rbtn(visio_btns, "Visio: add revision entry...",
+                           self.open_visio_rev_editor),
+                self._rbtn(visio_btns, "Visio: approve revision...",
+                           self.open_visio_approval, kind="green"),
+            ])
 
             # --- 3. Options ------------------------------------------------
             opts = ttk.LabelFrame(self.body, text="3.  Options")
@@ -4447,6 +4434,41 @@ def launch_gui() -> int:
                               palette=self.palette, **kw)
             self._rbuttons.append(b)
             return b
+
+        def _make_flow(self, fr, widgets, pad=4):
+            """Lay buttons out in a frame, wrapping to new rows when the frame
+            is too narrow -- so every button (and its full text) stays visible
+            instead of being clipped at the window edge. Uses absolute placement
+            (not grid, which would align columns across the wrapped rows)."""
+            fr.pack_propagate(False)  # we set the frame's height ourselves
+            state = {"w": 0}
+
+            def reflow(e=None):
+                # Use the event's width: winfo_width() can still report the old
+                # value while a resize is being processed.
+                w = (e.width if (e is not None and getattr(e, "width", 0) > 1)
+                     else fr.winfo_width())
+                if w <= 1 or w == state["w"]:
+                    return
+                state["w"] = w
+                x = pad
+                y = pad
+                row_h = 0
+                for b in widgets:
+                    if not b.winfo_exists():
+                        continue
+                    bw, bh = b.winfo_reqwidth(), b.winfo_reqheight()
+                    if x > pad and x + bw + pad > w:
+                        x = pad
+                        y += row_h + pad
+                        row_h = 0
+                    b.place(x=x, y=y)
+                    x += bw + pad
+                    row_h = max(row_h, bh)
+                fr.configure(height=y + row_h + pad)
+
+            fr.bind("<Configure>", reflow)
+            self.root.after(0, reflow)
 
         def toggle_theme(self):
             self.dark = not self.dark
