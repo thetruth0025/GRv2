@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.11 (extend OLE oleSize so a new revision row is actually shown)"
+__version__ = "2.17.0 (tabbed UI: Find→Replace / Parts / Approve & Revise)"
 
 import argparse
 import datetime
@@ -4320,6 +4320,10 @@ def launch_gui() -> int:
             # Staged Visio parts-table edits, computed per file/embedding:
             #   {file: {embed_member: {"emf": emf_member, "cells": [edit, ...]}}}
             self.visio_bom_edits: dict = {}
+            # Staged part removals: {file: [{"embed"/"sheet", "rows":[..], ...}]}
+            self.remove_parts: dict = {}
+            # Staged part additions: {file: [{"embed"/"sheet", "rows":[{..}], ..}]}
+            self.add_parts: dict = {}
             # Staged Change Log row to append: {canonical_field: value}.
             self.changelog_entry: dict = {}
             # New name for the "Author" box (date is stamped automatically).
@@ -4432,47 +4436,86 @@ def launch_gui() -> int:
             sb.pack(side="left", fill="y")
             self.files_box.configure(yscrollcommand=sb.set)
 
-            # --- 2. Find / replace rules -----------------------------------
-            mid = ttk.LabelFrame(
-                self.body, text="2.  Find  ->  Replace with  (and which files)"
-            )
-            mid.pack(fill="x", **pad)
-            self.pairs_frame = ttk.Frame(mid)
+            # --- 2. Feature tabs -------------------------------------------
+            self.nb = ttk.Notebook(self.body)
+            self.nb.pack(fill="x", **pad)
+
+            # Tab 1 -- Find & Replace (the find->replace rules only).
+            tab_fr = ttk.Frame(self.nb)
+            self.nb.add(tab_fr, text="  Find → Replace  ")
+            ttk.Label(
+                tab_fr, wraplength=900, justify="left",
+                text="Type the text to find and its replacement, then choose "
+                "which document type(s) it applies to via 'in'.",
+            ).pack(fill="x", padx=8, pady=(8, 2))
+            self.pairs_frame = ttk.Frame(tab_fr)
             self.pairs_frame.pack(fill="x", padx=6, pady=6)
             self._header_row()
             self.add_pair()
-            rule_btns = ttk.Frame(mid)
-            rule_btns.pack(fill="x", padx=8, pady=(0, 4))
+            rule_btns = ttk.Frame(tab_fr)
+            rule_btns.pack(fill="x", padx=8, pady=(0, 8))
             self._rbtn(
                 rule_btns, "+ Add another rule", self.add_pair
             ).pack(side="left")
-            self.bom_status = ttk.Label(rule_btns, text="")
-            self.bom_status.pack(side="left", padx=8)
 
-            # Per-format helper editors. Each row wraps to as many lines as
-            # needed so no button is ever clipped at the window edge.
-            excel_btns = ttk.Frame(mid)
-            excel_btns.pack(fill="x", padx=8, pady=(0, 4))
-            self._make_flow(excel_btns, [
-                self._rbtn(excel_btns, "Excel: find & edit rows...",
+            # Tab 2 -- Parts (find & edit, remove, add).
+            tab_parts = ttk.Frame(self.nb)
+            self.nb.add(tab_parts, text="  Parts  ")
+            fe = ttk.LabelFrame(tab_parts, text="Find & edit existing rows")
+            fe.pack(fill="x", padx=8, pady=(8, 4))
+            fe_btns = ttk.Frame(fe)
+            fe_btns.pack(fill="x", padx=6, pady=6)
+            self._make_flow(fe_btns, [
+                self._rbtn(fe_btns, "Excel: find & edit rows...",
                            self.open_bom_editor),
-                self._rbtn(excel_btns, "Excel: add Change Log entry...",
-                           self.open_changelog_editor),
-                self._rbtn(excel_btns, "Excel: set Author + date...",
-                           self.open_author_editor),
-                self._rbtn(excel_btns, "Excel: approve (EE/ME/Prod)...",
+                self._rbtn(fe_btns, "Visio: find & edit rows...",
+                           self.open_visio_bom_editor),
+            ])
+            self.bom_status = ttk.Label(fe, text="")
+            self.bom_status.pack(anchor="w", padx=10, pady=(0, 6))
+
+            rmf = ttk.LabelFrame(tab_parts, text="Remove a part from sheets")
+            rmf.pack(fill="x", padx=8, pady=4)
+            rm_in = ttk.Frame(rmf)
+            rm_in.pack(fill="x", padx=8, pady=(8, 2))
+            ttk.Label(rm_in, text="Part number:").pack(side="left")
+            self.remove_pn_var = tk.StringVar()
+            ttk.Entry(rm_in, textvariable=self.remove_pn_var, width=28).pack(
+                side="left", padx=6)
+            self._rbtn(rm_in, "Find & choose rows to remove...",
+                       self.open_remove_parts, kind="orange").pack(side="left")
+            self.remove_status = ttk.Label(rmf, text="")
+            self.remove_status.pack(anchor="w", padx=10, pady=(0, 6))
+
+            adf = ttk.LabelFrame(tab_parts, text="Add new parts to a sheet")
+            adf.pack(fill="x", padx=8, pady=(4, 8))
+            ad_row = ttk.Frame(adf)
+            ad_row.pack(fill="x", padx=8, pady=8)
+            self._rbtn(ad_row, "Add parts...", self.open_add_parts,
+                       kind="accent").pack(side="left")
+            self.add_status = ttk.Label(adf, text="")
+            self.add_status.pack(anchor="w", padx=10, pady=(0, 6))
+
+            # Tab 3 -- Approve & Revise.
+            tab_appr = ttk.Frame(self.nb)
+            self.nb.add(tab_appr, text="  Approve & Revise  ")
+            appr_btns = ttk.Frame(tab_appr)
+            appr_btns.pack(fill="x", padx=8, pady=(10, 4))
+            self._make_flow(appr_btns, [
+                self._rbtn(appr_btns, "Visio: approve revision...",
+                           self.open_visio_approval, kind="green"),
+                self._rbtn(appr_btns, "Excel: approve (EE/ME/Prod)...",
                            self.open_excel_approval, kind="green"),
             ])
-
-            visio_btns = ttk.Frame(mid)
-            visio_btns.pack(fill="x", padx=8, pady=(0, 8))
-            self._make_flow(visio_btns, [
-                self._rbtn(visio_btns, "Visio: find & edit rows...",
-                           self.open_visio_bom_editor),
-                self._rbtn(visio_btns, "Visio: add revision entry...",
+            rev_btns = ttk.Frame(tab_appr)
+            rev_btns.pack(fill="x", padx=8, pady=(0, 10))
+            self._make_flow(rev_btns, [
+                self._rbtn(rev_btns, "Visio: add revision entry...",
                            self.open_visio_rev_editor),
-                self._rbtn(visio_btns, "Visio: approve revision...",
-                           self.open_visio_approval, kind="green"),
+                self._rbtn(rev_btns, "Excel: add Change Log entry...",
+                           self.open_changelog_editor),
+                self._rbtn(rev_btns, "Excel: set Author + date...",
+                           self.open_author_editor),
             ])
 
             # --- 3. Options ------------------------------------------------
@@ -4602,6 +4645,15 @@ def launch_gui() -> int:
             style.configure("TLabelframe.Label", background=c["bg"],
                             foreground=c["accent"],
                             font=("Segoe UI", 10, "bold"))
+            style.configure("TNotebook", background=c["bg"],
+                            bordercolor=c["border"], tabmargins=(4, 4, 4, 0))
+            style.configure("TNotebook.Tab", background=c["btn"],
+                            foreground=c["text"], padding=(16, 7),
+                            font=("Segoe UI", 10, "bold"))
+            style.map("TNotebook.Tab",
+                      background=[("selected", c["card"]),
+                                  ("active", c["btn_hover"])],
+                      foreground=[("selected", c["accent"])])
             style.configure("TEntry", fieldbackground=c["field"],
                             foreground=c["field_fg"], bordercolor=c["border"],
                             insertcolor=c["field_fg"], padding=4)
@@ -5464,6 +5516,14 @@ def launch_gui() -> int:
             self._rbtn(
                 bottom, "Reset fields", reset_fields, kind="orange",
             ).pack(side="left", padx=6)
+
+        # -- Remove parts --------------------------------------------------
+        def open_remove_parts(self):
+            messagebox.showinfo("Remove parts", "Coming up.")
+
+        # -- Add parts -----------------------------------------------------
+        def open_add_parts(self):
+            messagebox.showinfo("Add parts", "Coming up.")
 
         # -- Change Log entry ----------------------------------------------
         def open_changelog_editor(self):
