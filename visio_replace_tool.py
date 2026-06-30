@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.2 (Visio parts-table part-number replace + 'or equiv.' match)"
+__version__ = "2.16.3 (change summary now includes Visio revision & parts tables)"
 
 import argparse
 import datetime
@@ -3182,6 +3182,57 @@ def _visio_shape_texts(xml_text: str) -> dict:
     return out
 
 
+def _diff_vsdx_embeddings(zi: zipfile.ZipFile, zo: zipfile.ZipFile) -> list:
+    """Diff the embedded Excel objects (the revision table and the parts tables)
+    so their cell changes show in the summary -- they live in embedded
+    worksheets, not in the page shapes the text diff looks at."""
+    changes = []
+    page_names = _embedding_page_names(zi)
+    out_names = set(zo.namelist())
+    for member in zi.namelist():
+        if not _EMBED_XLSX_RE.search(member) or member not in out_names:
+            continue
+        try:
+            bi, bo = zi.read(member), zo.read(member)
+        except KeyError:
+            continue
+        if bi == bo:
+            continue  # unchanged -- skip before parsing
+        pi = _read_embedded_sheet_rows(bi)
+        po = _read_embedded_sheet_rows(bo)
+        if not pi or not po:
+            continue
+        rows_i, rows_o = pi[2], po[2]
+        bom = _embedded_bom_info(bo)
+        rev = None if bom else _embedded_revtable_info(bo)
+        info = bom or rev
+        col_field = info["col_field"] if info else {}
+        hrow = info["header_row"] if info else 0
+        if bom:
+            location = page_names.get(member) or "Parts table"
+        elif rev:
+            location = "Revision table"
+        else:
+            location = page_names.get(member) or Path(member).stem
+        cells = set()
+        for rn, cols in rows_i.items():
+            cells.update((c, rn) for c in cols)
+        for rn, cols in rows_o.items():
+            cells.update((c, rn) for c in cols)
+        for col, rn in sorted(cells, key=lambda k: (k[1], k[0])):
+            if rn <= hrow:
+                continue  # header / title rows
+            bef = (rows_i.get(rn) or {}).get(col) or ""
+            aft = (rows_o.get(rn) or {}).get(col) or ""
+            if str(bef) == str(aft):
+                continue
+            changes.append({
+                "location": location, "field": col_field.get(col, ""),
+                "before": str(bef), "after": str(aft),
+            })
+    return changes
+
+
 def _diff_vsdx(in_path, out_path) -> list:
     changes = []
     with zipfile.ZipFile(in_path) as zi, zipfile.ZipFile(out_path) as zo:
@@ -3210,6 +3261,8 @@ def _diff_vsdx(in_path, out_path) -> list:
                         "location": label, "field": "",
                         "before": "", "after": aft,
                     })
+        # The revision table and parts tables are embedded Excel objects.
+        changes.extend(_diff_vsdx_embeddings(zi, zo))
     return changes
 
 

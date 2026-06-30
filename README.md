@@ -334,9 +334,12 @@ With **Generate change summary** ticked (on by default), the tool writes a
 your output folder) and opens it. Files are **grouped by document type** (BOM /
 System Drawing / Cable Drawing), then by file, and for every file it lists each
 change as **Change (where) · Before · After** — including text replacements, BOM
-row edits, the Author name/date, the appended Change Log row, and the revision
-bump. Cells are labelled by their column or title-block label (e.g. *P/N*, *Unit
-Cost*, *Author*, *Revision*), and dates are shown as real dates.
+row edits, the Author name/date, the appended Change Log row, the revision
+bump, the **Visio revision-table row** that was added, and **Visio parts-table**
+edits (field changes and Part Number replacements, labelled by sheet such as
+*R0001*). Cells are labelled by their column or title-block label (e.g. *P/N*,
+*Unit Cost*, *Author*, *Revision*, *Manufacturer*), and dates are shown as real
+dates.
 
 **Identical changes are grouped into a single line.** A change that happens the
 same way across many sheets/pages — most notably the **REV bump**, which touches
