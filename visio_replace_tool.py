@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.8 (feature buttons wrap so none are clipped)"
+__version__ = "2.16.9 (grow OLE revision table so new rows aren't clipped in view)"
 
 import argparse
 import datetime
@@ -1275,6 +1275,31 @@ def _emf_set_counts(emf: bytearray, byte_delta: int, record_delta: int):
                      n_records + record_delta)
 
 
+def _emf_revrow_growth(emf: bytes) -> float:
+    """How much taller the cached picture must get to show one more revision
+    row: the ratio new_height / old_height (1.0 if the new row already fits in
+    the metafile's bounds). Computed without modifying the metafile."""
+    try:
+        records = _emf_text_records(emf)
+        if not records:
+            return 1.0
+        header, data_rows = _emf_rows(records)
+        if not data_rows:
+            return 1.0
+        pitch = (data_rows[1][0] - data_rows[0][0] if len(data_rows) > 1
+                 else data_rows[0][0] - header[0])
+        if pitch <= 0:
+            return 1.0
+        bounds = struct.unpack_from("<4i", emf, 8)
+        old_h = bounds[3] - bounds[1]
+        bottom = data_rows[-1][0] + 2 * pitch
+        if bottom > bounds[3] and old_h > 0:
+            return (bottom - bounds[1]) / old_h
+        return 1.0
+    except (struct.error, ValueError, IndexError):
+        return 1.0
+
+
 def add_revision_row_to_emf(emf: bytes, entry: dict) -> Optional[bytes]:
     """Inject the new revision row's text into the cached EMF so Visio shows it
     without the user activating the object. Returns patched bytes, or None if
@@ -1313,15 +1338,94 @@ def add_revision_row_to_emf(emf: bytes, entry: dict) -> Optional[bytes]:
             return None
         out = bytearray(emf[:insert_at] + additions + emf[insert_at:])
         _emf_set_counts(out, len(additions), added)
-        # Make sure the metafile bounds include the new row.
+        # Grow the metafile's bounds AND frame (in step) so the new row sits in
+        # view at the same scale, instead of below the visible window.
         bounds = list(struct.unpack_from("<4i", out, 8))
+        old_h = bounds[3] - bounds[1]
         bottom = data_rows[-1][0] + 2 * pitch
-        if bottom > bounds[3]:
+        if bottom > bounds[3] and old_h > 0:
+            ratio = (bottom - bounds[1]) / old_h
             bounds[3] = bottom
             struct.pack_into("<4i", out, 8, *bounds)
+            frame = list(struct.unpack_from("<4i", out, 24))
+            fh = frame[3] - frame[1]
+            frame[3] = frame[1] + int(round(fh * ratio))
+            struct.pack_into("<4i", out, 24, *frame)
         return bytes(out)
     except (struct.error, ValueError, IndexError):
         return None
+
+
+def _ole_shape_for_embedding(zin: zipfile.ZipFile, embed_member: str):
+    """Find the page part and shape ID of the OLE object that displays an
+    embedded worksheet. Returns (page_part, shape_id) or (None, None)."""
+    for n in zin.namelist():
+        if not re.match(r"visio/pages/page\d+\.xml$", n):
+            continue
+        rels = posixpath.join("visio/pages", "_rels",
+                              posixpath.basename(n) + ".rels")
+        try:
+            rtext = zin.read(rels).decode("utf-8", "replace")
+        except (KeyError, OSError):
+            continue
+        rid = None
+        for rid_m, tgt in re.findall(r'Id="([^"]+)"[^>]*?Target="([^"]+)"',
+                                     rtext):
+            resolved = posixpath.normpath(posixpath.join("visio/pages", tgt))
+            if resolved == embed_member:
+                rid = rid_m
+                break
+        if not rid:
+            continue
+        page_xml = zin.read(n).decode("utf-8", "replace")
+        pos = page_xml.find("r:id='%s'" % rid)
+        if pos < 0:
+            pos = page_xml.find('r:id="%s"' % rid)
+        if pos < 0:
+            continue
+        shapes = list(re.finditer(r"<Shape\b[^>]*\bID=['\"](\d+)['\"]",
+                                   page_xml[:pos]))
+        if shapes:
+            return n, shapes[-1].group(1)
+    return None, None
+
+
+def grow_ole_shape_height(page_xml: str, shape_id: str, ratio: float) -> str:
+    """Grow an OLE object shape's height (and ObjectHeight) by ``ratio``,
+    extending downward (top edge fixed), so its display window shows the extra
+    revision row. Returns the edited page XML."""
+    if ratio <= 1.0:
+        return page_xml
+    m = re.search(r"<Shape\b[^>]*\bID=['\"]%s['\"].*?</Shape>"
+                  % re.escape(shape_id), page_xml, re.S)
+    if not m:
+        return page_xml
+    block = m.group(0)
+    hm = re.search(r"<Cell N=['\"]Height['\"][^>]*?\bV=['\"]([\d.]+)['\"]",
+                   block)
+    if not hm:
+        return page_xml
+    height = float(hm.group(1))
+    new_height = height * ratio
+    d_h = new_height - height
+
+    def _set(blk, name, value):
+        return re.sub(
+            r"(<Cell N=['\"]%s['\"][^>]*?\bV=['\"])[\d.]+(['\"])" % name,
+            lambda mm: f"{mm.group(1)}{value:.6f}{mm.group(2)}", blk, count=1)
+
+    block = _set(block, "Height", new_height)
+    lm = re.search(r"<Cell N=['\"]LocPinY['\"][^>]*?\bV=['\"]([\d.]+)['\"]",
+                   block)
+    if lm:  # keep the pin at the top edge so the shape grows downward
+        block = _set(block, "LocPinY", float(lm.group(1)) + d_h)
+    om = re.search(r"ObjectHeight=['\"]([\d.]+)['\"]", block)
+    if om:
+        block = re.sub(
+            r"(ObjectHeight=['\"])[\d.]+(['\"])",
+            lambda mm: f"{mm.group(1)}{float(om.group(1)) * ratio:.10f}"
+                       f"{mm.group(2)}", block, count=1)
+    return page_xml[:m.start()] + block + page_xml[m.end():]
 
 
 def approve_revision_in_emf(emf: bytes, rev_letter: str,
@@ -2039,6 +2143,17 @@ def replace_text_in_vsdx(
                 if table_embed:
                     table_embed_emf = _embedded_revtable_emf_member(
                         zin, table_embed)
+        # If adding the row pushes it below the OLE object's visible window,
+        # grow that object's shape so Visio shows the new row in the page view
+        # (otherwise it's only visible after opening the object).
+        ole_grow_ratio = 1.0
+        ole_grow_page = None
+        ole_grow_shape = None
+        if do_table and table_embed_emf:
+            ole_grow_ratio = _emf_revrow_growth(zin.read(table_embed_emf))
+            if ole_grow_ratio > 1.001:
+                ole_grow_page, ole_grow_shape = _ole_shape_for_embedding(
+                    zin, table_embed)
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -2073,6 +2188,12 @@ def replace_text_in_vsdx(
                             new_text, approval_status = add_approval_to_page(
                                 new_text, approval["rev"], approval["name"]
                             )
+                        # Grow the OLE object's shape if the new revision row
+                        # falls below its visible window.
+                        if (ole_grow_shape and ole_grow_page
+                                and item.filename == ole_grow_page):
+                            new_text = grow_ole_shape_height(
+                                new_text, ole_grow_shape, ole_grow_ratio)
                         if new_text != text:
                             data = new_text.encode("utf-8")
                 elif table_embed and item.filename == table_embed:
