@@ -29,7 +29,7 @@ echo Installing PyInstaller (if not already present)...
 
 echo.
 echo Building the EXE...
-%PY% -m PyInstaller --onefile --windowed --name DrawingBOMStudio drawing_bom_studio.py || (
+%PY% -m PyInstaller --onefile --windowed --name DrawingBOMStudio --icon robot_icon.ico drawing_bom_studio.py || (
     echo Build failed.
     pause
     exit /b 1

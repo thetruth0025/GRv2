@@ -321,7 +321,10 @@ plus **DESCRIPTION / DATE / APPROVED**, …), and writes the new entry straight
 into that worksheet — filling the first **pre-formatted blank row** that's
 already there for the next revision (or adding one if the table is full). The
 Status box reports it as an *embedded sheet*. No grid lines are drawn for these,
-because the worksheet supplies its own borders.
+because the worksheet supplies its own borders. Every value written into an
+embedded revision table — by both the revision-entry and the **approval**
+features — is formatted **Calibri, size 8, centered and middle-aligned**, so it
+matches the table regardless of what format the blank cell happened to carry.
 
 Visio shows an embedded object from a **cached picture** and only refreshes it
 when you double-click the object — so editing the worksheet alone would leave
@@ -407,6 +410,12 @@ every sheet — appears once, noting whether it occurred on **all sheets** or on
 specific named sheets, instead of one row per sheet. This keeps the summary fast
 to review. An approver can check every change in one document without opening
 each file, and can print it to PDF.
+
+**Parts tables and BOMs are compared by row, not by position.** When a part is
+added or removed and the rows below it shift up (and renumber), the summary does
+**not** list every shifted item as a change — it reports only the genuine
+**Part added** / **Part removed**, plus any in-place field edits. The Item /
+line-number column is ignored, so renumbering alone is never flagged.
 
 ---
 

@@ -12,6 +12,7 @@ on:
       - claude/visio-text-replace-pdf-3fpldd
     paths:
       - drawing_bom_studio.py
+      - robot_icon.ico
       - .github/workflows/build-windows-exe.yml
 
 jobs:
@@ -27,10 +28,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install PyInstaller
-        run: pip install pyinstaller
+        run: pip install pyinstaller pillow
 
       - name: Build the EXE
-        run: pyinstaller --onefile --windowed --name DrawingBOMStudio drawing_bom_studio.py
+        run: pyinstaller --onefile --windowed --name DrawingBOMStudio --icon robot_icon.ico drawing_bom_studio.py
 
       - name: Upload the EXE artifact
         uses: actions/upload-artifact@v4

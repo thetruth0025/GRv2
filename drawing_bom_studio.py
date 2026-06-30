@@ -45,7 +45,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.19.0 (parts: insert-at-position, stacked removals, table cutoff)"
+__version__ = "2.20.0 (rev/approval format, BOM-shift-free summary, robot icon)"
 
 import argparse
 import datetime
@@ -893,17 +893,25 @@ def _xlsx_replace_member(raw: bytes, member: str, new_text: str) -> bytes:
     return buf.getvalue()
 
 
-def _set_xlsx_cell_inline(sheet_xml: str, ref: str, value: str) -> str:
-    """Set worksheet cell ``ref`` (e.g. 'B5') to ``value`` as an inline string,
-    preserving the cell's existing style attribute. Inserts the cell in column
-    order if its row has no such cell yet."""
+def _set_xlsx_cell_inline(sheet_xml: str, ref: str, value: str,
+                          style: Optional[int] = None) -> str:
+    """Set worksheet cell ``ref`` (e.g. 'B5') to ``value`` as an inline string.
+    Preserves the cell's existing style unless ``style`` (a cellXfs index) is
+    given, in which case the cell's ``s`` attribute is forced to it. Inserts the
+    cell in column order if its row has no such cell yet."""
     esc = _xml_escape(value)
     new_cell = (f'<c r="{ref}"{{attrs}} t="inlineStr">'
                 f'<is><t xml:space="preserve">{esc}</t></is></c>')
 
     def _clean_attrs(attrs: str) -> str:
-        # Drop any existing type attribute; keep the style (s=...) and the rest.
-        return re.sub(r'\s+t="[^"]*"', "", attrs)
+        # Drop any existing type attribute; keep the rest.
+        attrs = re.sub(r'\s+t="[^"]*"', "", attrs)
+        if style is not None:  # force the style index for this cell
+            attrs = re.sub(r'\s+s="[^"]*"', "", attrs)
+            attrs = f' s="{style}"' + attrs
+        return attrs
+
+    fresh_attrs = f' s="{style}"' if style is not None else ""
 
     m = re.search(r'<c r="%s"([^>]*?)/>' % re.escape(ref), sheet_xml)
     if m:
@@ -932,7 +940,7 @@ def _set_xlsx_cell_inline(sheet_xml: str, ref: str, value: str) -> str:
         if _col_index(cm.group(1)) > _col_index(col):
             insert_at = cm.start()
             break
-    new = new_cell.format(attrs="")
+    new = new_cell.format(attrs=fresh_attrs)
     body = body[:insert_at] + new + body[insert_at:]
     return (sheet_xml[:rm.start()] + rm.group(1) + body + rm.group(3)
             + sheet_xml[rm.end():])
@@ -1074,6 +1082,62 @@ def embedded_revtable_rev_letters(xlsx_bytes: bytes) -> List[str]:
             if (rv or "").strip()]
 
 
+# The format every revision-table / approval value is written in: Calibri 8,
+# centered horizontally and vertically (middle).
+_REVTEXT_FONT = '<font><sz val="8"/><name val="Calibri"/><family val="2"/></font>'
+
+
+def _ensure_revtext_style(xlsx_bytes: bytes):
+    """Ensure the embedded workbook's styles include a cell format of **Calibri
+    8, centered both ways** and return (xlsx_bytes, style_index). Returns
+    (xlsx_bytes, None) if the styles can't be edited (cells then keep their own
+    format). Reuses the style if it's already present."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+    except (zipfile.BadZipFile, OSError):
+        return xlsx_bytes, None
+    if "xl/styles.xml" not in z.namelist():
+        return xlsx_bytes, None
+    styles = z.read("xl/styles.xml").decode("utf-8", "replace")
+
+    fm = re.search(r'(<fonts\b[^>]*\bcount=")(\d+)("[^>]*>)(.*?)(</fonts>)',
+                   styles, re.S)
+    xm0 = re.search(r'<cellXfs\b', styles)
+    if not fm or not xm0:
+        return xlsx_bytes, None
+    font_blocks = re.findall(r'<font\b[^>]*/>|<font\b.*?</font>',
+                             fm.group(4), re.S)
+
+    def is_cal8(b):
+        return ('val="8"' in b and "Calibri" in b
+                and "<b/>" not in b and "<i/>" not in b)
+
+    fidx = next((i for i, b in enumerate(font_blocks) if is_cal8(b)), None)
+    if fidx is None:
+        fidx = len(font_blocks)
+        styles = (styles[:fm.start()] + fm.group(1) + str(int(fm.group(2)) + 1)
+                  + fm.group(3) + fm.group(4) + _REVTEXT_FONT + fm.group(5)
+                  + styles[fm.end():])
+
+    xm = re.search(r'(<cellXfs\b[^>]*\bcount=")(\d+)("[^>]*>)(.*?)(</cellXfs>)',
+                   styles, re.S)
+    if not xm:
+        return xlsx_bytes, None
+    xf_blocks = re.findall(r'<xf\b[^>]*/>|<xf\b.*?</xf>', xm.group(4), re.S)
+    sidx = next((i for i, b in enumerate(xf_blocks)
+                 if f'fontId="{fidx}"' in b and 'horizontal="center"' in b
+                 and 'vertical="center"' in b), None)
+    if sidx is None:
+        sidx = len(xf_blocks)
+        new_xf = (f'<xf numFmtId="0" fontId="{fidx}" fillId="0" borderId="0" '
+                  f'xfId="0" applyFont="1" applyAlignment="1">'
+                  f'<alignment horizontal="center" vertical="center"/></xf>')
+        styles = (styles[:xm.start()] + xm.group(1) + str(int(xm.group(2)) + 1)
+                  + xm.group(3) + xm.group(4) + new_xf + xm.group(5)
+                  + styles[xm.end():])
+    return _xlsx_replace_member(xlsx_bytes, "xl/styles.xml", styles), sidx
+
+
 def add_revision_entry_to_embedded(xlsx_bytes: bytes, entry: dict):
     """Add a revision row to an embedded-Excel revision table. Returns
     (bytes, status): 'filled' (reused a pre-formatted blank row), 'appended'
@@ -1100,9 +1164,11 @@ def add_revision_entry_to_embedded(xlsx_bytes: bytes, entry: dict):
         sheet_xml = _append_embedded_row(
             sheet_xml, info["last_data_row"], target)
         status = "appended"
+    # Force the added values to Calibri 8, centered/middle.
+    xlsx_bytes, style = _ensure_revtext_style(xlsx_bytes)
     for col, f in writable.items():
         sheet_xml = _set_xlsx_cell_inline(sheet_xml, f"{col}{target}",
-                                          values[f])
+                                          values[f], style=style)
     new_bytes = _xlsx_replace_member(xlsx_bytes, info["sheet_member"],
                                      sheet_xml)
     # The OLE object only displays the range named by <oleSize>; extend it so
@@ -1188,8 +1254,11 @@ def add_approval_to_embedded(xlsx_bytes: bytes, rev_letter: str, name: str):
                    if (rv or "").strip().upper() == want), None)
     if target is None:
         return xlsx_bytes, "row_not_found"
+    # Force the approver's name to Calibri 8, centered/middle.
+    xlsx_bytes, style = _ensure_revtext_style(xlsx_bytes)
     sheet_xml = _set_xlsx_cell_inline(info["sheet_xml"],
-                                      f"{appr_col}{target}", name.strip())
+                                      f"{appr_col}{target}", name.strip(),
+                                      style=style)
     new_bytes = _xlsx_replace_member(xlsx_bytes, info["sheet_member"],
                                      sheet_xml)
     # The approved row may itself be past the displayed range; include it.
@@ -3811,6 +3880,93 @@ def _cell_label(rows_out: dict, col: int, row: int, headers: dict) -> str:
     return headers.get(col, "")
 
 
+def _bom_seq_cols(rows: dict, col_field: dict, header_row: int) -> set:
+    """The sequence / Item-number columns of a parts/BOM table -- the ones the
+    row diff ignores, so renumbering after an add/remove isn't a 'change'.
+
+    Scans every column present in the data rows (not just the recognized header
+    fields), because the Item/line-number column often isn't a named field."""
+    data = _table_data_rownums(rows, col_field, header_row)
+    all_cols = ({c for rn in data for c in rows.get(rn, {})} | set(col_field))
+    seq = set(_detect_seq_cols(rows, data, list(all_cols)))
+    seq.update(c for c, f in col_field.items() if f == "Item")
+    return seq
+
+
+def _diff_bom_table(rows_i: dict, rows_o: dict, col_field: dict,
+                    header_row: int, location: str) -> list:
+    """Diff a parts/BOM table by **row identity**, not by cell position.
+
+    A part that merely shifted up (and was renumbered) because another part was
+    added/removed is NOT reported -- only genuine field edits (matched by Part
+    Number), parts added, and parts removed are. The Item/line-number column is
+    ignored entirely."""
+    from collections import Counter
+    all_cols = ({c for r in list(rows_i.values()) + list(rows_o.values())
+                 for c in r} | set(col_field))
+    seq_cols = (_bom_seq_cols(rows_i, col_field, header_row)
+                | _bom_seq_cols(rows_o, col_field, header_row))
+    val_cols = [c for c in sorted(all_cols, key=_col_index)
+                if c not in seq_cols]
+    pn_col = next((c for c, f in col_field.items() if f == "Part Number"), None)
+    desc_col = next((c for c, f in col_field.items()
+                     if f == "Description"), None)
+
+    def rows_list(rows):
+        return [dict(rows.get(rn, {}))
+                for rn in _table_data_rownums(rows, col_field, header_row)]
+
+    def sig(cells):
+        return tuple((cells.get(c) or "").strip() for c in val_cols)
+
+    def pn_of(cells):
+        return (cells.get(pn_col) or "").strip() if pn_col else ""
+
+    def label(cells):
+        pn = pn_of(cells)
+        desc = (cells.get(desc_col) or "").strip() if desc_col else ""
+        return " — ".join(p for p in (pn, desc) if p) or "(row)"
+
+    bi, bo = rows_list(rows_i), rows_list(rows_o)
+    rep_i = {sig(r): r for r in bi}
+    rep_o = {sig(r): r for r in bo}
+    removed = list((Counter(sig(r) for r in bi)
+                    - Counter(sig(r) for r in bo)).elements())
+    added = list((Counter(sig(r) for r in bo)
+                  - Counter(sig(r) for r in bi)).elements())
+
+    changes = []
+    # Pair a removed row with an added row of the same Part Number -> that's an
+    # in-place field edit (e.g. via find & edit), reported field by field.
+    rem_by_pn, add_by_pn = {}, {}
+    for s in removed:
+        rem_by_pn.setdefault(pn_of(rep_i[s]), []).append(s)
+    for s in added:
+        add_by_pn.setdefault(pn_of(rep_o[s]), []).append(s)
+    used_rem, used_add = Counter(), Counter()
+    for pn, rlist in rem_by_pn.items():
+        if not pn or pn not in add_by_pn:
+            continue
+        for rs, as_ in zip(rlist, add_by_pn[pn]):
+            ri, ro = rep_i[rs], rep_o[as_]
+            for c in val_cols:
+                bef = (ri.get(c) or "").strip()
+                aft = (ro.get(c) or "").strip()
+                if bef != aft:
+                    changes.append({
+                        "location": location, "field": col_field.get(c, ""),
+                        "before": bef, "after": aft})
+            used_rem[rs] += 1
+            used_add[as_] += 1
+    for s in (Counter(removed) - used_rem).elements():
+        changes.append({"location": location, "field": "Part removed",
+                        "before": label(rep_i[s]), "after": ""})
+    for s in (Counter(added) - used_add).elements():
+        changes.append({"location": location, "field": "Part added",
+                        "before": "", "after": label(rep_o[s])})
+    return changes
+
+
 def _diff_xlsx(in_path, out_path) -> list:
     changes = []
     with zipfile.ZipFile(in_path) as zi, zipfile.ZipFile(out_path) as zo:
@@ -3823,6 +3979,14 @@ def _diff_xlsx(in_path, out_path) -> list:
                 xml_i = zi.read(part).decode("utf-8", "replace")
                 xml_o = zo.read(part).decode("utf-8", "replace")
             except KeyError:
+                continue
+            # A BOM sheet is diffed by row identity, so a part that shifted up
+            # (and got renumbered) when another was added/removed isn't reported.
+            bom_i = _excel_bom_table(zi, part, shi)
+            bom_o = _excel_bom_table(zo, part, sho)
+            if bom_i and bom_o:
+                changes.extend(_diff_bom_table(
+                    bom_i[0], bom_o[0], bom_i[1], bom_i[2], sheet_name))
                 continue
             ci = _read_sheet_cells(xml_i, shi)
             co = _read_sheet_cells(xml_o, sho)
@@ -3927,6 +4091,11 @@ def _diff_vsdx_embeddings(zi: zipfile.ZipFile, zo: zipfile.ZipFile) -> list:
         hrow = info["header_row"] if info else 0
         if bom:
             location = page_names.get(member) or "Parts table"
+            # Parts tables are diffed by row identity, so a part that shifted up
+            # (and got renumbered) on an add/remove isn't reported as a change.
+            changes.extend(_diff_bom_table(
+                rows_i, rows_o, col_field, hrow, location))
+            continue
         elif rev:
             location = "Revision table"
         else:
@@ -4519,6 +4688,8 @@ HELP_SECTIONS = [
         "with **matching border lines** drawn around it.",
         "* If no table is confidently found on a file, that file is **left "
         "unchanged** (the Status box says so) — it never risks the drawing.",
+        "* In an embedded-Excel revision table, the values are written "
+        "**Calibri 8, centered and middle-aligned** to match the table.",
     ]),
     ("Step 2 (Visio only) — Approve a revision", [
         "Click **Visio: approve revision...** to sign off a revision without "
@@ -4532,6 +4703,8 @@ HELP_SECTIONS = [
         "embedded Excel table).",
         "* An approval **does not bump the revision**; the copy is named "
         "**<name>_approved_<today's date>** so it's clearly a sign-off.",
+        "* In an embedded-Excel revision table, the name is written "
+        "**Calibri 8, centered and middle-aligned** to match the table.",
     ]),
     ("Step 3 — Options", [
         "* **Case sensitive** / **Whole word only** — control matching.",
@@ -4676,6 +4849,42 @@ def _enable_high_dpi() -> None:
         pass
 
 
+def build_robot_icon(size, Image, ImageDraw):
+    """Draw the app's mascot -- a friendly blue robot -- at ``size`` px and
+    return an RGBA PIL Image. Rendered super-sampled, then downscaled, so the
+    rounded corners stay smooth. ``Image``/``ImageDraw`` are passed in so this
+    works whether Pillow was imported at module or call scope."""
+    ss = 8
+    s = size * ss
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    u = s / 100.0
+    body = (37, 99, 235, 255)        # accent blue
+    body_dk = (29, 78, 216, 255)
+    metal = (203, 213, 225, 255)     # light steel
+    glow = (34, 211, 238, 255)       # cyan eyes / mouth
+    face = (15, 23, 42, 255)         # near-black face plate
+    # antenna + bobble
+    d.line([(50 * u, 6 * u), (50 * u, 22 * u)], fill=metal, width=int(3 * u))
+    d.ellipse([42 * u, 0, 58 * u, 14 * u], fill=glow, outline=body_dk,
+              width=max(1, int(1.5 * u)))
+    # ears
+    d.rounded_rectangle([8 * u, 42 * u, 20 * u, 64 * u], radius=4 * u, fill=metal)
+    d.rounded_rectangle([80 * u, 42 * u, 92 * u, 64 * u], radius=4 * u,
+                        fill=metal)
+    # head + face plate
+    d.rounded_rectangle([18 * u, 20 * u, 82 * u, 82 * u], radius=16 * u,
+                        fill=body, outline=body_dk, width=int(2.5 * u))
+    d.rounded_rectangle([26 * u, 30 * u, 74 * u, 72 * u], radius=10 * u,
+                        fill=face)
+    # eyes + smile
+    d.ellipse([33 * u, 40 * u, 45 * u, 52 * u], fill=glow)
+    d.ellipse([55 * u, 40 * u, 67 * u, 52 * u], fill=glow)
+    d.arc([38 * u, 50 * u, 62 * u, 68 * u], start=15, end=165, fill=glow,
+          width=int(3 * u))
+    return img.resize((size, size), Image.LANCZOS)
+
+
 def launch_gui() -> int:
     # Imported lazily so the core logic / CLI work without a display.
     import threading
@@ -4813,6 +5022,16 @@ def launch_gui() -> int:
         def __init__(self, root: "tk.Tk"):
             self.root = root
             root.title(f"Drawing & BOM Studio   [v{__version__}]")
+            # Friendly robot window/taskbar icon (Pillow-drawn; skipped if no PIL).
+            if _HAVE_PIL:
+                try:
+                    self._icon_imgs = [
+                        ImageTk.PhotoImage(
+                            build_robot_icon(sz, Image, ImageDraw))
+                        for sz in (16, 24, 32, 48, 64)]
+                    root.iconphoto(True, *self._icon_imgs)
+                except Exception:  # noqa: BLE001
+                    pass
             # The window is sized in pixels, so grow it to match the display's
             # DPI (otherwise it's tiny and cramped on high-DPI screens now that
             # the app renders at the real resolution) -- but never larger than
