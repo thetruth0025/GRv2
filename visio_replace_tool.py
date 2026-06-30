@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.10 (report whether the revision picture could be auto-updated)"
+__version__ = "2.16.11 (extend OLE oleSize so a new revision row is actually shown)"
 
 import argparse
 import datetime
@@ -1097,8 +1097,36 @@ def add_revision_entry_to_embedded(xlsx_bytes: bytes, entry: dict):
     for col, f in writable.items():
         sheet_xml = _set_xlsx_cell_inline(sheet_xml, f"{col}{target}",
                                           values[f])
-    return _xlsx_replace_member(xlsx_bytes, info["sheet_member"],
-                                sheet_xml), status
+    new_bytes = _xlsx_replace_member(xlsx_bytes, info["sheet_member"],
+                                     sheet_xml)
+    # The OLE object only displays the range named by <oleSize>; extend it so
+    # the new row is actually inside the area Visio shows (THIS is what makes
+    # the row appear in the drawing without opening the object).
+    new_bytes = _extend_olesize(new_bytes, target)
+    return new_bytes, status
+
+
+def _extend_olesize(xlsx_bytes: bytes, end_row: int) -> bytes:
+    """Grow the embedded workbook's <oleSize ref="A1:E7"/> so its bottom row is
+    at least ``end_row`` -- the range that the embedded object actually shows in
+    the drawing. No-op if there's no oleSize or it already covers the row."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+    except (zipfile.BadZipFile, OSError):
+        return xlsx_bytes
+    if "xl/workbook.xml" not in z.namelist():
+        return xlsx_bytes
+    wb = z.read("xl/workbook.xml").decode("utf-8", "replace")
+    m = re.search(r'<oleSize ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"', wb)
+    if not m:
+        return xlsx_bytes
+    cur_end = int(m.group(4))
+    if cur_end >= end_row:
+        return xlsx_bytes
+    new_ref = (f'<oleSize ref="{m.group(1)}{m.group(2)}:'
+               f'{m.group(3)}{end_row}"')
+    wb = wb[:m.start()] + new_ref + wb[m.end():]
+    return _xlsx_replace_member(xlsx_bytes, "xl/workbook.xml", wb)
 
 
 def _append_embedded_row(sheet_xml: str, src_row: int, new_row: int) -> str:
@@ -1151,8 +1179,10 @@ def add_approval_to_embedded(xlsx_bytes: bytes, rev_letter: str, name: str):
         return xlsx_bytes, "row_not_found"
     sheet_xml = _set_xlsx_cell_inline(info["sheet_xml"],
                                       f"{appr_col}{target}", name.strip())
-    return _xlsx_replace_member(xlsx_bytes, info["sheet_member"],
-                                sheet_xml), "approved"
+    new_bytes = _xlsx_replace_member(xlsx_bytes, info["sheet_member"],
+                                     sheet_xml)
+    # The approved row may itself be past the displayed range; include it.
+    return _extend_olesize(new_bytes, target), "approved"
 
 
 # --- Cached OLE presentation (EMF) -------------------------------------------
@@ -2004,9 +2034,15 @@ def apply_bom_edits_to_embedded(xlsx_bytes: bytes, cells: list) -> bytes:
     if not parsed:
         return xlsx_bytes
     sheet_member, sheet_xml, _rows = parsed
+    max_row = 0
     for ed in cells:
         sheet_xml = _set_xlsx_cell_inline(sheet_xml, ed["ref"], ed["new"])
-    return _xlsx_replace_member(xlsx_bytes, sheet_member, sheet_xml)
+        rm = re.search(r"\d+", ed["ref"])
+        if rm:
+            max_row = max(max_row, int(rm.group(0)))
+    new_bytes = _xlsx_replace_member(xlsx_bytes, sheet_member, sheet_xml)
+    # Make sure every edited row is inside the range the OLE object displays.
+    return _extend_olesize(new_bytes, max_row)
 
 
 def _revtable_page_part(zin: zipfile.ZipFile) -> Optional[str]:
