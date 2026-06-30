@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.5 (font-native spacing for text drawn into OLE pictures)"
+__version__ = "2.16.6 (approval: fix Approved-column placement + auto-detect latest rev)"
 
 import argparse
 import datetime
@@ -1338,10 +1338,15 @@ def approve_revision_in_emf(emf: bytes, rev_letter: str,
         if not data_rows or "Approved By" not in header[1] \
                 or "Rev" not in header[1]:
             return None
+        header_fields = header[1]
         charw, default_w = _emf_char_widths(records)
-        rev_x = header[1]["Rev"]
-        appr_x = header[1]["Approved By"]
+        rev_x = header_fields["Rev"]
+        appr_x = header_fields["Approved By"]
         want = rev_letter.strip().upper()
+
+        def nearest_field(cx):
+            return min(header_fields, key=lambda f: abs(header_fields[f] - cx))
+
         target_row = None
         for y, cells in data_rows:
             rev_cell = min(cells, key=lambda c: abs(c["refx"] - rev_x))
@@ -1351,9 +1356,13 @@ def approve_revision_in_emf(emf: bytes, rev_letter: str,
         if target_row is None:
             return None
         y, cells = target_row
-        appr_cell = min(cells, key=lambda c: abs(c["refx"] - appr_x))
-        if abs(appr_cell["refx"] - appr_x) <= max(20, (appr_x - rev_x) // 4):
-            # That row has an Approved cell (blank or filled): overwrite it.
+        # The Approved cell is one whose column (by nearest header) really is
+        # "Approved By" -- so a blank Approved column doesn't get mistaken for
+        # the Date cell next to it.
+        appr_cells = [c for c in cells
+                      if nearest_field(c["refx"]) == "Approved By"]
+        if appr_cells:
+            appr_cell = min(appr_cells, key=lambda c: abs(c["refx"] - appr_x))
             new_rec = _build_emf_text_record(emf, appr_cell, name.strip(),
                                              appr_cell["refy"], charw,
                                              default_w)
@@ -1361,16 +1370,16 @@ def approve_revision_in_emf(emf: bytes, rev_letter: str,
                             + emf[appr_cell["off"] + appr_cell["size"]:])
             _emf_set_counts(out, len(new_rec) - appr_cell["size"], 0)
             return bytes(out)
-        # No Approved cell drawn on that row: add one, cloning the Rev cell's
-        # style at the Approved column's X.
-        rev_cell = min(cells, key=lambda c: abs(c["refx"] - rev_x))
-        tmpl = dict(rev_cell)
+        # No Approved cell drawn on that row yet: add one at the Approved
+        # column's X, cloning a sibling cell's text state, inserted after the
+        # row's last cell so the same font/colour is in effect.
+        tmpl = dict(cells[0])
         tmpl["refx"] = appr_x
-        tmpl["bounds"] = (appr_x, rev_cell["bounds"][1], appr_x,
-                          rev_cell["bounds"][3])
+        tmpl["bounds"] = (appr_x, cells[0]["bounds"][1], appr_x,
+                          cells[0]["bounds"][3])
         new_rec = _build_emf_text_record(emf, tmpl, name.strip(), y,
                                          charw, default_w)
-        insert_at = appr_cell["off"] + appr_cell["size"]
+        insert_at = max(c["off"] + c["size"] for c in cells)
         out = bytearray(emf[:insert_at] + new_rec + emf[insert_at:])
         _emf_set_counts(out, len(new_rec), 1)
         return bytes(out)
@@ -1945,6 +1954,13 @@ def vsdx_revtable_rev_letters(path) -> List[str]:
     except (zipfile.BadZipFile, OSError, KeyError):
         pass
     return []
+
+
+def vsdx_latest_revision_letter(path) -> str:
+    """The most recently added revision letter in a file's revision table --
+    the last filled row -- used to auto-target the approval. '' if none."""
+    letters = vsdx_revtable_rev_letters(path)
+    return letters[-1] if letters else ""
 
 
 def replace_text_in_vsdx(
@@ -3762,12 +3778,15 @@ HELP_SECTIONS = [
         "unchanged** (the Status box says so) — it never risks the drawing.",
     ]),
     ("Step 2 (Visio only) — Approve a revision", [
-        "Click **Visio: approve revision...** to sign off a specific revision "
-        "without opening the drawing. Enter the **REV letter** you're approving "
-        "and your **name**.",
-        "* The dialog lists the **revision letters found** in the table.",
-        "* On run, your name is written into the **Approved** column of the row "
-        "with that REV letter, in every loaded Visio file's revision table.",
+        "Click **Visio: approve revision...** to sign off a revision without "
+        "opening the drawing. Just type your **name**.",
+        "* By default it signs off **each file's own latest revision**, "
+        "auto-detected per file (the dialog shows the latest letter found in "
+        "each). Leave **REV letter** blank for that, or type a letter to force "
+        "a specific one.",
+        "* On run, your name goes into the **Approved** column of that revision "
+        "row, in every loaded Visio file's revision table (native cells or an "
+        "embedded Excel table).",
         "* An approval **does not bump the revision**; the copy is named "
         "**<name>_approved_<today's date>** so it's clearly a sign-off.",
     ]),
@@ -5370,49 +5389,57 @@ def launch_gui() -> int:
                     "No Visio files", "Add at least one .vsdx file first."
                 )
                 return
-            letters = sorted({l for f in vsdx_files
-                              for l in vsdx_revtable_rev_letters(f)})
+            # Detect each file's latest (most recent) revision letter.
+            latest = {Path(f).name: vsdx_latest_revision_letter(f)
+                      for f in vsdx_files}
+            found = "; ".join(f"{n}: {l}" for n, l in latest.items() if l)
+            avail = (f"Latest revision per file — {found}."
+                     if found else "No revision letters were detected; you can "
+                     "still enter one to try.")
             win = tk.Toplevel(self.root)
             win.title("Approve a Visio revision")
             win.transient(self.root)
             win.grab_set()
             win.configure(bg=self.palette["bg"])
-            avail = (f"Revision letters found: {', '.join(letters)}."
-                     if letters else "No revision letters were detected; you "
-                     "can still enter one.")
             ttk.Label(
-                win, wraplength=560, justify="left",
+                win, wraplength=580, justify="left",
                 text="Sign off a revision: your name is written into the "
-                "Approved column of the row with the REV letter you enter, in "
-                "the cover-page revision table of every loaded Visio file.\n\n"
+                "Approved column of a revision row, in the revision table of "
+                "every loaded Visio file. By default it signs off each file's "
+                "OWN latest revision (auto-detected per file) — so a batch at "
+                "different revisions each gets the right row. Leave the REV "
+                "field blank for that, or type a specific letter to force one.\n\n"
                 + avail,
             ).pack(fill="x", padx=10, pady=8)
 
             form = ttk.Frame(win)
             form.pack(fill="x", padx=10, pady=4)
+            r2 = ttk.Frame(form)
+            r2.pack(fill="x", pady=3)
+            ttk.Label(r2, text="Approver name:", width=20).pack(side="left")
+            name_e = ttk.Entry(r2, width=38)
+            name_e.insert(0, self.visio_approval.get("name", ""))
+            name_e.pack(side="left", fill="x", expand=True)
             r1 = ttk.Frame(form)
             r1.pack(fill="x", pady=3)
-            ttk.Label(r1, text="REV letter:", width=14).pack(side="left")
+            ttk.Label(r1, text="REV letter (blank = latest):",
+                      width=20).pack(side="left")
             rev_e = ttk.Entry(r1, width=10)
             rev_e.insert(0, self.visio_approval.get("rev", ""))
             rev_e.pack(side="left")
-            r2 = ttk.Frame(form)
-            r2.pack(fill="x", pady=3)
-            ttk.Label(r2, text="Approver name:", width=14).pack(side="left")
-            name_e = ttk.Entry(r2, width=40)
-            name_e.insert(0, self.visio_approval.get("name", ""))
-            name_e.pack(side="left", fill="x", expand=True)
 
             def apply():
                 rev = rev_e.get().strip()
                 name = name_e.get().strip()
-                if not rev or not name:
+                if not name:
                     self.visio_approval = {}
                     self.log("Visio approval cleared.")
                 else:
                     self.visio_approval = {"rev": rev, "name": name}
                     self.log(
-                        f"Staged Visio approval: REV {rev} by {name}."
+                        "Staged Visio approval by " + name + " on "
+                        + (f"REV {rev}." if rev
+                           else "each file's latest revision.")
                     )
                 win.destroy()
 
@@ -5649,8 +5676,16 @@ def launch_gui() -> int:
                     staged_rev_entry = (visio_rev_entry
                                         if (visio_rev_entry and is_vsdx)
                                         else None)
-                    appr = visio_approval if (visio_approval
-                                              and is_vsdx) else None
+                    # Visio approval: by default sign off THIS file's own
+                    # latest revision (auto-detected); a typed REV overrides it.
+                    appr = None
+                    if visio_approval and is_vsdx and visio_approval.get("name"):
+                        rev = (visio_approval.get("rev") or "").strip()
+                        if not rev:
+                            rev = vsdx_latest_revision_letter(f)
+                        if rev:
+                            appr = {"rev": rev,
+                                    "name": visio_approval["name"]}
                     # Parts-table edits = the staged field edits from the
                     # editor PLUS Part Number replacements driven by the
                     # Find->Replace rules (the embedded tables aren't reached by

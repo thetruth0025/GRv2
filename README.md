@@ -289,13 +289,16 @@ be tuned to it.
 An approver can sign off **every** loaded file in one click, without opening
 each drawing/workbook by hand.
 
-**Visio — approve a revision.** Click **Visio: approve revision...**, enter the
-**REV letter** you're approving and your **name**. The dialog lists the revision
-letters it found. On **Replace & Convert**, your name is written into the
-**Approved** column of the row with that REV letter, in each loaded Visio file's
-cover-page revision table — whether that table is native Visio text cells or an
-embedded Excel worksheet. (For a native table, if that row had no Approved cell
-yet, one is created from a sibling row so the formatting matches.)
+**Visio — approve a revision.** Click **Visio: approve revision...** and type
+your **name**. By default it signs off **each file's own latest revision**,
+auto-detected per file — so a batch of drawings at different revisions each gets
+the correct row (the dialog shows the latest letter found in each file). Leave
+the **REV letter** field blank for that, or type a specific letter to force one.
+On **Replace & Convert**, your name is written into the **Approved** column of
+that revision row, in each loaded Visio file's revision table — whether that
+table is native Visio text cells or an embedded Excel worksheet. If that row had
+no Approved entry yet, one is added in the Approved column (not the Date
+column).
 
 **Excel — approve by discipline.** Click **Excel: approve (EE/ME/Prod)...**,
 pick the **discipline** (**EE**, **ME**, or **Production**) and type your
