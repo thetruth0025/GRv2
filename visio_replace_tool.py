@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.9 (grow OLE revision table so new rows aren't clipped in view)"
+__version__ = "2.16.10 (report whether the revision picture could be auto-updated)"
 
 import argparse
 import datetime
@@ -1494,21 +1494,43 @@ def approve_revision_in_emf(emf: bytes, rev_letter: str,
 def _embedded_emf_member(zin: zipfile.ZipFile,
                          xlsx_member: str) -> Optional[str]:
     """The cached-presentation EMF linked from an embedded worksheet's .rels."""
+    member, _ext = _embedded_presentation(zin, xlsx_member)
+    return member if (_ext == "emf") else None
+
+
+def _embedded_presentation(zin: zipfile.ZipFile, xlsx_member: str):
+    """The cached-presentation image an OLE object is displayed from, of ANY
+    format. Returns (member, ext) -- ext lower-case without the dot -- or
+    (None, None). Only EMF can be patched; other formats (PNG/BMP/WMF/...) are
+    raster/opaque, so the picture can't be edited in place."""
     rels = posixpath.join(posixpath.dirname(xlsx_member), "_rels",
                           posixpath.basename(xlsx_member) + ".rels")
     names = set(zin.namelist())
     if rels not in names:
-        return None
+        return None, None
     try:
         text = zin.read(rels).decode("utf-8", "replace")
     except (KeyError, OSError):
-        return None
-    m = re.search(r'Target="([^"]*\.emf)"', text, re.IGNORECASE)
-    if not m:
-        return None
+        return None, None
+    # Prefer an EMF (patchable); otherwise take whatever image is linked.
+    targets = re.findall(
+        r'Type="[^"]*/image"[^>]*Target="([^"]+)"'
+        r'|Target="([^"]+)"[^>]*Type="[^"]*/image"', text, re.IGNORECASE)
+    images = [a or b for a, b in targets]
+    if not images:
+        images = re.findall(
+            r'Target="([^"]+\.(?:emf|wmf|png|bmp|jpe?g|gif|tiff?))"', text,
+            re.IGNORECASE)
+    if not images:
+        return None, None
+    images.sort(key=lambda t: 0 if t.lower().endswith(".emf") else 1)
+    chosen = images[0]
     resolved = posixpath.normpath(
-        posixpath.join(posixpath.dirname(xlsx_member), m.group(1)))
-    return resolved if resolved in names else None
+        posixpath.join(posixpath.dirname(xlsx_member), chosen))
+    if resolved not in names:
+        return None, None
+    ext = chosen.rsplit(".", 1)[-1].lower() if "." in chosen else ""
+    return resolved, ext
 
 
 # Backwards-compatible alias (the revision-table code used the old name).
@@ -2127,6 +2149,7 @@ def replace_text_in_vsdx(
     table_page = None
     table_embed = None
     table_embed_emf = None
+    rev_picture = "na"  # na/native/patched/patch_failed/unsupported/no_picture
     with zipfile.ZipFile(in_path, "r") as zin:
         page_count = sum(1 for n in zin.namelist()
                          if _PAGE_NAME_RE.search(n))
@@ -2134,15 +2157,21 @@ def replace_text_in_vsdx(
         # table (often not page1.xml -- part numbers follow creation order).
         if do_table or do_approval:
             table_page = _revtable_page_part(zin)
+            if table_page:
+                rev_picture = "native"
             # Some drawings keep the revision history as an embedded Excel OLE
             # object instead of native Visio text cells -- handle that too, and
             # patch its cached presentation (EMF) so the change shows without
             # the user having to open the object in Visio.
-            if not table_page:
+            else:
                 table_embed = _embedded_revtable_member(zin)
                 if table_embed:
                     table_embed_emf = _embedded_revtable_emf_member(
                         zin, table_embed)
+                    if not table_embed_emf:
+                        # There's a presentation, but not an EMF we can edit.
+                        pres, ext = _embedded_presentation(zin, table_embed)
+                        rev_picture = ("unsupported" if pres else "no_picture")
         # If adding the row pushes it below the OLE object's visible window,
         # grow that object's shape so Visio shows the new row in the page view
         # (otherwise it's only visible after opening the object).
@@ -2210,6 +2239,8 @@ def replace_text_in_vsdx(
                     # Visio shows the new row/approval without re-activating.
                     if do_table:
                         patched = add_revision_row_to_emf(data, rev_entry)
+                        rev_picture = ("patched" if patched is not None
+                                       else "patch_failed")
                         if patched is not None:
                             data = patched
                     if do_approval:
@@ -2217,6 +2248,8 @@ def replace_text_in_vsdx(
                             data, approval["rev"], approval["name"])
                         if patched is not None:
                             data = patched
+                            if do_table is False:
+                                rev_picture = "patched"
                 elif item.filename in bom_cell_edits:
                     # A parts-table (Cable BOM) edit: update the worksheet data.
                     cells = bom_cell_edits[item.filename]["cells"]
@@ -2240,7 +2273,8 @@ def replace_text_in_vsdx(
     return {"total": total, "by_part": by_part, "rev_drawing": rev_status,
             "rev_sheets": rev_sheets, "rev_table": table_status,
             "approval": approval_status, "page_count": page_count,
-            "rev_table_page": table_loc, "bom_cells": bom_cells}
+            "rev_table_page": table_loc, "bom_cells": bom_cells,
+            "rev_picture": rev_picture}
 
 
 # ---------------------------------------------------------------------------
@@ -6032,6 +6066,28 @@ def launch_gui() -> int:
                             }.get(report.get("rev_table"))
                             if tnote:
                                 self.log(tnote)
+                            # Tell the user whether the displayed picture (the
+                            # embedded OLE object) was updated, since that's the
+                            # part that has to refresh for the row to be seen.
+                            pic = {
+                                "patched":
+                                    "    revision picture updated (shows in "
+                                    "Visio without opening the object)",
+                                "patch_failed":
+                                    "    (couldn't update the revision picture; "
+                                    "open the table once in Visio to refresh "
+                                    "it)",
+                                "unsupported":
+                                    "    (the revision table's picture isn't an "
+                                    "EMF, so it can't be auto-updated; open the "
+                                    "table once in Visio to refresh it)",
+                                "no_picture":
+                                    "    (no cached picture found for the "
+                                    "revision table; open it once in Visio to "
+                                    "refresh it)",
+                            }.get(report.get("rev_picture"))
+                            if pic:
+                                self.log(pic)
                         if appr:
                             anote = {
                                 "approved":
