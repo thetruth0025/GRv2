@@ -1,17 +1,28 @@
-# Visio / Excel Text Replacer
+# Drawing & BOM Studio
 
-A small desktop app that finds and replaces text **everywhere it appears** in
-Microsoft **Visio drawings (`.vsdx`)** and **Excel workbooks (`.xlsx`)**, makes a
-next-revision copy, and optionally exports to PDF.
+A desktop app for editing Microsoft **Visio drawings (`.vsdx`)** and **Excel
+workbooks (`.xlsx`)** in bulk. It streamlines the repetitive edits of a drawing
+release — find/replace, parts add/remove/edit, revisions, approvals, and Change
+Log — makes a next-revision copy of each file, and optionally exports to PDF.
+
+The window has **three tabs that all run together** in a single pass:
+
+- **Find → Replace** — text rules, each aimed at all files or specific ones.
+- **Parts** — add, remove, or edit rows in the Visio parts tables and Excel
+  BOMs, with item/line numbers renumbered automatically.
+- **Approve & Revise** — bump revisions, append revision-table rows, sign off
+  approvals (EE / ME / Production), stamp the Author box, and add Change Log
+  entries.
 
 Workflow:
 
 1. **Choose** a single file — or switch to **Batch** mode and add many files (or
    a whole folder). You can mix `.vsdx` and `.xlsx`; each file's type is
    **detected automatically**.
-2. **Enter** one or more *Find* → *Replace with* rules. Each rule's **in:**
-   dropdown lets you target **all files** or **tick several specific files**.
-3. Click **Replace & Convert**.
+2. **Fill in whichever tabs you need** — Find → Replace rules, Parts add/remove,
+   and Approve & Revise actions. Anything you stage on any tab is applied in the
+   same run.
+3. Click **Run**.
 4. Get a **next-revision copy** of each file next to each original. Your
    originals are never modified.
 
@@ -73,22 +84,22 @@ You have three options, from simplest to most self-contained:
 
 1. **Download a ready-made `.exe` (no Python needed).**
    In the GitHub repo, open the **Actions** tab → the latest **"Build Windows
-   EXE"** run → under **Artifacts**, download **`VisioTextReplacer-windows`**.
-   Unzip it and double-click `VisioTextReplacer.exe`. (PDF export still needs
+   EXE"** run → under **Artifacts**, download **`DrawingBOMStudio-windows`**.
+   Unzip it and double-click `DrawingBOMStudio.exe`. (PDF export still needs
    LibreOffice installed.)
 
-2. **Double-click `run_visio_tool.bat`** (needs Python installed). It launches
-   the app without touching the command line. If Python is missing it tells you
-   where to get it.
+2. **Double-click `run_drawing_bom_studio.bat`** (needs Python installed). It
+   launches the app without touching the command line. If Python is missing it
+   tells you where to get it.
 
 3. **Build your own `.exe` once** by double-clicking **`build_exe.bat`** (needs
-   Python). It installs PyInstaller and produces `dist\VisioTextReplacer.exe`,
+   Python). It installs PyInstaller and produces `dist\DrawingBOMStudio.exe`,
    which you can then move/share and run on its own.
 
 ## Run the app (GUI, any OS)
 
 ```bash
-python visio_replace_tool.py
+python drawing_bom_studio.py
 ```
 
 A window opens:
@@ -105,7 +116,7 @@ A window opens:
    - **All files** (the default) — the rule runs on every file.
    - Or untick "All files" and **tick one or more types** (BOM / System Drawing /
      Cable Drawing) to run the rule only on files of those types.
-3. **Set options (step 3)** and click **Replace & Convert**. Each file is saved
+3. **Set options (step 3)** and click **Run**. Each file is saved
    as its next-revision copy (or `*_edited`) next to the original, and the output
    folder opens when it finishes. The Status box lists what happened per file.
 
@@ -166,7 +177,7 @@ its number. Put the part number in a **Find** box, then click
 4. **Refresh** re-runs the lookup — use it after adding files or changing the
    Find value(s); values you've already typed are kept.
 
-On **Replace & Convert**, each row's staged changes are written to that exact
+On **Run**, each row's staged changes are written to that exact
 cell in that file. Fields you leave unchanged are not touched, numbers stay
 numeric, and the P/N itself is changed by your normal Find → Replace rule.
 
@@ -202,11 +213,40 @@ written **"<P/N> or equiv."** still matches a Find value of just the part number
 — and the **whole** cell (including the "or equiv.") is replaced with your
 Replace value. (To keep "or equiv.", include it in the Replace box.)
 
-On **Replace & Convert**, each change is written to that cell in the embedded
+On **Run**, each change is written to that cell in the embedded
 worksheet **and drawn into the table's cached picture**, so the new value shows
 when the drawing is opened — no need to double-click the table in Visio. (A
 heavily re-wrapped long Description may occasionally need a one-time refresh in
 Visio; short fields are always exact.)
+
+### Parts tab: add or remove parts
+
+The **Parts** tab adds whole rows to — or deletes whole rows from — the Visio
+parts tables and Excel BOMs, and **renumbers the Item / line sequence**
+automatically. It works on the same tables as *find & edit rows* above, and runs
+together with everything else when you click **Run**.
+
+**Remove parts.** Type a part number in the **Remove** box (independent of the
+Find boxes) and click **Find & choose rows to remove...**. Every parts-table /
+BOM row with that part number is listed **per file and sheet**, each with a
+checkbox. Tick the ones to delete and click **Save removals**. On run, each
+ticked row is removed, the rows below it **shift up**, and the item/line numbers
+are renumbered. For Visio this updates the embedded worksheet, the cached
+picture, and the table's display range so the deleted row leaves no blank.
+
+**Add parts.** Click **Add parts...**, then use the dropdowns to pick a **file
+type** (BOM / Cable Drawing / System Drawing), the **file**, and the **sheet /
+table**. The current parts are shown for reference; fill in the blank row(s) at
+the bottom (use **+ Add row** for more) and click **Save**. Leave the item/line
+number blank — it's assigned automatically on run. You can stage new parts on
+several sheets and files before running. On run the new rows are appended to the
+worksheet, the sequence is renumbered, the table's display range grows, and the
+rows are drawn into the cached picture (and the OLE object's frame is enlarged)
+so they show when the drawing opens.
+
+Remove and Add are **staged**, not applied immediately: nothing changes until
+you click **Run**, and they apply alongside the Find → Replace rules and the
+Approve & Revise actions in the same pass.
 
 ### The "Change Log" sheet is protected
 
@@ -216,7 +256,7 @@ term appears in a change description there).
 
 To add an entry to it, click **Excel: add Change Log entry...** and fill in the
 columns — **Item**, **ECN #** (or **ECO#**), **ERB Approval Date**, **Change
-Description**, **Change Author**. On **Replace & Convert**, that row is
+Description**, **Change Author**. On **Run**, that row is
 **appended to the Change Log sheet of every Excel file**, at the next free row.
 The next row is found using the **ECN #** column (so it works even when the Item
 numbers run past the last real entry). Leave **Item** blank to keep any
@@ -226,7 +266,7 @@ pre-filled item number; leave any field blank to skip it.
 
 Many BOM title blocks have an **Author:** box with the author's name in the cell
 to its right and a date in the next cell. Click **Excel: set Author + date...**
-and type the new name. On **Replace & Convert**, for **every** Excel file the
+and type the new name. On **Run**, for **every** Excel file the
 name beside the **Author** box is set to your value, and the date beside it is
 stamped with **today's date** — kept in the **same format** as the date that was
 there (an Excel date serial stays a properly-formatted date).
@@ -248,7 +288,7 @@ revision entry...** and the tool:
    file's own **next revision letter**, so a batch of drawings at different
    revisions each gets its correct next letter (e.g. a `REVD` file gets an `E`
    row, a `REVF` file gets a `G` row).
-3. On **Replace & Convert**, adds the new revision row to **every** Visio file:
+3. On **Run**, adds the new revision row to **every** Visio file:
    an existing **blank row** in the table is filled if there is one, otherwise a
    new row is **cloned** from the last row (same columns/formatting) and placed
    just below it. Because many drawings draw the table grid as a fixed
@@ -294,7 +334,7 @@ your **name**. By default it signs off **each file's own latest revision**,
 auto-detected per file — so a batch of drawings at different revisions each gets
 the correct row (the dialog shows the latest letter found in each file). Leave
 the **REV letter** field blank for that, or type a specific letter to force one.
-On **Replace & Convert**, your name is written into the **Approved** column of
+On **Run**, your name is written into the **Approved** column of
 that revision row, in each loaded Visio file's revision table — whether that
 table is native Visio text cells or an embedded Excel worksheet. If that row had
 no Approved entry yet, one is added in the Approved column (not the Date
@@ -325,7 +365,7 @@ section — every result (and the change summary) is written there instead.
 
 ### Reset all
 
-The orange **Reset all** button (next to *Replace & Convert*) clears the loaded
+The orange **Reset all** button (next to *Run*) clears the loaded
 files, every find/replace rule, all staged edits (BOM rows, Change Log entry,
 Author, Visio revision entry, and both approvals) and the output folder — so you
 can start from scratch on a new file or batch. It asks for confirmation first.
@@ -360,24 +400,24 @@ be `.vsdx` or `.xlsx` (detected automatically):
 
 ```bash
 # Single replacement, edited .vsdx only
-python visio_replace_tool.py drawing.vsdx --find "Old Server" --replace "New Host"
+python drawing_bom_studio.py drawing.vsdx --find "Old Server" --replace "New Host"
 
 # Multiple replacements + PDF export
-python visio_replace_tool.py drawing.vsdx \
+python drawing_bom_studio.py drawing.vsdx \
     --find "Old Server" --replace "New Host" \
     --find "2023"       --replace "2026" \
     --pdf
 
 # Batch: every rule is applied to ALL listed files
-python visio_replace_tool.py one.vsdx two.vsdx three.vsdx \
+python drawing_bom_studio.py one.vsdx two.vsdx three.vsdx \
     --find "Old Server" --replace "New Host" --pdf
 
 # Save each copy as the next revision (REVA -> REVB) and bump the in-drawing box
-python visio_replace_tool.py "Floor Plan REVA.vsdx" \
+python drawing_bom_studio.py "Floor Plan REVA.vsdx" \
     --find "Old Server" --replace "New Host" --bump-revision --pdf
 
 # Choose the output name (single file only); case-sensitive, whole-word
-python visio_replace_tool.py in.vsdx -f Dev -r Prod -o out.vsdx \
+python drawing_bom_studio.py in.vsdx -f Dev -r Prod -o out.vsdx \
     --case-sensitive --whole-word --pdf
 ```
 

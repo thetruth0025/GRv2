@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  Double-click launcher for the Visio Text Replacer tool.
+REM  Double-click launcher for Drawing & BOM Studio.
 REM  Requires Python (https://www.python.org/downloads/).
 REM ============================================================
 setlocal
@@ -9,13 +9,13 @@ cd /d "%~dp0"
 REM Prefer the Windows "py" launcher, then fall back to "python".
 where py >nul 2>nul
 if %errorlevel%==0 (
-    py "%~dp0visio_replace_tool.py"
+    py "%~dp0drawing_bom_studio.py"
     goto :end
 )
 
 where python >nul 2>nul
 if %errorlevel%==0 (
-    python "%~dp0visio_replace_tool.py"
+    python "%~dp0drawing_bom_studio.py"
     goto :end
 )
 

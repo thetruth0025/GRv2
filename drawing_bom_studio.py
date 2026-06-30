@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
 """
-Visio / Excel Text Replacer
-===========================
+Drawing & BOM Studio
+====================
 
-A small desktop application that lets you:
+A desktop application for editing Visio cable/system drawings (.vsdx) and Excel
+bills of material (.xlsx). It streamlines the repetitive edits in a drawing
+release in one place:
 
   1. Pick a single Visio drawing (.vsdx) or Excel workbook (.xlsx) -- or a
      batch mixing both. The file type is detected automatically per file.
-  2. Enter one or more "find" / "replace with" text rules.
-  3. Aim each rule at *all* files or only *specific* files (multi-select).
-  4. Replace that text everywhere it appears.
+  2. Find & replace text with one or more rules, aimed at all files or only
+     specific ones.
+  3. Add, remove, or edit parts in the Visio parts tables and Excel BOMs, with
+     item/line numbers renumbered automatically.
+  4. Bump revisions, append revision-table rows, sign off approvals, and add
+     Change Log entries.
   5. Save the edited copy of each file (named as the next revision), and
      optionally export to PDF.
 
-The find/replace works directly on the file (both .vsdx and .xlsx are ZIP
-archives of XML). For Visio, only the text in <Text> shape blocks is touched;
-for Excel, the shared-strings table, inline strings, and drawing text boxes.
-Geometry, formatting, themes, styles, etc. are left untouched, and a search
-term is matched even when it is split across formatting runs.
+The edits work directly on the file (both .vsdx and .xlsx are ZIP archives of
+XML). For Visio, the text in <Text> shape blocks plus the embedded Excel parts
+and revision tables (and their cached pictures); for Excel, the shared-strings
+table, inline strings, and drawing text boxes. Geometry, formatting, themes,
+styles, etc. are left untouched, and a search term is matched even when it is
+split across formatting runs.
 
 PDF export is done with LibreOffice. Note: LibreOffice does not evaluate
 field-based values (e.g. a Visio "Sheet X of Y" page-number field), so export
 from the source app for those; PDF export is off by default.
 
 Run the GUI:
-    python visio_replace_tool.py
+    python drawing_bom_studio.py
 
 Or use it from the command line (one or many files; rules apply to all of them):
-    python visio_replace_tool.py a.vsdx b.vsdx --find "Old" --replace "New" --pdf
+    python drawing_bom_studio.py a.vsdx b.vsdx --find "Old" --replace "New" --pdf
 
 Requirements:
     * Python 3.8+ (tkinter is included with the standard python.org installers)
@@ -39,7 +45,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.17.0 (tabbed UI: Find→Replace / Parts / Approve & Revise)"
+__version__ = "2.18.0 (Drawing & BOM Studio: add/remove parts on tables & BOMs)"
 
 import argparse
 import datetime
@@ -1106,10 +1112,15 @@ def add_revision_entry_to_embedded(xlsx_bytes: bytes, entry: dict):
     return new_bytes, status
 
 
-def _extend_olesize(xlsx_bytes: bytes, end_row: int) -> bytes:
-    """Grow the embedded workbook's <oleSize ref="A1:E7"/> so its bottom row is
-    at least ``end_row`` -- the range that the embedded object actually shows in
-    the drawing. No-op if there's no oleSize or it already covers the row."""
+def _extend_olesize(xlsx_bytes: bytes, end_row: int,
+                    exact: bool = False) -> bytes:
+    """Adjust the embedded workbook's <oleSize ref="A1:E7"/> bottom row -- the
+    range the embedded object actually shows in the drawing.
+
+    By default the range is only *grown* so it covers ``end_row`` (rows are
+    never hidden by accident). With ``exact=True`` the bottom row is set to
+    ``end_row`` even if that shrinks the range -- used after a removal so the
+    now-blank trailing row isn't displayed. No-op if there's no oleSize."""
     try:
         z = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
     except (zipfile.BadZipFile, OSError):
@@ -1121,7 +1132,7 @@ def _extend_olesize(xlsx_bytes: bytes, end_row: int) -> bytes:
     if not m:
         return xlsx_bytes
     cur_end = int(m.group(4))
-    if cur_end >= end_row:
+    if cur_end == end_row or (not exact and cur_end >= end_row):
         return xlsx_bytes
     new_ref = (f'<oleSize ref="{m.group(1)}{m.group(2)}:'
                f'{m.group(3)}{end_row}"')
@@ -1887,6 +1898,11 @@ def _merge_bom_edit_dicts(*dicts) -> dict:
             if not m.get("emf"):
                 m["emf"] = ed.get("emf")
             m["cells"].extend(ed.get("cells", []))
+            # An add/remove carries the exact final display range; keep it.
+            if ed.get("ole_end") is not None:
+                m["ole_end"] = ed["ole_end"]
+            if ed.get("add_rows"):
+                m.setdefault("add_rows", []).extend(ed["add_rows"])
     return merged
 
 
@@ -2027,9 +2043,124 @@ def apply_bom_edits_to_emf(emf: bytes, cells: list) -> Optional[bytes]:
         return None
 
 
-def apply_bom_edits_to_embedded(xlsx_bytes: bytes, cells: list) -> bytes:
+def _parts_emf_layout(emf: bytes):
+    """Geometry of a parts-table EMF: (records, header_fields {field: x},
+    item_recs [left-column anchors, top->bottom], pitch). None if not a BOM."""
+    records = _emf_text_records(emf)
+    if not records:
+        return None
+    head = _emf_bom_header(records)
+    if head is None:
+        return None
+    header_fields, header_bottom, col_tol = head
+    data = [r for r in records if r["refy"] > header_bottom]
+    if not data:
+        return None
+    left_x = min(r["refx"] for r in data)
+    group_tol = max(8, col_tol * 0.5)
+    item_recs = sorted((r for r in data
+                        if abs(r["refx"] - left_x) <= group_tol),
+                       key=lambda r: r["refy"])
+    if not item_recs:
+        return None
+    ys = [r["refy"] for r in item_recs]
+    gaps = [b - a for a, b in zip(ys, ys[1:]) if b - a > 0]
+    pitch = sorted(gaps)[len(gaps) // 2] if gaps else (
+        item_recs[0]["refy"] - header_bottom)
+    if pitch <= 0:
+        return None
+    return records, header_fields, header_bottom, item_recs, pitch, data, \
+        group_tol
+
+
+def _parts_emf_growth(emf: bytes, n_new: int) -> float:
+    """new_height / old_height needed so ``n_new`` appended parts rows fit in
+    the cached picture's bounds (1.0 if they already fit)."""
+    try:
+        lay = _parts_emf_layout(emf)
+        if not lay or n_new <= 0:
+            return 1.0
+        _r, _hf, _hb, item_recs, pitch, _d, _gt = lay
+        bounds = struct.unpack_from("<4i", emf, 8)
+        old_h = bounds[3] - bounds[1]
+        bottom = item_recs[-1]["refy"] + (n_new + 1) * pitch
+        if bottom > bounds[3] and old_h > 0:
+            return (bottom - bounds[1]) / old_h
+        return 1.0
+    except (struct.error, ValueError, IndexError):
+        return 1.0
+
+
+def append_parts_rows_to_emf(emf: bytes, rows_fields: list) -> Optional[bytes]:
+    """Draw genuinely-new parts rows into the cached EMF so Visio shows them
+    without the user activating the object. ``rows_fields`` is a list of
+    {canonical_field: value} dicts (in final display order). Returns patched
+    bytes, or None if it couldn't be patched."""
+    rows_fields = [r for r in (rows_fields or []) if r]
+    if not rows_fields:
+        return None
+    try:
+        lay = _parts_emf_layout(emf)
+        if not lay:
+            return None
+        records, header_fields, _hb, item_recs, pitch, data, group_tol = lay
+        charw, default_w = _emf_char_widths(records)
+        last_y = item_recs[-1]["refy"]
+        last_recs = [r for r in data if abs(r["refy"] - last_y) <= pitch * 0.5]
+        # A template record per column (the last row's cell nearest that X), so
+        # new cells inherit the data font/style. Fall back to the item anchor.
+        templates = {}
+        for field, fx in header_fields.items():
+            cand = sorted((r for r in last_recs),
+                          key=lambda r: abs(r["refx"] - fx))
+            if cand and abs(cand[0]["refx"] - fx) <= max(group_tol, 1):
+                templates[field] = cand[0]
+        additions = b""
+        added = 0
+        insert_at = max(r["off"] + r["size"] for r in records)
+        for i, rowvals in enumerate(rows_fields, start=1):
+            new_y = last_y + i * pitch
+            for field, value in rowvals.items():
+                value = (value or "").strip()
+                if not value or field not in header_fields:
+                    continue
+                tmpl = dict(templates.get(field) or item_recs[-1])
+                tmpl["refx"] = header_fields[field]
+                bx = header_fields[field]
+                tmpl["bounds"] = (bx, tmpl["bounds"][1], bx, tmpl["bounds"][3])
+                additions += _build_emf_text_record(
+                    emf, tmpl, value, new_y, charw, default_w)
+                added += 1
+        if not added:
+            return None
+        out = bytearray(emf[:insert_at] + additions + emf[insert_at:])
+        _emf_set_counts(out, len(additions), added)
+        # Grow bounds/frame in step so the rows show at the same scale.
+        bounds = list(struct.unpack_from("<4i", out, 8))
+        old_h = bounds[3] - bounds[1]
+        bottom = last_y + (len(rows_fields) + 1) * pitch
+        if bottom > bounds[3] and old_h > 0:
+            ratio = (bottom - bounds[1]) / old_h
+            bounds[3] = bottom
+            struct.pack_into("<4i", out, 8, *bounds)
+            frame = list(struct.unpack_from("<4i", out, 24))
+            fh = frame[3] - frame[1]
+            frame[3] = frame[1] + int(round(fh * ratio))
+            struct.pack_into("<4i", out, 24, *frame)
+        return bytes(out)
+    except (struct.error, ValueError, IndexError):
+        return None
+
+
+def apply_bom_edits_to_embedded(xlsx_bytes: bytes, cells: list,
+                                ole_end: Optional[int] = None) -> bytes:
     """Set the given cells in an embedded parts worksheet. Each edit: {ref,
-    new, ...}. Returns the new .xlsx bytes (unchanged if it can't be parsed)."""
+    new, ...}. Returns the new .xlsx bytes (unchanged if it can't be parsed).
+
+    If ``ole_end`` is given (a row number), the OLE display range's bottom row
+    is set to exactly that -- so an add/remove that changes the row count is
+    shown without a trailing blank row. Otherwise the range is only grown to
+    cover the edited rows."""
     parsed = _read_embedded_sheet_rows(xlsx_bytes)
     if not parsed:
         return xlsx_bytes
@@ -2041,8 +2172,303 @@ def apply_bom_edits_to_embedded(xlsx_bytes: bytes, cells: list) -> bytes:
         if rm:
             max_row = max(max_row, int(rm.group(0)))
     new_bytes = _xlsx_replace_member(xlsx_bytes, sheet_member, sheet_xml)
-    # Make sure every edited row is inside the range the OLE object displays.
+    # Make sure every edited row is inside the range the OLE object displays;
+    # for add/remove, size the range exactly to the final last data row.
+    if ole_end is not None:
+        return _extend_olesize(new_bytes, ole_end, exact=True)
     return _extend_olesize(new_bytes, max_row)
+
+
+# ---------------------------------------------------------------------------
+# Add / remove parts: shift rows up (remove) or append (add), renumber the
+# item/line-number column, and express the result as ordinary cell edits so the
+# existing worksheet + cached-picture appliers can carry them out.
+# ---------------------------------------------------------------------------
+
+def _table_data_rownums(rows: dict, col_field: dict, header_row: int):
+    """The filled data-row numbers of a parts/BOM table (rows with any value in
+    a known column), in order."""
+    cols = set(col_field)
+    out = [rn for rn in rows
+           if rn > header_row
+           and any((rows[rn].get(c) or "").strip() for c in cols)]
+    return sorted(out)
+
+
+def _detect_seq_cols(rows: dict, data_rownums: list, cols: list):
+    """Columns whose values are a consecutive integer run (1,2,3,...) -- the
+    item/line-number sequences that must be renumbered. Returns {col: start}."""
+    seq = {}
+    for col in cols:
+        vals = [(rows.get(rn, {}).get(col) or "").strip() for rn in data_rownums]
+        nums = [v for v in vals if v]
+        if len(nums) >= 2 and all(v.lstrip("-").isdigit() for v in nums):
+            ints = [int(v) for v in nums]
+            if ints == list(range(ints[0], ints[0] + len(ints))):
+                seq[col] = ints[0]
+    return seq
+
+
+def _parts_final_end_row(rows: dict, col_field: dict, header_row: int,
+                         remove_rownums: set, add_rows: list = None) -> int:
+    """The bottom row a parts/BOM table will occupy after the given removals
+    and additions are applied (the rows shift up / new rows append). Mirrors
+    the destination-row layout in :func:`compute_parts_shift_edits`."""
+    data = _table_data_rownums(rows, col_field, header_row)
+    keep = [rn for rn in data if rn not in set(remove_rownums or ())]
+    n = len(keep) + len(list(add_rows or ()))
+    dest = list(data)
+    last = data[-1] if data else header_row
+    while len(dest) < n:
+        last += 1
+        dest.append(last)
+    return dest[n - 1] if n else header_row
+
+
+def compute_parts_shift_edits(rows: dict, col_field: dict, header_row: int,
+                              remove_rownums: set, add_rows: list = None):
+    """Compute the cell edits that remove ``remove_rownums`` and/or append
+    ``add_rows`` (each a {field: value} dict) to a parts/BOM table: remaining
+    rows shift up, new rows go on the end, and sequence columns are renumbered.
+
+    Each edit: {ref, col, row, field, old, new, item, pn} -- 'item'/'pn' carry
+    the row's CURRENT values so the cached-picture applier can find it."""
+    remove_rownums = set(remove_rownums or ())
+    add_rows = list(add_rows or ())
+    cols = sorted(
+        {c for rn in rows for c in rows[rn]} | set(col_field), key=_col_index)
+    data_rownums = _table_data_rownums(rows, col_field, header_row)
+    if not data_rownums and not add_rows:
+        return []
+    seq = _detect_seq_cols(rows, data_rownums, cols) or {}
+    # If there's an Item field but it wasn't a clean run, still renumber it.
+    item_col = next((c for c, f in col_field.items() if f == "Item"), None)
+    if item_col and item_col not in seq:
+        seq[item_col] = 1
+    pn_col = next((c for c, f in col_field.items() if f == "Part Number"), None)
+
+    keep = [rn for rn in data_rownums if rn not in remove_rownums]
+    # Source values for each destination slot: kept rows, then the new rows.
+    sources = [("row", rn) for rn in keep] + [("new", d) for d in add_rows]
+
+    # Destination row numbers: reuse existing rows, then extend past the last.
+    last = data_rownums[-1] if data_rownums else header_row
+    dest_rows = list(data_rownums)
+    while len(dest_rows) < len(sources):
+        last += 1
+        dest_rows.append(last)
+
+    edits = []
+    for i, dest_rn in enumerate(dest_rows):
+        old_item = (rows.get(dest_rn, {}).get(item_col) or "") if item_col else ""
+        old_pn = (rows.get(dest_rn, {}).get(pn_col) or "") if pn_col else ""
+        if i < len(sources):
+            kind, src = sources[i]
+            for col in cols:
+                if col in seq:
+                    newv = str(seq[col] + i)
+                elif kind == "row":
+                    newv = (rows.get(src, {}).get(col) or "")
+                else:  # new row keyed by column letter (or canonical field)
+                    newv = src.get(col)
+                    if newv is None:
+                        newv = src.get(col_field.get(col, ""), "")
+                oldv = (rows.get(dest_rn, {}).get(col) or "")
+                if str(newv) != str(oldv):
+                    edits.append({
+                        "ref": f"{col}{dest_rn}", "col": col, "row": dest_rn,
+                        "field": col_field.get(col, ""), "old": str(oldv),
+                        "new": str(newv), "item": str(old_item),
+                        "pn": str(old_pn)})
+        else:  # trailing rows left over after a removal: clear them
+            for col in cols:
+                oldv = (rows.get(dest_rn, {}).get(col) or "")
+                if str(oldv) != "":
+                    edits.append({
+                        "ref": f"{col}{dest_rn}", "col": col, "row": dest_rn,
+                        "field": col_field.get(col, ""), "old": str(oldv),
+                        "new": "", "item": str(old_item), "pn": str(old_pn)})
+    return edits
+
+
+def _parts_add_field_rows(rows: dict, col_field: dict, header_row: int,
+                          remove_rownums: set, add_rows: list):
+    """The genuinely-new rows expressed as {canonical_field: final_value} dicts
+    (with sequence columns already renumbered) -- for drawing into the EMF."""
+    add_rows = list(add_rows or ())
+    if not add_rows:
+        return []
+    cols = sorted(
+        {c for rn in rows for c in rows[rn]} | set(col_field), key=_col_index)
+    data_rownums = _table_data_rownums(rows, col_field, header_row)
+    keep = [rn for rn in data_rownums if rn not in set(remove_rownums or ())]
+    seq = _detect_seq_cols(rows, data_rownums, cols) or {}
+    item_col = next((c for c, f in col_field.items() if f == "Item"), None)
+    if item_col and item_col not in seq:
+        seq[item_col] = 1
+    out = []
+    for j, src in enumerate(add_rows):
+        fr = {}
+        for col in cols:
+            field = col_field.get(col, "")
+            if col in seq:
+                val = str(seq[col] + len(keep) + j)
+            else:
+                val = src.get(col)
+                if val is None:
+                    val = src.get(field, "")
+            if field and val:
+                fr[field] = str(val)
+        out.append(fr)
+    return out
+
+
+def build_visio_parts_ops(path, removals: dict, additions: dict,
+                          case_sensitive=False) -> dict:
+    """Turn staged removals/additions into per-embedding cell edits for a .vsdx.
+
+    removals:  {embed_member: set(rownums)}
+    additions: {embed_member: [ {field: value}, ... ]}
+    Returns {embed_member: {"emf", "cells", "ole_end", "add_rows"}}."""
+    out: dict = {}
+    if not removals and not additions:
+        return out
+    try:
+        zin = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return out
+    with zin:
+        members = set(removals or ()) | set(additions or ())
+        for member in members:
+            try:
+                info = _embedded_bom_info(zin.read(member))
+            except (KeyError, OSError):
+                info = None
+            if not info:
+                continue
+            rm = set((removals or {}).get(member, ()))
+            ad = list((additions or {}).get(member, ()))
+            edits = compute_parts_shift_edits(
+                info["rows"], info["col_field"], info["header_row"], rm, ad)
+            if edits:
+                out[member] = {
+                    "emf": _embedded_emf_member(zin, member),
+                    "cells": edits,
+                    "ole_end": _parts_final_end_row(
+                        info["rows"], info["col_field"],
+                        info["header_row"], rm, ad),
+                    "add_rows": _parts_add_field_rows(
+                        info["rows"], info["col_field"],
+                        info["header_row"], rm, ad)}
+    return out
+
+
+def visio_parts_sheets(path):
+    """[(embed_member, sheet_name)] for every parts table in a .vsdx."""
+    out = []
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = _embedding_page_names(z)
+            for m in _embedded_bom_members(z):
+                out.append((m, names.get(m, "")))
+    except (zipfile.BadZipFile, OSError):
+        return []
+    out.sort(key=lambda t: _natural_key(t[1]))
+    return out
+
+
+def excel_bom_sheets(path):
+    """[(worksheet_part, sheet_name)] for every BOM table in an .xlsx."""
+    out = []
+    try:
+        with zipfile.ZipFile(path) as z:
+            shared = _read_shared_strings(z)
+            protected = _changelog_part(z)
+            names = _xlsx_sheet_display(z)
+            for n in z.namelist():
+                if not _WORKSHEET_RE.search(n.lower()) or n == protected:
+                    continue
+                if _excel_bom_table(z, n, shared):
+                    out.append((n, names.get(n, "")))
+    except (zipfile.BadZipFile, OSError):
+        return []
+    return out
+
+
+def parts_table_view(path, fmt, sheet_id):
+    """For displaying a table in the add editor: (col_order [col letters],
+    headers {col: header text}, rows [{col: value}, ...]) or None."""
+    try:
+        zin = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return None
+    with zin:
+        if fmt == "vsdx":
+            info = _embedded_bom_info(zin.read(sheet_id))
+            if not info:
+                return None
+            rows_map, col_field, hrow = (info["rows"], info["col_field"],
+                                         info["header_row"])
+        else:
+            shared = _read_shared_strings(zin)
+            tbl = _excel_bom_table(zin, sheet_id, shared)
+            if not tbl:
+                return None
+            rows_map, col_field, hrow = tbl
+    col_order = sorted(col_field, key=_col_index)
+    headers = {c: (rows_map.get(hrow, {}).get(c) or col_field[c])
+               for c in col_order}
+    data_rownums = _table_data_rownums(rows_map, col_field, hrow)
+    rows = [{c: (rows_map.get(rn, {}).get(c) or "") for c in col_order}
+            for rn in data_rownums]
+    return col_order, headers, rows
+
+
+def _excel_bom_table(zin: zipfile.ZipFile, sheet_part: str, shared):
+    """For an Excel BOM worksheet: (rows {rownum:{col_letter:value}},
+    col_field {col_letter: field}, header_row) or None."""
+    try:
+        sheet_xml = zin.read(sheet_part).decode("utf-8", "replace")
+    except (KeyError, OSError):
+        return None
+    cells = _read_sheet_cells(sheet_xml, shared)
+    hrow, colmap = _find_bom_header(cells)
+    if hrow is None:
+        return None
+    rows: dict = {}
+    for (colnum, row), (_ref, txt) in cells.items():
+        rows.setdefault(row, {})[_col_letters(colnum)] = txt
+    col_field = {_col_letters(c): f for c, f in colmap.items()}
+    return rows, col_field, hrow
+
+
+def build_excel_parts_ops(path, removals: dict, additions: dict) -> dict:
+    """Turn staged removals/additions into per-sheet cell edits for an .xlsx.
+
+    removals:  {sheet_part: set(rownums)}
+    additions: {sheet_part: [ {col_letter|field: value}, ... ]}
+    Returns {sheet_part: {cell_ref: new_value}} (the cell_edits format)."""
+    out: dict = {}
+    if not removals and not additions:
+        return out
+    try:
+        zin = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return out
+    with zin:
+        shared = _read_shared_strings(zin)
+        for sheet in set(removals or ()) | set(additions or ()):
+            tbl = _excel_bom_table(zin, sheet, shared)
+            if not tbl:
+                continue
+            rows, col_field, hrow = tbl
+            edits = compute_parts_shift_edits(
+                rows, col_field, hrow,
+                set((removals or {}).get(sheet, ())),
+                list((additions or {}).get(sheet, ())))
+            if edits:
+                out[sheet] = {e["ref"]: e["new"] for e in edits}
+    return out
 
 
 def _revtable_page_part(zin: zipfile.ZipFile) -> Optional[str]:
@@ -2176,8 +2602,8 @@ def replace_text_in_vsdx(
 
     bom_cell_edits = bom_cell_edits or {}
     bom_cells = 0
-    # Reverse map: cached-EMF member -> the cell edits to draw into it.
-    bom_emf_map = {d["emf"]: d["cells"] for d in bom_cell_edits.values()
+    # Reverse map: cached-EMF member -> the op (cells + any new rows to draw).
+    bom_emf_map = {d["emf"]: d for d in bom_cell_edits.values()
                    if d.get("emf")}
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2219,6 +2645,21 @@ def replace_text_in_vsdx(
             if ole_grow_ratio > 1.001:
                 ole_grow_page, ole_grow_shape = _ole_shape_for_embedding(
                     zin, table_embed)
+        # Parts tables that gained rows must also grow their OLE shape so the
+        # new rows show in the page view. {page_part: [(shape_id, ratio), ...]}.
+        parts_grow: dict = {}
+        for embed, op in bom_cell_edits.items():
+            if not op.get("add_rows") or not op.get("emf"):
+                continue
+            try:
+                ratio = _parts_emf_growth(zin.read(op["emf"]),
+                                          len(op["add_rows"]))
+            except (KeyError, OSError):
+                ratio = 1.0
+            if ratio > 1.001:
+                pg, sh = _ole_shape_for_embedding(zin, embed)
+                if pg and sh:
+                    parts_grow.setdefault(pg, []).append((sh, ratio))
         with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
                 data = zin.read(item.filename)
@@ -2259,6 +2700,10 @@ def replace_text_in_vsdx(
                                 and item.filename == ole_grow_page):
                             new_text = grow_ole_shape_height(
                                 new_text, ole_grow_shape, ole_grow_ratio)
+                        # Grow any parts-table OLE shapes that gained rows.
+                        for sh, ratio in parts_grow.get(item.filename, ()):
+                            new_text = grow_ole_shape_height(
+                                new_text, sh, ratio)
                         if new_text != text:
                             data = new_text.encode("utf-8")
                 elif table_embed and item.filename == table_embed:
@@ -2289,14 +2734,21 @@ def replace_text_in_vsdx(
                 elif item.filename in bom_cell_edits:
                     # A parts-table (Cable BOM) edit: update the worksheet data.
                     cells = bom_cell_edits[item.filename]["cells"]
-                    data = apply_bom_edits_to_embedded(data, cells)
+                    data = apply_bom_edits_to_embedded(
+                        data, cells,
+                        bom_cell_edits[item.filename].get("ole_end"))
                     bom_cells += len(cells)
                 elif item.filename in bom_emf_map:
-                    # Patch the parts table's cached EMF to match the edits.
-                    patched = apply_bom_edits_to_emf(
-                        data, bom_emf_map[item.filename])
+                    # Patch the parts table's cached EMF to match the edits,
+                    # then draw any genuinely-new rows below the last one.
+                    op = bom_emf_map[item.filename]
+                    patched = apply_bom_edits_to_emf(data, op["cells"])
                     if patched is not None:
                         data = patched
+                    if op.get("add_rows"):
+                        grown = append_parts_rows_to_emf(data, op["add_rows"])
+                        if grown is not None:
+                            data = grown
                 # Preserve the original name; recompress with deflate.
                 zout.writestr(item.filename, data)
 
@@ -3846,14 +4298,19 @@ def _run_cli(argv: Sequence[str]) -> int:
 # Each section: (heading, [lines]). A line starting with "* " is a bullet;
 # **bold** marks emphasis.
 
-HELP_TITLE = "Visio / Excel Text Replacer — How to Use"
+HELP_TITLE = "Drawing & BOM Studio — How to Use"
 
 HELP_SECTIONS = [
     ("What this tool does", [
-        "It finds and replaces text across many Microsoft **Visio drawings "
-        "(.vsdx)** and **Excel workbooks (.xlsx)** at once, saves each result "
-        "as a new **next-revision** copy (your originals are never changed), "
-        "and writes a **change summary** you can hand to an approver.",
+        "**Drawing & BOM Studio** edits Microsoft **Visio drawings (.vsdx)** "
+        "and **Excel workbooks (.xlsx)** in bulk: it finds and replaces text "
+        "across many files at once, saves each result as a new "
+        "**next-revision** copy (your originals are never changed), and writes "
+        "a **change summary** you can hand to an approver.",
+        "The window has three tabs that all run together: **Find → Replace** "
+        "(text rules), **Parts** (add / remove / edit rows in the Visio parts "
+        "tables and Excel BOMs), and **Approve & Revise** (revision rows, "
+        "approvals, Change Log, Author).",
         "It also has per-format helpers: edit a part's whole Excel BOM row, "
         "append a Change Log entry, stamp the Author box, add a row to a Visio "
         "revision table, and **approve** drawings/workbooks in bulk.",
@@ -3953,6 +4410,34 @@ HELP_SECTIONS = [
         "drawn into the table's cached picture**, so it shows when the drawing "
         "opens — no need to double-click the table in Visio.",
     ]),
+    ("Parts tab — Remove parts", [
+        "On the **Parts** tab, type a part number in the **Remove** box and "
+        "click **Find & choose rows to remove...**. Every parts-table / BOM "
+        "row with that part number is listed **per file and sheet**, each with "
+        "a checkbox.",
+        "* Tick the rows to delete and click **Save removals**. They are "
+        "staged, not applied yet — the **Run** button does the work.",
+        "* On run, each ticked row is removed, the rows below it **shift up**, "
+        "and any **item / line-number** sequence is renumbered (1, 2, 3, …). "
+        "Works on both Excel BOMs and the embedded Visio parts tables, "
+        "including the cached picture and the table's display range.",
+    ]),
+    ("Parts tab — Add parts", [
+        "On the **Parts** tab, click **Add parts...**. Pick a **file type** "
+        "(BOM / Cable Drawing / System Drawing), then the **file** and the "
+        "**sheet / table**. The current parts are shown for reference.",
+        "* Fill in the blank row(s) at the bottom — one row per new part. Use "
+        "**+ Add row** for more. Leave the item/line number blank: it is "
+        "**assigned automatically** when you run.",
+        "* Click **Save** to stage the new parts (you can add to several "
+        "sheets / files before running). The **Run** button appends them to "
+        "the worksheet, renumbers the sequence, grows the table's display "
+        "range, and draws the new rows into the cached picture so they show "
+        "when the drawing opens.",
+        "* **Remove and Add run together**, alongside any Find → Replace rules "
+        "and Approve & Revise actions — fill in whichever tabs you need and "
+        "they are all applied in one run.",
+    ]),
     ("Step 2 (Visio only) — Add a revision entry", [
         "Click **Visio: add revision entry...** to add a row to the "
         "**revision-history table** on a drawing's cover page (the chart in a "
@@ -3994,11 +4479,12 @@ HELP_SECTIONS = [
         "folder** puts each copy next to its original (the default).",
     ]),
     ("Run it", [
-        "Click **Replace & Convert**. Each file is saved as its next-revision "
-        "copy (or *_edited, or *_approved_<date> for an approval) — next to the "
-        "original, or in your chosen **output folder**. The **Status** box "
-        "reports what happened per file, and the **change summary** opens when "
-        "done.",
+        "Click **Run**. Everything you staged on the **Find → Replace**, "
+        "**Parts**, and **Approve & Revise** tabs is applied in one pass. Each "
+        "file is saved as its next-revision copy (or *_edited, or "
+        "*_approved_<date> for an approval) — next to the original, or in your "
+        "chosen **output folder**. The **Status** box reports what happened per "
+        "file, and the **change summary** opens when done.",
         "* **Reset all** (the orange button) clears the loaded files, every "
         "rule, all staged edits and the output folder — use it to start fresh "
         "on a new file or batch.",
@@ -4085,8 +4571,8 @@ def help_to_html(path) -> "Path":
  b {{ color:#111; }}
  @media print {{ h2 {{ page-break-inside: avoid; }} }}
 </style></head><body>{''.join(body)}
-<p style="color:#888;margin-top:30px;font-size:0.85em">Visio / Excel Text
- Replacer v{__version__}</p></body></html>"""
+<p style="color:#888;margin-top:30px;font-size:0.85em">Drawing &amp; BOM
+ Studio v{__version__}</p></body></html>"""
     path.write_text(doc, encoding="utf-8")
     return path
 
@@ -4259,7 +4745,7 @@ def launch_gui() -> int:
     class App:
         def __init__(self, root: "tk.Tk"):
             self.root = root
-            root.title(f"Visio / Excel Text Replacer   [v{__version__}]")
+            root.title(f"Drawing & BOM Studio   [v{__version__}]")
             # The window is sized in pixels, so grow it to match the display's
             # DPI (otherwise it's tiny and cramped on high-DPI screens now that
             # the app renders at the real resolution) -- but never larger than
@@ -4284,7 +4770,7 @@ def launch_gui() -> int:
             self._banner = tk.Frame(root, bg=self.palette["banner"])
             self._banner.pack(fill="x")
             self._banner_title = tk.Label(
-                self._banner, text="Visio / Excel Text Replacer",
+                self._banner, text="Drawing & BOM Studio",
                 bg=self.palette["banner"], fg="#ffffff",
                 font=("Segoe UI", 15, "bold"),
             )
@@ -4587,7 +5073,7 @@ def launch_gui() -> int:
             run = ttk.Frame(self.body)
             run.pack(fill="x", **pad)
             self.run_btn = self._rbtn(
-                run, "Replace  &  Convert", self.run, kind="accent",
+                run, "Run", self.run, kind="accent",
                 radius=13, padx=22, pady=10,
             )
             self.run_btn.pack(side="left", padx=8)
@@ -4613,7 +5099,7 @@ def launch_gui() -> int:
 
             self.on_mode_change()
             self._sync_rev_options()
-            self._log(f"Visio Text Replacer  v{__version__}")
+            self._log(f"Drawing & BOM Studio  v{__version__}")
             if find_libreoffice() is None:
                 self._log(
                     "Note: LibreOffice was not found, so PDF export is "
@@ -5518,12 +6004,319 @@ def launch_gui() -> int:
             ).pack(side="left", padx=6)
 
         # -- Remove parts --------------------------------------------------
+        def _scan_parts(self, pn):
+            """Find rows with part number ``pn`` across all loaded files.
+            Each: {file, fmt, sheet, sheet_name, row, part, item, desc}."""
+            cs = self.case_var.get()
+            out = []
+            for f in self.files:
+                fmt = detect_format(f)
+                try:
+                    if fmt == "xlsx":
+                        for m in excel_scan_rows(f, [pn], cs):
+                            out.append({
+                                "file": f, "fmt": "xlsx", "sheet": m["sheet"],
+                                "sheet_name": m.get("sheet_name") or "",
+                                "row": m["row"], "part": m["part"], "item": "",
+                                "desc": (m["fields"].get("Description")
+                                         or ("", ""))[1]})
+                    elif fmt == "vsdx":
+                        for m in visio_bom_scan_rows(f, [pn], cs):
+                            out.append({
+                                "file": f, "fmt": "vsdx", "sheet": m["embed"],
+                                "sheet_name": m.get("sheet_name") or "",
+                                "row": m["row"], "part": m["part"],
+                                "item": m.get("item", ""),
+                                "desc": (m["fields"].get("Description")
+                                         or ("", ""))[1]})
+                except Exception:  # noqa: BLE001
+                    pass
+            return out
+
         def open_remove_parts(self):
-            messagebox.showinfo("Remove parts", "Coming up.")
+            pn = self.remove_pn_var.get().strip()
+            if not pn:
+                messagebox.showinfo(
+                    "Remove parts", "Type the part number to remove first.")
+                return
+            matches = self._scan_parts(pn)
+            if not matches:
+                messagebox.showinfo(
+                    "Remove parts",
+                    f"No parts-table rows found with part number '{pn}'.")
+                return
+
+            pal = self.palette
+            win = tk.Toplevel(self.root)
+            win.title(f"Remove part '{pn}'")
+            win.geometry("820x600")
+            win.transient(self.root)
+            win.grab_set()
+            win.configure(bg=pal["bg"])
+            ttk.Label(
+                win, wraplength=790, justify="left",
+                text=f"Rows containing part number '{pn}', grouped by file and "
+                "sheet. Tick the ones to remove. On run, each ticked row is "
+                "deleted, the rows below it shift up, and the item/line numbers "
+                "are renumbered.",
+            ).pack(fill="x", padx=10, pady=(10, 4))
+
+            body = ttk.Frame(win)
+            body.pack(fill="both", expand=True)
+            canvas = tk.Canvas(body, highlightthickness=0, bg=pal["bg"])
+            sb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+            inner = ttk.Frame(canvas)
+            inner.bind("<Configure>", lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")))
+            canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=sb.set)
+            canvas.pack(side="left", fill="both", expand=True, padx=(10, 0))
+            sb.pack(side="left", fill="y", padx=(0, 10))
+
+            already = self.remove_parts
+            state = []  # {file, fmt, sheet, row, var}
+            by_file: dict = {}
+            for m in matches:
+                by_file.setdefault(m["file"], []).append(m)
+            for f, fmatches in by_file.items():
+                ttk.Label(
+                    inner, text="📄  " + Path(f).name,
+                    font=("Segoe UI", 10, "bold"), foreground=pal["accent"],
+                ).pack(anchor="w", padx=6, pady=(10, 0))
+                by_sheet: dict = {}
+                for m in fmatches:
+                    by_sheet.setdefault(
+                        (m["sheet"], m["sheet_name"]), []).append(m)
+                for (sheet, sname), smatches in by_sheet.items():
+                    if sname:
+                        ttk.Label(
+                            inner, text="     Sheet:  " + sname,
+                            font=("Segoe UI", 9, "bold"),
+                            foreground=pal["muted"],
+                        ).pack(anchor="w", padx=12, pady=(4, 0))
+                    for m in smatches:
+                        pre = (m["row"] in
+                               already.get(f, {}).get(sheet, set()))
+                        var = tk.BooleanVar(value=pre)
+                        label = (
+                            (f"Item {m['item']}  ·  " if m["item"] else "")
+                            + f"P/N {m['part']}"
+                            + (f"  ·  {m['desc'][:54]}" if m["desc"] else "")
+                            + f"   (row {m['row']})")
+                        ttk.Checkbutton(
+                            inner, text=label, variable=var,
+                        ).pack(anchor="w", padx=22, pady=1)
+                        state.append({"file": f, "sheet": sheet,
+                                      "row": m["row"], "var": var})
+
+            def apply():
+                removals: dict = {}
+                n = 0
+                for s in state:
+                    if s["var"].get():
+                        removals.setdefault(s["file"], {}).setdefault(
+                            s["sheet"], set()).add(s["row"])
+                        n += 1
+                self.remove_parts = removals
+                self.remove_status.configure(
+                    text=(f"{n} part row(s) staged for removal" if n else ""))
+                self.log(f"Staged {n} part removal(s)." if n
+                         else "No part removals staged.")
+                win.destroy()
+
+            bottom = ttk.Frame(win)
+            bottom.pack(side="bottom", fill="x", padx=10, pady=10)
+            self._rbtn(bottom, "Save removals", apply, kind="orange").pack(
+                side="right")
+            self._rbtn(bottom, "Cancel", win.destroy).pack(
+                side="right", padx=6)
 
         # -- Add parts -----------------------------------------------------
         def open_add_parts(self):
-            messagebox.showinfo("Add parts", "Coming up.")
+            if not self.files:
+                messagebox.showinfo("Add parts", "Add files first.")
+                return
+            pal = self.palette
+            win = tk.Toplevel(self.root)
+            win.title("Add new parts")
+            win.geometry("900x640")
+            win.minsize(700, 480)
+            win.transient(self.root)
+            win.grab_set()
+            win.configure(bg=pal["bg"])
+
+            ttk.Label(
+                win, wraplength=870, justify="left",
+                text="Pick a file type, then the file and the sheet/table to "
+                "add to. The current parts are shown for reference; fill in the "
+                "blank row(s) at the bottom to add new parts. Item/line numbers "
+                "are assigned automatically on run.",
+            ).pack(fill="x", padx=10, pady=(10, 4))
+
+            ctl = ttk.Frame(win)
+            ctl.pack(fill="x", padx=10, pady=4)
+            ttk.Label(ctl, text="File type:").pack(side="left")
+            type_var = tk.StringVar()
+            type_cb = ttk.Combobox(ctl, textvariable=type_var, width=16,
+                                   state="readonly")
+            type_cb.pack(side="left", padx=(4, 10))
+            ttk.Label(ctl, text="File:").pack(side="left")
+            file_var = tk.StringVar()
+            file_cb = ttk.Combobox(ctl, textvariable=file_var, width=34,
+                                   state="readonly")
+            file_cb.pack(side="left", padx=(4, 10))
+            ttk.Label(ctl, text="Sheet:").pack(side="left")
+            sheet_var = tk.StringVar()
+            sheet_cb = ttk.Combobox(ctl, textvariable=sheet_var, width=18,
+                                    state="readonly")
+            sheet_cb.pack(side="left", padx=(4, 0))
+
+            body = ttk.Frame(win)
+            body.pack(fill="both", expand=True, padx=10, pady=6)
+            canvas = tk.Canvas(body, highlightthickness=0, bg=pal["bg"])
+            vsb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+            hsb = ttk.Scrollbar(body, orient="horizontal",
+                                command=canvas.xview)
+            grid = ttk.Frame(canvas)
+            grid.bind("<Configure>", lambda e: canvas.configure(
+                scrollregion=canvas.bbox("all")))
+            canvas.create_window((0, 0), window=grid, anchor="nw")
+            canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            vsb.pack(side="right", fill="y")
+            hsb.pack(side="bottom", fill="x")
+            canvas.pack(side="left", fill="both", expand=True)
+
+            # mutable view state
+            st = {"file": None, "fmt": None, "sheet": None, "cols": [],
+                  "headers": {}, "new_entries": [], "existing_rows": []}
+
+            def file_map():
+                return {Path(f).name: f for f in self.files}
+
+            def sheets_for(f):
+                fmt = detect_format(f)
+                if fmt == "vsdx":
+                    return [(sid, nm or sid.split("/")[-1])
+                            for sid, nm in visio_parts_sheets(f)]
+                if fmt == "xlsx":
+                    return [(sid, nm or sid.split("/")[-1])
+                            for sid, nm in excel_bom_sheets(f)]
+                return []
+
+            def add_new_row(values=None):
+                r = len(st["existing_rows"]) + 1 + len(st["new_entries"])
+                ents = {}
+                for ci, col in enumerate(st["cols"]):
+                    e = ttk.Entry(grid, width=18)
+                    if values and col in values:
+                        e.insert(0, values[col])
+                    e.grid(row=r, column=ci, sticky="we", padx=1, pady=1)
+                    ents[col] = e
+                st["new_entries"].append(ents)
+                canvas.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            def commit_current():
+                """Capture the current sheet's filled new rows into add_parts."""
+                f, sid = st.get("file"), st.get("sheet")
+                if not (f and sid):
+                    return
+                new_rows = []
+                for ents in st["new_entries"]:
+                    vals = {c: e.get().strip() for c, e in ents.items()
+                            if e.get().strip()}
+                    if vals:
+                        new_rows.append(vals)
+                self.add_parts.setdefault(f, {})
+                if new_rows:
+                    self.add_parts[f][sid] = new_rows
+                else:
+                    self.add_parts[f].pop(sid, None)
+                if not self.add_parts[f]:
+                    self.add_parts.pop(f, None)
+
+            def load_sheet(*_):
+                commit_current()
+                for w in grid.winfo_children():
+                    w.destroy()
+                st["new_entries"] = []
+                st["existing_rows"] = []
+                st["file"] = None
+                st["sheet"] = None
+                f = file_map().get(file_var.get())
+                smap = {nm: sid for sid, nm in sheets_for(f)} if f else {}
+                sid = smap.get(sheet_var.get())
+                if not f or not sid:
+                    return
+                view = parts_table_view(f, detect_format(f), sid)
+                if not view:
+                    ttk.Label(grid, text="(couldn't read this table)").grid(
+                        row=0, column=0, padx=6, pady=6)
+                    return
+                cols, headers, rows = view
+                st.update({"file": f, "fmt": detect_format(f), "sheet": sid,
+                           "cols": cols, "headers": headers,
+                           "existing_rows": rows})
+                for ci, col in enumerate(cols):
+                    ttk.Label(grid, text=headers.get(col, col),
+                              font=("Segoe UI", 9, "bold"),
+                              foreground=pal["accent"]).grid(
+                        row=0, column=ci, sticky="w", padx=2, pady=2)
+                for ri, row in enumerate(rows, start=1):
+                    for ci, col in enumerate(cols):
+                        ttk.Label(grid, text=str(row.get(col, ""))[:30],
+                                  foreground=pal["muted"]).grid(
+                            row=ri, column=ci, sticky="w", padx=2, pady=1)
+                # restore any staged new rows, else one blank row
+                staged = self.add_parts.get(f, {}).get(sid, [])
+                if staged:
+                    for vals in staged:
+                        add_new_row(vals)
+                else:
+                    add_new_row()
+
+            def on_type(*_):
+                f_of_type = [Path(f).name for f in self.files
+                             if file_category(f) == type_var.get()]
+                file_cb["values"] = f_of_type
+                file_var.set(f_of_type[0] if f_of_type else "")
+                on_file()
+
+            def on_file(*_):
+                f = file_map().get(file_var.get())
+                names = [nm for _sid, nm in sheets_for(f)] if f else []
+                sheet_cb["values"] = names
+                sheet_var.set(names[0] if names else "")
+                load_sheet()
+
+            type_cb.bind("<<ComboboxSelected>>", on_type)
+            file_cb.bind("<<ComboboxSelected>>", on_file)
+            sheet_cb.bind("<<ComboboxSelected>>", load_sheet)
+
+            cats = [c for c in CATEGORY_ORDER
+                    if any(file_category(f) == c for f in self.files)]
+            type_cb["values"] = cats
+            if cats:
+                type_var.set(cats[0])
+                on_type()
+
+            def save():
+                commit_current()
+                total = sum(len(v) for d in self.add_parts.values()
+                            for v in d.values())
+                self.add_status.configure(
+                    text=(f"{total} new part(s) staged" if total else ""))
+                self.log(f"Staged {total} new part(s) to add." if total
+                         else "No new parts staged.")
+                win.destroy()
+
+            bottom = ttk.Frame(win)
+            bottom.pack(side="bottom", fill="x", padx=10, pady=10)
+            self._rbtn(bottom, "Save", save, kind="accent").pack(side="right")
+            self._rbtn(bottom, "Cancel", win.destroy).pack(
+                side="right", padx=6)
+            self._rbtn(bottom, "+ Add row", lambda: add_new_row()).pack(
+                side="left")
 
         # -- Change Log entry ----------------------------------------------
         def open_changelog_editor(self):
@@ -5882,12 +6675,16 @@ def launch_gui() -> int:
             # Every staged action.
             self.bom_edits = {}
             self.visio_bom_edits = {}
+            self.remove_parts = {}
+            self.add_parts = {}
             self.changelog_entry = {}
             self.author_name = ""
             self.visio_rev_entry = {}
             self.visio_approval = {}
             self.excel_approval = {}
             self.bom_status.configure(text="")
+            self.remove_status.configure(text="")
+            self.add_status.configure(text="")
             self._clear_out_dir()
             self.log(
                 "Reset: cleared files, rules, all staged edits and the output "
@@ -5914,7 +6711,8 @@ def launch_gui() -> int:
                     and not self.bom_edits and not self.changelog_entry
                     and not self.author_name and not self.visio_rev_entry
                     and not self.visio_approval and not self.excel_approval
-                    and not self.visio_bom_edits):
+                    and not self.visio_bom_edits and not self.remove_parts
+                    and not self.add_parts):
                 messagebox.showwarning(
                     "Nothing to do",
                     "Enter a 'Find' value, tick 'Save copy as next revision', "
@@ -5946,6 +6744,8 @@ def launch_gui() -> int:
                     dict(self.visio_rev_entry), dict(self.visio_approval),
                     dict(self.excel_approval), self.out_dir,
                     dict(self.visio_bom_edits),
+                    {f: dict(d) for f, d in self.remove_parts.items()},
+                    {f: dict(d) for f, d in self.add_parts.items()},
                 ),
                 daemon=True,
             ).start()
@@ -5954,8 +6754,10 @@ def launch_gui() -> int:
                     make_pdf, bump_rev, update_rev_text, bom_edits,
                     changelog_entry, author_name, make_summary,
                     visio_rev_entry, visio_approval, excel_approval, out_dir,
-                    visio_bom_edits=None):
+                    visio_bom_edits=None, remove_parts=None, add_parts=None):
             visio_bom_edits = visio_bom_edits or {}
+            remove_parts = remove_parts or {}
+            add_parts = add_parts or {}
             total_repl = 0
             done = 0
             errors = 0
@@ -5974,7 +6776,9 @@ def launch_gui() -> int:
                     cell_edits = None
                     excel_approved = False
                     if ((bom_edits or changelog_entry or author_name
-                         or excel_approval) and detect_format(f) == "xlsx"):
+                         or excel_approval or remove_parts.get(f)
+                         or add_parts.get(f))
+                            and detect_format(f) == "xlsx"):
                         merged: dict = {}
                         try:
                             # BOM edits are per-file: {file: {sheet: {ref: val}}}
@@ -5999,6 +6803,13 @@ def launch_gui() -> int:
                                     excel_approved = True
                                 for part, d in ae.items():
                                     merged.setdefault(part, {}).update(d)
+                            # Add / remove parts (shift + renumber) -> cells.
+                            if remove_parts.get(f) or add_parts.get(f):
+                                for sheet, d in build_excel_parts_ops(
+                                    f, remove_parts.get(f, {}),
+                                    add_parts.get(f, {}),
+                                ).items():
+                                    merged.setdefault(sheet, {}).update(d)
                         except Exception:  # noqa: BLE001
                             merged = {}
                         cell_edits = merged or None
@@ -6033,7 +6844,16 @@ def launch_gui() -> int:
                                     f, pairs, case_sensitive)
                             except Exception:  # noqa: BLE001
                                 pn_repl = {}
-                        merged = _merge_bom_edit_dicts(staged_vbom, pn_repl)
+                        parts_ops = {}
+                        if remove_parts.get(f) or add_parts.get(f):
+                            try:
+                                parts_ops = build_visio_parts_ops(
+                                    f, remove_parts.get(f, {}),
+                                    add_parts.get(f, {}), case_sensitive)
+                            except Exception:  # noqa: BLE001
+                                parts_ops = {}
+                        merged = _merge_bom_edit_dicts(
+                            staged_vbom, pn_repl, parts_ops)
                         vbom = merged or None
                     has_edits = bool(cell_edits or staged_rev_entry or appr
                                      or vbom)
@@ -6370,7 +7190,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"Could not start the GUI ({exc}).", file=sys.stderr)
             print(
                 "Use the command line instead, e.g.:\n"
-                "  python visio_replace_tool.py drawing.vsdx "
+                "  python drawing_bom_studio.py drawing.vsdx "
                 '--find "Old" --replace "New" --pdf',
                 file=sys.stderr,
             )

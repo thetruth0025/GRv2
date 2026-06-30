@@ -1,6 +1,6 @@
 name: Build Windows EXE
 
-# Builds a standalone Windows .exe of the Visio Text Replacer and uploads it
+# Builds a standalone Windows .exe of Drawing & BOM Studio and uploads it
 # as a downloadable artifact. Runs automatically on pushes to the feature
 # branch, and can also be started manually from the Actions tab
 # ("Run workflow").
@@ -11,7 +11,7 @@ on:
     branches:
       - claude/visio-text-replace-pdf-3fpldd
     paths:
-      - visio_replace_tool.py
+      - drawing_bom_studio.py
       - .github/workflows/build-windows-exe.yml
 
 jobs:
@@ -30,11 +30,11 @@ jobs:
         run: pip install pyinstaller
 
       - name: Build the EXE
-        run: pyinstaller --onefile --windowed --name VisioTextReplacer visio_replace_tool.py
+        run: pyinstaller --onefile --windowed --name DrawingBOMStudio drawing_bom_studio.py
 
       - name: Upload the EXE artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VisioTextReplacer-windows
-          path: dist/VisioTextReplacer.exe
+          name: DrawingBOMStudio-windows
+          path: dist/DrawingBOMStudio.exe
           if-no-files-found: error

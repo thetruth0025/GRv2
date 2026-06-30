@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM  Builds a standalone Windows EXE of the Visio Text Replacer.
+REM  Builds a standalone Windows EXE of Drawing & BOM Studio.
 REM  Run this ONCE; afterwards you can share/run the EXE without
 REM  needing Python installed. (Building still needs Python.)
 REM ============================================================
@@ -29,7 +29,7 @@ echo Installing PyInstaller (if not already present)...
 
 echo.
 echo Building the EXE...
-%PY% -m PyInstaller --onefile --windowed --name VisioTextReplacer visio_replace_tool.py || (
+%PY% -m PyInstaller --onefile --windowed --name DrawingBOMStudio drawing_bom_studio.py || (
     echo Build failed.
     pause
     exit /b 1
@@ -38,7 +38,7 @@ echo Building the EXE...
 echo.
 echo  ------------------------------------------------------------
 echo   Done!  Your program is here:
-echo       dist\VisioTextReplacer.exe
+echo       dist\DrawingBOMStudio.exe
 echo.
 echo   You can move that EXE anywhere and double-click to run it.
 echo   (PDF export still needs LibreOffice installed.)
