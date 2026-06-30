@@ -45,7 +45,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.20.0 (rev/approval format, BOM-shift-free summary, robot icon)"
+__version__ = "2.20.1 (How-to-use help rewritten around the three tabs)"
 
 import argparse
 import datetime
@@ -4525,20 +4525,21 @@ HELP_TITLE = "Drawing & BOM Studio — How to Use"
 HELP_SECTIONS = [
     ("What this tool does", [
         "**Drawing & BOM Studio** edits Microsoft **Visio drawings (.vsdx)** "
-        "and **Excel workbooks (.xlsx)** in bulk: it finds and replaces text "
-        "across many files at once, saves each result as a new "
-        "**next-revision** copy (your originals are never changed), and writes "
-        "a **change summary** you can hand to an approver.",
-        "The window has three tabs that all run together: **Find → Replace** "
-        "(text rules), **Parts** (add / remove / edit rows in the Visio parts "
-        "tables and Excel BOMs), and **Approve & Revise** (revision rows, "
-        "approvals, Change Log, Author).",
-        "It also has per-format helpers: edit a part's whole Excel BOM row, "
-        "append a Change Log entry, stamp the Author box, add a row to a Visio "
-        "revision table, and **approve** drawings/workbooks in bulk.",
-        "* **Approvals** let one approver sign off **every** loaded file at "
-        "once — by REV letter in Visio drawings, or by discipline (EE / ME / "
-        "Production) in Excel workbooks — without opening each file by hand.",
+        "and **Excel workbooks (.xlsx)** in bulk. It streamlines the repetitive "
+        "edits of a drawing release in one place, saves each result as a new "
+        "**next-revision** copy (your originals are never changed), and can "
+        "write a **change summary** you can hand to an approver.",
+        "Work is organised into **three tabs** that all run together when you "
+        "click **Run**:",
+        "* **Find → Replace** — text find/replace rules across many files.",
+        "* **Parts** — find & edit, **add**, or **remove** rows in the Visio "
+        "parts tables and Excel BOMs, with item/line numbers renumbered "
+        "automatically.",
+        "* **Approve & Revise** — bump revisions, add a revision-table row, "
+        "**approve** drawings/workbooks in bulk, append a Change Log entry, and "
+        "stamp the Author box.",
+        "Fill in whichever tabs you need — anything staged on any tab is "
+        "applied in a single pass over the files.",
     ]),
     ("Before you start", [
         "* Your originals are never modified — every result is a separate copy.",
@@ -4549,149 +4550,99 @@ HELP_SECTIONS = [
         "Re-save old .vsd / .xls files in the new format first.",
     ]),
     ("Document types (from the file name)", [
-        "Files are classified by their name so rules can target a whole type:",
+        "Files are classified by their name so rules and editors can target a "
+        "whole type:",
         "* **BOM** — name contains DOCxxxxx (e.g. DOC00475)",
         "* **System Drawing** — name contains DWGxxxxx",
         "* **Cable Drawing** — name contains CBLxxxxx",
         "Anything else is **Other**.",
     ]),
-    ("Step 1 — Add your files", [
-        "* Pick **Single file**, or **Batch** to process several at once "
-        "(you can mix Visio and Excel).",
+    ("Add your files", [
+        "Above the tabs: pick **Single file**, or **Batch** to process several "
+        "at once (you can mix Visio and Excel).",
         "* Use **Add files...** to pick several, or **Add folder...** to add "
         "every .vsdx/.xlsx in a folder.",
         "* **Remove selected** / **Clear** manage the list.",
     ]),
-    ("Step 2 — Add find / replace rules", [
-        "* Each rule has a **Find:** box and a **Replace with:** box. Click "
-        "**+ Add another rule** for more.",
+    ("Tab 1 · Find → Replace", [
+        "Each rule has a **Find:** box and a **Replace with:** box. Click "
+        "**+ Add another rule** for more terms.",
         "* The **in:** dropdown chooses which document type(s) the rule "
         "applies to — tick **All files**, or any of BOM / System Drawing / "
         "Cable Drawing.",
         "* Matching is case-insensitive unless you tick **Case sensitive**, "
-        "and it finds text even when Visio/Excel split it into pieces.",
+        "and it finds text even when Visio/Excel split it across formatting "
+        "runs.",
+        "* Replacements reach Visio shape text, Excel cells, and the **Part "
+        "Number** cells of parts tables / BOMs (see the Parts tab below).",
     ]),
-    ("Step 2 (Excel only) — Edit BOM rows", [
-        "Put a part number in a **Find** box, then click **Excel: find & edit "
-        "rows...**.",
+    ("Tab 2 · Parts — Find & edit existing rows (Excel)", [
+        "Put a part number in a **Find** box, then on the **Parts** tab click "
+        "**Excel: find & edit rows...**.",
         "* It finds the **P/N** / **Part Number** column and lists every "
         "matching row **grouped by file**, showing the **sheet name** and row "
         "it was found on.",
         "* Edit **Manufacturer, Unit Cost, Description, Qty, Notes** for each "
         "row — you can set a different value per file.",
-        "* The **Show find value(s)** dropdown filters the list to one or more "
-        "find values (handy when many rules produce a lot of matches).",
-        "* The **Copy 1st down** buttons (Manufacturer / Unit Cost / "
-        "Description / Qty) copy the first shown row's value into the rest of "
-        "that **find value's** rows — fill all instances of a part from the "
-        "first one.",
-        "* **Reset fields** puts every field back to the originally found "
-        "data. **Refresh lookup** re-scans; **Save edits** stages the changes. "
-        "Numbers stay numeric.",
+        "* **Show find value(s)** filters the list; the **Copy 1st down** "
+        "buttons fill the rest of a find value's rows from the first one; "
+        "**Reset fields** restores the found data; **Refresh lookup** re-scans; "
+        "**Save edits** stages the changes. Numbers stay numeric.",
     ]),
-    ("Step 2 (Excel only) — Change Log entry", [
-        "Click **Excel: add Change Log entry...** and fill in **Item, ECN #** "
-        "(or ECO#), **ERB Approval Date, Change Description, Change Author**.",
-        "* The row is appended to the **Change Log** sheet of every Excel "
-        "file, at the next free row (found via the ECN # column).",
-        "* The Change Log sheet is otherwise **protected** — Find/Replace and "
-        "BOM edits never touch it, for traceability.",
-    ]),
-    ("Step 2 (Excel only) — Author + date", [
-        "Click **Excel: set Author + date...** and type a name. On every "
-        "Excel sheet (except the Change Log), the name beside the **Author** "
-        "box is replaced and the date beside it is set to **today** (kept in "
-        "the same format).",
-    ]),
-    ("Step 2 (Excel only) — Approve (EE / ME / Production)", [
-        "Click **Excel: approve (EE/ME/Prod)...** to sign off as an approver. "
-        "Pick the **discipline** (EE, ME, or Production) and type your name.",
-        "* The dialog shows which **approval boxes were found** in your files.",
-        "* On run, your name goes in the cell **beside that discipline's "
-        "label** and **today's date** in the next cell (kept in the existing "
-        "date's format), on **every sheet except the Change Log**, in every "
-        "loaded Excel file.",
-    ]),
-    ("Step 2 (Visio only) — Edit parts-table rows", [
+    ("Tab 2 · Parts — Find & edit existing rows (Visio)", [
         "Put a part number in a **Find** box, then click **Visio: find & edit "
         "rows...** to edit the parts list at the bottom of the R/C/P/W sheets "
         "(Item / Ref/DES # / Cable Name / Description / Part Number / "
         "Manufacturer / Qty/Length / Unit).",
         "* Rows are matched by **Part Number** and listed **per file and "
-        "sheet** (e.g. Sheet: R0001), each field pre-filled — edit any of them.",
-        "* Same helpers as the Excel editor: a **Show find value(s)** filter, "
-        "**Copy 1st down** buttons (Manufacturer / Description / Qty/Length / "
-        "Unit), **Reset fields**, and **Refresh lookup**. Opens in its own "
-        "window.",
-        "* The **Part Number** itself is changed by your normal **Find -> "
+        "sheet** (e.g. Sheet: R0001), each field pre-filled — edit any of them. "
+        "Same helpers as the Excel editor, in its own window.",
+        "* The **Part Number** itself is changed by your normal **Find → "
         "Replace** rule: a row whose part number matches the Find value has "
         "that cell set to the Replace value. A cell written **'<P/N> or "
         "equiv.'** still matches the bare part number, and the whole cell is "
         "replaced (put 'or equiv.' in the Replace box to keep it).",
-        "* On run, each change is written to the embedded worksheet **and "
-        "drawn into the table's cached picture**.",
-        "* **Note (Visio embedded tables):** Visio keeps its own cached image "
-        "of an embedded Excel object and may not repaint it on the page until "
-        "you **double-click the table once** (which reloads it from the "
-        "corrected worksheet). The underlying data is already right, so it "
-        "prints/exports correctly; the one-time double-click just refreshes "
-        "Visio's on-screen picture.",
+        "* Each change is written to the embedded worksheet **and** drawn into "
+        "the table's cached picture (see 'Refreshing a Visio embedded table' "
+        "below).",
     ]),
-    ("Parts tab — Remove parts", [
-        "On the **Parts** tab, type a part number in the **Remove** box and "
-        "click **Find & choose rows to remove...**. Every parts-table / BOM "
-        "row with that part number is listed **per file and sheet**, each with "
-        "a checkbox.",
-        "* Tick the rows to delete and click **Save removals**. They are "
-        "staged, not applied yet — the **Run** button does the work.",
+    ("Tab 2 · Parts — Remove a part", [
+        "On the **Parts** tab, type a part number in the **Remove** box (it's "
+        "independent of the Find boxes) and click **Find & choose rows to "
+        "remove...**. Every parts-table / BOM row with that part number is "
+        "listed **per file and sheet**, each with a checkbox.",
+        "* Tick the rows to delete and click **Save removals** — they're "
+        "staged; the **Run** button does the work.",
         "* **Removals accumulate.** Look up another part number and save again "
         "and the new picks are **added** to the staged list (they don't replace "
         "it), so you can remove several different parts in one run. Re-open the "
-        "same number to see/clear what's ticked.",
+        "same number to review or un-tick rows.",
         "* On run, each ticked row is removed, the rows below it **shift up to "
         "close the gap**, and any **item / line-number** sequence is renumbered "
-        "(1, 2, 3, …). Works on both Excel BOMs and the embedded Visio parts "
-        "tables (the cached picture and the table's display range too).",
-        "* The parts list ends at the **last row with a Description** — an "
+        "(1, 2, 3, …). Works on Excel BOMs and the embedded Visio parts tables "
+        "(the cached picture and the table's display range too).",
+        "* The parts list ends at the **last row with a Description**, so an "
         "approval or revision block lower in the same sheet is never touched or "
         "shifted.",
     ]),
-    ("Parts tab — Add parts", [
-        "On the **Parts** tab, click **Add parts...**. Pick a **file type** "
+    ("Tab 2 · Parts — Add new parts", [
+        "On the **Parts** tab click **Add parts...**. Pick a **file type** "
         "(BOM / Cable Drawing / System Drawing), then the **file** and the "
-        "**sheet / table**. The current parts (including their item numbers) "
-        "are shown for reference.",
+        "**sheet / table**. The current parts (with their item numbers) are "
+        "shown for reference.",
         "* Fill in the blank row(s) at the bottom — one row per new part. Use "
         "**+ Add row** for more.",
-        "* Use the trailing **Insert as item #** box to say where the part "
-        "goes: type **3** and it becomes item 3 and the parts at 3-and-below "
-        "move down. Leave it **blank** to add at the **end** of the parts list "
-        "(right after the last Description, never below an approval block). "
-        "Item/line numbers are renumbered automatically.",
-        "* Click **Save** to stage the new parts (you can add to several "
-        "sheets / files before running).",
-        "* **Add happens before Remove**, and both run together with any "
-        "Find → Replace rules and Approve & Revise actions — fill in whichever "
-        "tabs you need and they are all applied in one run.",
+        "* Use the trailing **Insert as item #** box to choose where the part "
+        "lands: type **3** and it becomes item 3, pushing the parts at "
+        "3-and-below down. Leave it **blank** to add at the **end** of the "
+        "parts list (right after the last Description, never below an approval "
+        "block). Item/line numbers are renumbered automatically.",
+        "* Click **Save** to stage the new parts — you can add to several "
+        "sheets and files before running.",
+        "* **Add is applied before Remove**, and both run together with the "
+        "Find → Replace rules and the Approve & Revise actions in one pass.",
     ]),
-    ("Step 2 (Visio only) — Add a revision entry", [
-        "Click **Visio: add revision entry...** to add a row to the "
-        "**revision-history table** on a drawing's cover page (the chart in a "
-        "corner with REV / DESCRIPTION / DATE / APPROVED columns).",
-        "* The dialog shows the **columns it detected**. Fill in **ECN #, "
-        "Description, Date, Approved By** (skip any) — the same for every file.",
-        "* The **REV** column is filled **automatically per file** with that "
-        "file's own next revision letter, so a whole batch each gets its "
-        "correct next letter (you don't type it).",
-        "* On run, **every** Visio file gets the new row: an existing **blank "
-        "row** is filled, otherwise a new row is **cloned** below the last one, "
-        "with **matching border lines** drawn around it.",
-        "* If no table is confidently found on a file, that file is **left "
-        "unchanged** (the Status box says so) — it never risks the drawing.",
-        "* In an embedded-Excel revision table, the values are written "
-        "**Calibri 8, centered and middle-aligned** to match the table.",
-    ]),
-    ("Step 2 (Visio only) — Approve a revision", [
+    ("Tab 3 · Approve & Revise — Approve a Visio revision", [
         "Click **Visio: approve revision...** to sign off a revision without "
         "opening the drawing. Just type your **name**.",
         "* By default it signs off **each file's own latest revision**, "
@@ -4700,13 +4651,53 @@ HELP_SECTIONS = [
         "a specific one.",
         "* On run, your name goes into the **Approved** column of that revision "
         "row, in every loaded Visio file's revision table (native cells or an "
-        "embedded Excel table).",
+        "embedded Excel table). In an embedded table it's written **Calibri 8, "
+        "centered and middle-aligned** to match.",
         "* An approval **does not bump the revision**; the copy is named "
         "**<name>_approved_<today's date>** so it's clearly a sign-off.",
-        "* In an embedded-Excel revision table, the name is written "
-        "**Calibri 8, centered and middle-aligned** to match the table.",
     ]),
-    ("Step 3 — Options", [
+    ("Tab 3 · Approve & Revise — Approve Excel (EE / ME / Production)", [
+        "Click **Excel: approve (EE/ME/Prod)...**, pick the **discipline** "
+        "(EE, ME, or Production) and type your name. The dialog shows which "
+        "**approval boxes were found** in your files.",
+        "* On run, your name goes in the cell **beside that discipline's "
+        "label** and **today's date** in the next cell (kept in the existing "
+        "date's format), on **every sheet except the Change Log**, in every "
+        "loaded Excel file.",
+    ]),
+    ("Tab 3 · Approve & Revise — Add a Visio revision entry", [
+        "Click **Visio: add revision entry...** to add a row to the "
+        "**revision-history table** on a drawing's cover page (the chart with "
+        "REV / DESCRIPTION / DATE / APPROVED columns).",
+        "* The dialog shows the **columns it detected**. Fill in **ECN #, "
+        "Description, Date, Approved By** (skip any) — the same for every file.",
+        "* The **REV** column is filled **automatically per file** with that "
+        "file's own next revision letter, so a whole batch each gets its "
+        "correct next letter (you don't type it).",
+        "* On run, **every** Visio file gets the new row: an existing **blank "
+        "row** is filled, otherwise a new row is **cloned** below the last one, "
+        "with **matching border lines** drawn around it. Values written into an "
+        "embedded-Excel revision table are **Calibri 8, centered and "
+        "middle-aligned** to match the table.",
+        "* If no table is confidently found on a file, that file is **left "
+        "unchanged** (the Status box says so) — it never risks the drawing.",
+    ]),
+    ("Tab 3 · Approve & Revise — Excel Change Log entry", [
+        "Click **Excel: add Change Log entry...** and fill in **Item, ECN #** "
+        "(or ECO#), **ERB Approval Date, Change Description, Change Author**.",
+        "* The row is appended to the **Change Log** sheet of every Excel "
+        "file, at the next free row (found via the ECN # column).",
+        "* The Change Log sheet is otherwise **protected** — Find/Replace and "
+        "BOM edits never touch it, for traceability.",
+    ]),
+    ("Tab 3 · Approve & Revise — Excel Author + date", [
+        "Click **Excel: set Author + date...** and type a name. On every "
+        "Excel sheet (except the Change Log), the name beside the **Author** "
+        "box is replaced and the date beside it is set to **today** (kept in "
+        "the same format).",
+    ]),
+    ("Options", [
+        "Below the tabs:",
         "* **Case sensitive** / **Whole word only** — control matching.",
         "* **Also export PDF (LibreOffice)** — off by default.",
         "* **Save copy as next revision (REVx -> next)** — name each copy "
@@ -4732,12 +4723,16 @@ HELP_SECTIONS = [
     ("The change summary", [
         "An HTML document grouped by **document type**, then **file**. For each "
         "file it lists changes as **Change (where) / Before / After** — text "
-        "replacements, BOM edits, the Author name+date, the appended Change Log "
-        "row, and the revision bump. Print it to PDF for sign-off.",
+        "replacements, parts/BOM edits, parts added/removed, the Author "
+        "name+date, the appended Change Log row, revision entries, approvals, "
+        "and the revision bump. Print it to PDF for sign-off.",
         "* **Identical changes are grouped into one line.** A change repeated "
         "across sheets/pages (like the REV bump) shows once, noting **all "
-        "sheets** or the **specific sheets** it happened on — so the summary is "
-        "quick to review instead of one line per sheet.",
+        "sheets** or the **specific sheets** it happened on.",
+        "* **Parts tables and BOMs are compared by row, not position.** When a "
+        "part is added or removed and the rows below shift up and renumber, the "
+        "summary reports only the genuine **Part added** / **Part removed** "
+        "(plus any in-place field edits) — never the renumbering itself.",
     ]),
     ("Revisions", [
         "* The revision letter is read from the **file name** (e.g. REVA).",
@@ -4749,14 +4744,31 @@ HELP_SECTIONS = [
         "**every worksheet** of an Excel workbook, since the title block "
         "repeats on each sheet.",
     ]),
+    ("Refreshing a Visio embedded table", [
+        "The parts tables and the revision table in a Visio drawing are "
+        "**embedded Excel objects**. Visio keeps its own **cached picture** of "
+        "each and may not repaint it on the page until the object is "
+        "**double-clicked once** (which reloads it from the corrected "
+        "worksheet).",
+        "* The tool writes the corrected worksheet data **and** patches that "
+        "cached picture and the object's display range, so the underlying data, "
+        "numbering and ranges are always right — it **prints and exports "
+        "correctly** either way.",
+        "* If a table still looks unchanged on screen, double-click it once in "
+        "Visio to refresh the preview.",
+    ]),
     ("Appearance", [
         "* Use the **Dark / Light** button (top-right) to switch themes.",
+        "* The window/taskbar icon is the app's robot mascot.",
     ]),
     ("Tips & troubleshooting", [
         "* Nothing replaced? Check spelling, the **in:** type, and **Case "
         "sensitive**.",
         "* 'Sheet 0 of N' in a PDF is a LibreOffice limitation — export the "
         "PDF from Visio for correct sheet numbers.",
+        "* A part you added/removed not showing in a Visio table on screen? "
+        "Double-click the table once to refresh Visio's picture (the data is "
+        "already correct).",
         "* The title bar shows the version; keep it up to date.",
     ]),
 ]
