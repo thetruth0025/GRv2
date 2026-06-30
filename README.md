@@ -69,10 +69,14 @@ HTML copy you can save or print to PDF for training/reference.
 - **Python 3.8+** — use the installer from [python.org](https://www.python.org/downloads/).
   On Windows/macOS the standard installer already includes the `tkinter` GUI
   library. On Linux install it with e.g. `sudo apt install python3-tk`.
-- **LibreOffice** — only needed for PDF export (text replacement works without it).
-  - Windows: <https://www.libreoffice.org/download/>
-  - macOS: `brew install --cask libreoffice` (or the `.dmg`)
-  - Linux: `sudo apt install libreoffice`
+- **A PDF engine** — only needed for PDF export (text replacement works without
+  one):
+  - **Best, Windows:** installed **Microsoft Visio / Excel** + the **pywin32**
+    package (`pip install pywin32`). The tool exports through the apps' own
+    *Export as PDF* for the highest fidelity and correct *Sheet X of Y* numbers.
+  - **Fallback / other platforms:** **LibreOffice** —
+    Windows <https://www.libreoffice.org/download/>,
+    macOS `brew install --cask libreoffice`, Linux `sudo apt install libreoffice`.
 - **Pillow** *(optional)* — `pip install pillow`. If present, the buttons are
   drawn with smooth anti-aliased corners; without it they still work, just with
   plainer corners. The app already renders at your display's real DPI so text
@@ -145,11 +149,15 @@ Options:
 - **Case sensitive** — match the exact capitalization (off by default).
 - **Whole word only** — only match complete words (won't change `foobar` when
   finding `foo`).
-- **Also export PDF (LibreOffice)** — *off by default.* Produces a PDF via
-  LibreOffice. Note: LibreOffice does not evaluate Visio page-number fields, so
-  a "Sheet X of Y" title block renders as "Sheet 0 of Y". For correct sheet
-  numbers and best fidelity, open the edited `.vsdx` and **export the PDF from
-  Visio** (File → Export → PDF).
+- **Also export PDF** — *off by default.* Produces a PDF of each result.
+- **Use installed Visio/Excel for PDF (best quality)** — *on by default.* On
+  **Windows** with Visio/Excel installed (and `pywin32`), each file is exported
+  through the app's own *Export as PDF*, which gives the best fidelity and
+  **correct "Sheet X of Y" page numbers**. If that isn't available (non-Windows,
+  apps not installed, or pywin32 missing) it **falls back to LibreOffice** —
+  which renders "Sheet X of Y" as "Sheet 0 of Y". Turn this off to always use
+  LibreOffice. The **Status** log reports which engine ran for each file. From
+  the CLI, use `--pdf-engine auto|native|libreoffice` (default `auto`).
 - **Save copy as next revision (REVx → next)** — name the copy as the next
   revision letter instead of `*_edited` (on by default; see *Revisions* above).
 - **...and update the REV box in the drawing** — also bump the `REVx` letter box

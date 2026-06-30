@@ -25,9 +25,11 @@ table, inline strings, and drawing text boxes. Geometry, formatting, themes,
 styles, etc. are left untouched, and a search term is matched even when it is
 split across formatting runs.
 
-PDF export is done with LibreOffice. Note: LibreOffice does not evaluate
-field-based values (e.g. a Visio "Sheet X of Y" page-number field), so export
-from the source app for those; PDF export is off by default.
+PDF export (off by default) uses the installed Microsoft Visio / Excel "Export
+as PDF" on Windows for best fidelity -- including correct page-number fields
+("Sheet X of Y") -- and falls back to LibreOffice (which renders such fields as
+"Sheet 0 of Y") on other platforms or when those apps aren't available. The
+native path needs the pywin32 package.
 
 Run the GUI:
     python drawing_bom_studio.py
@@ -45,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.21.0 (guided 3-step wizard + animated robot mascot)"
+__version__ = "2.22.0 (native Visio/Excel PDF export, toggle-switch options)"
 
 import argparse
 import datetime
@@ -4384,6 +4386,160 @@ def convert_to_pdf(
         shutil.rmtree(profile_dir, ignore_errors=True)
 
 
+# --- Native PDF export via installed Microsoft Visio / Excel (Windows) -------
+#
+# When Visio/Excel are installed, exporting through their own "Export as PDF"
+# (the COM ExportAsFixedFormat method) gives the highest fidelity -- and, unlike
+# LibreOffice, it evaluates Visio page-number fields, so "Sheet X of Y" is
+# correct. Needs pywin32; Windows only. Anything goes wrong -> the caller falls
+# back to LibreOffice.
+
+def native_pdf_available() -> bool:
+    """True if native Visio/Excel PDF export *could* work here (Windows with
+    pywin32). Whether the apps themselves are installed is only known when we
+    actually try to drive them -- failures fall back to LibreOffice."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import win32com.client  # noqa: F401
+        import pythoncom  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class NativePdfExporter:
+    """Exports .vsdx / .xlsx to PDF using the installed Microsoft Visio / Excel
+    via COM. Keeps each app open across a batch (started lazily) and closes them
+    with :meth:`close`. Create and use it on a single thread."""
+
+    def __init__(self):
+        import pythoncom
+        pythoncom.CoInitialize()
+        self._co = True
+        self._visio = None
+        self._excel = None
+
+    def _visio_app(self):
+        if self._visio is None:
+            import win32com.client as w32
+            try:
+                app = w32.gencache.EnsureDispatch("Visio.Application")
+            except Exception:  # noqa: BLE001 - fall back to late binding
+                app = w32.Dispatch("Visio.Application")
+            for attr, val in (("Visible", 0), ("ScreenUpdating", 0),
+                              ("AlertResponse", 2)):
+                try:
+                    setattr(app, attr, val)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._visio = app
+        return self._visio
+
+    def _excel_app(self):
+        if self._excel is None:
+            import win32com.client as w32
+            try:
+                app = w32.gencache.EnsureDispatch("Excel.Application")
+            except Exception:  # noqa: BLE001
+                app = w32.Dispatch("Excel.Application")
+            for attr, val in (("Visible", False), ("DisplayAlerts", False)):
+                try:
+                    setattr(app, attr, val)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._excel = app
+        return self._excel
+
+    def export(self, in_path, out_dir):
+        """Export one file; returns the PDF Path, or None for unsupported
+        types (so the caller can fall back). Raises on a real failure."""
+        in_path = Path(in_path)
+        out = Path(out_dir) / (in_path.stem + ".pdf")
+        ext = in_path.suffix.lower()
+        if ext in (".vsdx", ".vsdm", ".vsd"):
+            return self._export_visio(in_path, out)
+        if ext in (".xlsx", ".xlsm", ".xls"):
+            return self._export_excel(in_path, out)
+        return None
+
+    def _export_visio(self, in_path, out):
+        app = self._visio_app()
+        try:
+            from win32com.client import constants as C
+            fmt, intent, prange = (C.visFixedFormatPDF, C.visDocExIntentPrint,
+                                   C.visPrintAll)
+        except Exception:  # noqa: BLE001 - late binding: use documented ints
+            fmt, intent, prange = 1, 1, 0
+        # OpenEx flags: read-only (2) + macros disabled (128).
+        doc = app.Documents.OpenEx(str(in_path), 2 + 128)
+        try:
+            if out.exists():
+                out.unlink()
+            doc.ExportAsFixedFormat(fmt, str(out), intent, prange)
+        finally:
+            try:
+                doc.Close()
+            except Exception:  # noqa: BLE001
+                pass
+        if not out.exists():
+            raise RuntimeError("Visio produced no PDF")
+        return out
+
+    def _export_excel(self, in_path, out):
+        app = self._excel_app()
+        try:
+            from win32com.client import constants as C
+            typ = C.xlTypePDF
+        except Exception:  # noqa: BLE001
+            typ = 0  # xlTypePDF
+        wb = app.Workbooks.Open(str(in_path), 0, True)  # UpdateLinks=0, RO
+        try:
+            if out.exists():
+                out.unlink()
+            wb.ExportAsFixedFormat(typ, str(out))
+        finally:
+            try:
+                wb.Close(False)
+            except Exception:  # noqa: BLE001
+                pass
+        if not out.exists():
+            raise RuntimeError("Excel produced no PDF")
+        return out
+
+    def close(self):
+        for app in (self._excel, self._visio):
+            try:
+                if app is not None:
+                    app.Quit()
+            except Exception:  # noqa: BLE001
+                pass
+        self._excel = self._visio = None
+        if self._co:
+            try:
+                import pythoncom
+                pythoncom.CoUninitialize()
+            except Exception:  # noqa: BLE001
+                pass
+            self._co = False
+
+
+def export_pdf(in_path, out_dir, exporter: "NativePdfExporter | None" = None):
+    """Make a PDF for ``in_path`` in ``out_dir``. Uses the native Visio/Excel
+    ``exporter`` (best quality) when given, else LibreOffice. Returns
+    (pdf_path, engine_name, note) -- ``note`` describes a native->LibreOffice
+    fallback, or is None."""
+    if exporter is not None:
+        try:
+            p = exporter.export(in_path, out_dir)
+            if p is not None:
+                return p, "Visio/Excel", None
+        except Exception as exc:  # noqa: BLE001 - fall back to LibreOffice
+            return (convert_to_pdf(in_path, out_dir), "LibreOffice",
+                    f"native export failed ({exc}); used LibreOffice")
+    return convert_to_pdf(in_path, out_dir), "LibreOffice", None
+
+
 # ---------------------------------------------------------------------------
 # Command-line interface
 # ---------------------------------------------------------------------------
@@ -4416,6 +4572,13 @@ def _run_cli(argv: Sequence[str]) -> int:
     )
     parser.add_argument(
         "--pdf", action="store_true", help="Also export the result(s) to PDF",
+    )
+    parser.add_argument(
+        "--pdf-engine", choices=["auto", "native", "libreoffice"],
+        default="auto",
+        help="PDF engine: 'native' = installed Visio/Excel (Windows, best "
+        "quality), 'libreoffice' = LibreOffice, 'auto' = native when "
+        "available else LibreOffice (default).",
     )
     parser.add_argument(
         "--case-sensitive", action="store_true",
@@ -4452,6 +4615,27 @@ def _run_cli(argv: Sequence[str]) -> int:
     update_rev_text = not args.no_rev_text
     had_error = False
 
+    cli_exporter = None
+    if args.pdf and args.pdf_engine in ("auto", "native"):
+        if native_pdf_available():
+            try:
+                cli_exporter = NativePdfExporter()
+            except Exception as exc:  # noqa: BLE001
+                print(f"(native PDF unavailable: {exc}; using LibreOffice)",
+                      file=sys.stderr)
+        elif args.pdf_engine == "native":
+            print("(native PDF engine needs Windows + Visio/Excel + pywin32; "
+                  "using LibreOffice)", file=sys.stderr)
+
+    try:
+        return _run_cli_loop(args, pairs, update_rev_text, cli_exporter)
+    finally:
+        if cli_exporter is not None:
+            cli_exporter.close()
+
+
+def _run_cli_loop(args, pairs, update_rev_text, cli_exporter) -> int:
+    had_error = False
     for raw in args.inputs:
         in_path = Path(raw)
         if not in_path.exists():
@@ -4504,8 +4688,11 @@ def _run_cli(argv: Sequence[str]) -> int:
                 }.get(rd, rd)
                 print(f"    {note}")
             if args.pdf:
-                pdf = convert_to_pdf(out_path, Path(out_path).parent)
-                print(f"    PDF -> {pdf}")
+                pdf, engine, note = export_pdf(
+                    out_path, Path(out_path).parent, cli_exporter)
+                if note:
+                    print(f"    ({note})")
+                print(f"    PDF [{engine}] -> {pdf}")
         except (ValueError, RuntimeError) as exc:
             print(f"Error ({in_path.name}): {exc}", file=sys.stderr)
             had_error = True
@@ -4557,9 +4744,10 @@ HELP_SECTIONS = [
     ]),
     ("Before you start", [
         "* Your originals are never modified — every result is a separate copy.",
-        "* PDF export needs **LibreOffice** installed (optional; off by "
-        "default). For correct Visio 'Sheet X of Y' numbers, export the PDF "
-        "from Visio instead.",
+        "* PDF export is optional (off by default). On **Windows with Visio / "
+        "Excel installed** it uses their own **Export as PDF** for best quality "
+        "(and correct 'Sheet X of Y' page numbers); otherwise it uses "
+        "**LibreOffice** (which renders 'Sheet X of Y' as 'Sheet 0 of Y').",
         "* Only the modern **.vsdx** and **.xlsx** formats are supported. "
         "Re-save old .vsd / .xls files in the new format first.",
     ]),
@@ -4713,7 +4901,10 @@ HELP_SECTIONS = [
     ("Step 3 · Options", [
         "On the **Review & Run** step:",
         "* **Case sensitive** / **Whole word only** — control matching.",
-        "* **Also export PDF (LibreOffice)** — off by default.",
+        "* **Also export PDF** — off by default. With **Use installed "
+        "Visio/Excel for PDF** on (the default), it exports through the "
+        "installed apps for best quality on Windows and falls back to "
+        "LibreOffice; turn it off to always use LibreOffice.",
         "* **Save copy as next revision (REVx -> next)** — name each copy "
         "as the next letter (REVA -> REVB) and bump the REV box inside the "
         "file. On by default. (Ignored for a file you're approving — those are "
@@ -4781,8 +4972,12 @@ HELP_SECTIONS = [
     ("Tips & troubleshooting", [
         "* Nothing replaced? Check spelling, the **in:** type, and **Case "
         "sensitive**.",
-        "* 'Sheet 0 of N' in a PDF is a LibreOffice limitation — export the "
-        "PDF from Visio for correct sheet numbers.",
+        "* 'Sheet 0 of N' in a PDF is a LibreOffice limitation — keep **Use "
+        "installed Visio/Excel for PDF** on (Windows) for correct sheet "
+        "numbers, or export the PDF from Visio.",
+        "* PDF didn't use Visio/Excel? It needs **Windows**, those apps "
+        "**installed**, and the **pywin32** package; otherwise it falls back to "
+        "LibreOffice (the Status log says which engine ran).",
         "* A part you added/removed not showing in a Visio table on screen? "
         "Double-click the table once to refresh Visio's picture (the data is "
         "already correct).",
@@ -5829,9 +6024,11 @@ def launch_gui() -> int:
             opts.pack(fill="x", **pad)
             self.case_var = tk.BooleanVar(value=False)
             self.word_var = tk.BooleanVar(value=False)
-            # PDF export (LibreOffice) is off by default: export from Visio for
-            # correct sheet numbers and full fidelity.
+            # PDF export is off by default. When on, prefer the installed
+            # Visio/Excel "Export as PDF" (best fidelity, correct page-number
+            # fields) and fall back to LibreOffice.
             self.pdf_var = tk.BooleanVar(value=False)
+            self.native_pdf_var = tk.BooleanVar(value=True)
             self.rev_var = tk.BooleanVar(value=True)
             self.revtext_var = tk.BooleanVar(value=True)
             self.summary_var = tk.BooleanVar(value=True)
@@ -5843,14 +6040,17 @@ def launch_gui() -> int:
             opt_grid.grid_columnconfigure(1, weight=1, uniform="opt")
             self._toggles = []
             self.revtext_toggle = None
+            self.native_pdf_toggle = None
             toggle_specs = [
                 (self.rev_var, "Save copy as next revision (REVx → next)",
                  self._sync_rev_options),
                 (self.revtext_var, "…and update the REV box in the drawing",
                  None),
+                (self.pdf_var, "Also export PDF", self._sync_pdf_options),
+                (self.native_pdf_var,
+                 "Use installed Visio/Excel for PDF (best quality)", None),
                 (self.summary_var, "Generate change summary (before / after)",
                  None),
-                (self.pdf_var, "Also export PDF (LibreOffice)", None),
                 (self.case_var, "Case sensitive", None),
                 (self.word_var, "Whole word only", None),
             ]
@@ -5862,6 +6062,8 @@ def launch_gui() -> int:
                 self._toggles.append(t)
                 if var is self.revtext_var:
                     self.revtext_toggle = t
+                if var is self.native_pdf_var:
+                    self.native_pdf_toggle = t
 
             # Output folder: where all finished files (and the summary) land.
             opt_row4 = ttk.Frame(opts)
@@ -5920,12 +6122,19 @@ def launch_gui() -> int:
             self.show_step(1)
             self.on_mode_change()
             self._sync_rev_options()
+            self._sync_pdf_options()
             self._log(f"Drawing & BOM Studio  v{__version__}")
-            if find_libreoffice() is None:
+            if native_pdf_available():
                 self._log(
-                    "Note: LibreOffice was not found, so PDF export is "
-                    "unavailable. Install it from libreoffice.org to enable "
-                    "PDF output. Text replacement still works."
+                    "PDF: will use installed Visio/Excel for best quality "
+                    "(LibreOffice as fallback)."
+                )
+            elif find_libreoffice() is None:
+                self._log(
+                    "Note: no PDF engine found. On Windows, install Microsoft "
+                    "Visio/Excel (best) or LibreOffice; elsewhere install "
+                    "LibreOffice from libreoffice.org. Text replacement still "
+                    "works without it."
                 )
 
         def _setup_style(self):
@@ -6056,6 +6265,10 @@ def launch_gui() -> int:
         def _sync_rev_options(self):
             if self.revtext_toggle is not None:
                 self.revtext_toggle.set_enabled(self.rev_var.get())
+
+        def _sync_pdf_options(self):
+            if self.native_pdf_toggle is not None:
+                self.native_pdf_toggle.set_enabled(self.pdf_var.get())
 
         # -- file list ------------------------------------------------------
         def on_mode_change(self):
@@ -7726,6 +7939,7 @@ def launch_gui() -> int:
                     dict(self.visio_bom_edits),
                     {f: dict(d) for f, d in self.remove_parts.items()},
                     {f: dict(d) for f, d in self.add_parts.items()},
+                    self.native_pdf_var.get(),
                 ),
                 daemon=True,
             ).start()
@@ -7734,7 +7948,8 @@ def launch_gui() -> int:
                     make_pdf, bump_rev, update_rev_text, bom_edits,
                     changelog_entry, author_name, make_summary,
                     visio_rev_entry, visio_approval, excel_approval, out_dir,
-                    visio_bom_edits=None, remove_parts=None, add_parts=None):
+                    visio_bom_edits=None, remove_parts=None, add_parts=None,
+                    prefer_native_pdf=True):
             visio_bom_edits = visio_bom_edits or {}
             remove_parts = remove_parts or {}
             add_parts = add_parts or {}
@@ -7743,6 +7958,19 @@ def launch_gui() -> int:
             errors = 0
             last_output = None
             summary_records = []
+            native_exporter = None
+            if make_pdf and prefer_native_pdf and native_pdf_available():
+                try:
+                    native_exporter = NativePdfExporter()
+                    self.log("PDF: using installed Visio/Excel "
+                             "(falls back to LibreOffice if needed).")
+                except Exception as exc:  # noqa: BLE001
+                    self.log(f"PDF: native Visio/Excel unavailable ({exc}); "
+                             "using LibreOffice.")
+                    native_exporter = None
+            elif make_pdf and prefer_native_pdf and sys.platform != "win32":
+                self.log("PDF: native Visio/Excel export is Windows-only; "
+                         "using LibreOffice.")
             try:
                 for f in files:
                     src = Path(f)
@@ -8012,8 +8240,12 @@ def launch_gui() -> int:
                             })
 
                         if make_pdf:
-                            pdf_path = convert_to_pdf(out_vsdx, out_vsdx.parent)
-                            self.log(f"    PDF -> {pdf_path.name}")
+                            pdf_path, engine, note = export_pdf(
+                                out_vsdx, out_vsdx.parent, native_exporter)
+                            if note:
+                                self.log(f"    ({note})")
+                            self.log(
+                                f"    PDF [{engine}] -> {pdf_path.name}")
                             last_output = pdf_path
                         done += 1
                     except Exception as exc:  # noqa: BLE001
@@ -8066,6 +8298,8 @@ def launch_gui() -> int:
                     0, lambda e=exc: messagebox.showerror("Error", str(e))
                 )
             finally:
+                if native_exporter is not None:
+                    native_exporter.close()
                 self._running = False
                 self.root.after(0, self._set_busy, False)
 
