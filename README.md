@@ -214,10 +214,15 @@ written **"<P/N> or equiv."** still matches a Find value of just the part number
 Replace value. (To keep "or equiv.", include it in the Replace box.)
 
 On **Run**, each change is written to that cell in the embedded
-worksheet **and drawn into the table's cached picture**, so the new value shows
-when the drawing is opened — no need to double-click the table in Visio. (A
-heavily re-wrapped long Description may occasionally need a one-time refresh in
-Visio; short fields are always exact.)
+worksheet **and drawn into the table's cached picture**.
+
+> **Note on Visio embedded tables.** Visio keeps its own cached image of an
+> embedded Excel object and may not repaint it on the page view until the
+> object is **double-clicked once** (which reloads it from the corrected
+> worksheet). The underlying data is already correct — it prints and exports
+> right — so the one-time double-click is only to refresh Visio's on-screen
+> preview. This applies to the parts-table edits and the add/remove below, and
+> to the revision-table row.
 
 ### Parts tab: add or remove parts
 
@@ -226,27 +231,39 @@ parts tables and Excel BOMs, and **renumbers the Item / line sequence**
 automatically. It works on the same tables as *find & edit rows* above, and runs
 together with everything else when you click **Run**.
 
+The parts list is treated as the **contiguous block of rows with a Description**,
+ending at the last one. An approval or revision block that sits lower in the same
+sheet (after a blank row) is **never touched, shifted, or renumbered** — fixing
+the earlier behaviour where a removal could distort the data below the table.
+
 **Remove parts.** Type a part number in the **Remove** box (independent of the
 Find boxes) and click **Find & choose rows to remove...**. Every parts-table /
 BOM row with that part number is listed **per file and sheet**, each with a
 checkbox. Tick the ones to delete and click **Save removals**. On run, each
-ticked row is removed, the rows below it **shift up**, and the item/line numbers
-are renumbered. For Visio this updates the embedded worksheet, the cached
-picture, and the table's display range so the deleted row leaves no blank.
+ticked row is removed, the rows below it **shift up to close the gap**, and the
+item/line numbers are renumbered.
+
+Removals **accumulate across part numbers**: look up one number and save, then
+look up another and save — the second set is *added* to the first rather than
+replacing it, so you can stage several different parts for removal in one run.
+(Re-open the same number to review or clear what's ticked.)
 
 **Add parts.** Click **Add parts...**, then use the dropdowns to pick a **file
 type** (BOM / Cable Drawing / System Drawing), the **file**, and the **sheet /
-table**. The current parts are shown for reference; fill in the blank row(s) at
-the bottom (use **+ Add row** for more) and click **Save**. Leave the item/line
-number blank — it's assigned automatically on run. You can stage new parts on
-several sheets and files before running. On run the new rows are appended to the
-worksheet, the sequence is renumbered, the table's display range grows, and the
-rows are drawn into the cached picture (and the OLE object's frame is enlarged)
-so they show when the drawing opens.
+table**. The current parts (with their item numbers) are shown for reference;
+fill in the blank row(s) at the bottom (use **+ Add row** for more) and click
+**Save**. You can stage new parts on several sheets and files before running.
+
+Each new row has a trailing **Insert as item #** box that sets *where* the part
+lands: type `3` and it becomes item 3, pushing the parts at 3-and-below down;
+leave it **blank** to add at the **end** of the parts list (right after the last
+Description — never below an approval block). Item/line numbers are renumbered
+automatically. **Adds are applied before removals.**
 
 Remove and Add are **staged**, not applied immediately: nothing changes until
 you click **Run**, and they apply alongside the Find → Replace rules and the
-Approve & Revise actions in the same pass.
+Approve & Revise actions in the same pass. (See the Visio embedded-table note
+above about double-clicking once to refresh Visio's on-screen preview.)
 
 ### The "Change Log" sheet is protected
 

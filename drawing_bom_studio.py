@@ -45,7 +45,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.18.0 (Drawing & BOM Studio: add/remove parts on tables & BOMs)"
+__version__ = "2.19.0 (parts: insert-at-position, stacked removals, table cutoff)"
 
 import argparse
 import datetime
@@ -2185,14 +2185,37 @@ def apply_bom_edits_to_embedded(xlsx_bytes: bytes, cells: list,
 # existing worksheet + cached-picture appliers can carry them out.
 # ---------------------------------------------------------------------------
 
+# A reserved key on an "add row" dict that carries the desired item number
+# (where in the table the new part should land). Blank/None => append at end.
+ADD_POSITION_KEY = "__at__"
+
+
 def _table_data_rownums(rows: dict, col_field: dict, header_row: int):
-    """The filled data-row numbers of a parts/BOM table (rows with any value in
-    a known column), in order."""
-    cols = set(col_field)
-    out = [rn for rn in rows
-           if rn > header_row
-           and any((rows[rn].get(c) or "").strip() for c in cols)]
-    return sorted(out)
+    """The data-row numbers of a parts/BOM table, in order.
+
+    The parts list is the **contiguous run** of rows after the header whose
+    Description cell is filled. It stops at the first blank-Description row --
+    the separator before any approval/revision block lower in the same sheet --
+    so numbering and shifting never run past the real parts list (using the
+    last value in the Description column as the cutoff). Falls back to any
+    known-column content when there's no Description column."""
+    key_cols = [c for c, f in col_field.items() if f == "Description"]
+    if not key_cols:
+        key_cols = list(col_field)
+
+    def filled(rn):
+        cells = rows.get(rn) or {}
+        return any((cells.get(c) or "").strip() for c in key_cols)
+
+    starts = sorted(rn for rn in rows if rn > header_row and filled(rn))
+    if not starts:
+        return []
+    out = []
+    rn = starts[0]
+    while filled(rn):
+        out.append(rn)
+        rn += 1
+    return out
 
 
 def _detect_seq_cols(rows: dict, data_rownums: list, cols: list):
@@ -2209,85 +2232,137 @@ def _detect_seq_cols(rows: dict, data_rownums: list, cols: list):
     return seq
 
 
-def _parts_final_end_row(rows: dict, col_field: dict, header_row: int,
-                         remove_rownums: set, add_rows: list = None) -> int:
-    """The bottom row a parts/BOM table will occupy after the given removals
-    and additions are applied (the rows shift up / new rows append). Mirrors
-    the destination-row layout in :func:`compute_parts_shift_edits`."""
-    data = _table_data_rownums(rows, col_field, header_row)
-    keep = [rn for rn in data if rn not in set(remove_rownums or ())]
-    n = len(keep) + len(list(add_rows or ()))
-    dest = list(data)
-    last = data[-1] if data else header_row
-    while len(dest) < n:
-        last += 1
-        dest.append(last)
-    return dest[n - 1] if n else header_row
+def _add_row_position(src: dict):
+    """The requested item position of an 'add row' dict, or None for 'append'."""
+    pos = src.get(ADD_POSITION_KEY)
+    try:
+        pos = int(str(pos).strip())
+    except (TypeError, ValueError):
+        return None
+    return pos if pos >= 1 else None
 
 
-def compute_parts_shift_edits(rows: dict, col_field: dict, header_row: int,
-                              remove_rownums: set, add_rows: list = None):
-    """Compute the cell edits that remove ``remove_rownums`` and/or append
-    ``add_rows`` (each a {field: value} dict) to a parts/BOM table: remaining
-    rows shift up, new rows go on the end, and sequence columns are renumbered.
-
-    Each edit: {ref, col, row, field, old, new, item, pn} -- 'item'/'pn' carry
-    the row's CURRENT values so the cached-picture applier can find it."""
-    remove_rownums = set(remove_rownums or ())
+def _parts_plan(rows: dict, col_field: dict, header_row: int,
+                remove_rownums: set, add_rows: list = None):
+    """Plan an add/remove on a parts/BOM table. Additions are inserted **before**
+    removals are applied; each addition lands at its requested item number (the
+    ADD_POSITION_KEY), or at the end of the table if that's blank. The table
+    extent is bounded by the last Description row. Returns a dict with the
+    column order, the renumber map, the final ordered source list, the physical
+    destination rows, the rows to clear, the final bottom row, and the new rows
+    expressed as {field: final_value} (for the cached picture)."""
+    remove = set(remove_rownums or ())
     add_rows = list(add_rows or ())
     cols = sorted(
         {c for rn in rows for c in rows[rn]} | set(col_field), key=_col_index)
     data_rownums = _table_data_rownums(rows, col_field, header_row)
-    if not data_rownums and not add_rows:
-        return []
     seq = _detect_seq_cols(rows, data_rownums, cols) or {}
-    # If there's an Item field but it wasn't a clean run, still renumber it.
     item_col = next((c for c, f in col_field.items() if f == "Item"), None)
     if item_col and item_col not in seq:
         seq[item_col] = 1
-    pn_col = next((c for c, f in col_field.items() if f == "Part Number"), None)
 
-    keep = [rn for rn in data_rownums if rn not in remove_rownums]
-    # Source values for each destination slot: kept rows, then the new rows.
-    sources = [("row", rn) for rn in keep] + [("new", d) for d in add_rows]
+    # 1) Start from the original rows; 2) insert the new rows at their requested
+    #    positions (ascending, so each lands at its final item number); append
+    #    the position-less ones; 3) THEN drop the removed originals.
+    seq_list = [("orig", rn) for rn in data_rownums]
+    numbered, appended = [], []
+    for a in add_rows:
+        pos = _add_row_position(a)
+        (appended if pos is None else numbered).append((pos, a))
+    numbered.sort(key=lambda t: t[0])
+    for pos, a in numbered:
+        idx = max(0, min(pos - 1, len(seq_list)))
+        seq_list.insert(idx, ("new", a))
+    for _pos, a in appended:
+        seq_list.append(("new", a))
+    seq_list = [x for x in seq_list
+                if not (x[0] == "orig" and x[1] in remove)]
 
-    # Destination row numbers: reuse existing rows, then extend past the last.
-    last = data_rownums[-1] if data_rownums else header_row
+    count = len(seq_list)
     dest_rows = list(data_rownums)
-    while len(dest_rows) < len(sources):
+    last = data_rownums[-1] if data_rownums else header_row
+    while len(dest_rows) < count:
         last += 1
         dest_rows.append(last)
+    trailing = dest_rows[count:]
+    dest_rows = dest_rows[:count]
+    final_end = dest_rows[-1] if dest_rows else header_row
+
+    new_field_rows = []
+    for i, (kind, src) in enumerate(seq_list):
+        if kind != "new":
+            continue
+        fr = {}
+        for col in cols:
+            field = col_field.get(col, "")
+            if col in seq:
+                val = str(seq[col] + i)
+            else:
+                val = src.get(col)
+                if val is None:
+                    val = src.get(field, "")
+            if field and val:
+                fr[field] = str(val)
+        new_field_rows.append(fr)
+
+    return {"cols": cols, "seq": seq, "item_col": item_col,
+            "seq_list": seq_list, "dest_rows": dest_rows, "trailing": trailing,
+            "final_end": final_end, "new_field_rows": new_field_rows}
+
+
+def _parts_final_end_row(rows: dict, col_field: dict, header_row: int,
+                         remove_rownums: set, add_rows: list = None) -> int:
+    """The bottom row a parts/BOM table will occupy after the add/remove."""
+    return _parts_plan(rows, col_field, header_row,
+                       remove_rownums, add_rows)["final_end"]
+
+
+def compute_parts_shift_edits(rows: dict, col_field: dict, header_row: int,
+                              remove_rownums: set, add_rows: list = None):
+    """Compute the cell edits that add ``add_rows`` and/or remove
+    ``remove_rownums`` from a parts/BOM table: new rows are inserted at their
+    requested item number (added before removals are applied), remaining rows
+    shift to close gaps, and sequence columns are renumbered.
+
+    Each edit: {ref, col, row, field, old, new, item, pn} -- 'item'/'pn' carry
+    the row's CURRENT values so the cached-picture applier can find it."""
+    plan = _parts_plan(rows, col_field, header_row, remove_rownums, add_rows)
+    cols, seq, item_col = plan["cols"], plan["seq"], plan["item_col"]
+    if not plan["dest_rows"] and not plan["trailing"]:
+        return []
+    pn_col = next((c for c, f in col_field.items() if f == "Part Number"), None)
 
     edits = []
-    for i, dest_rn in enumerate(dest_rows):
+    for i, dest_rn in enumerate(plan["dest_rows"]):
         old_item = (rows.get(dest_rn, {}).get(item_col) or "") if item_col else ""
         old_pn = (rows.get(dest_rn, {}).get(pn_col) or "") if pn_col else ""
-        if i < len(sources):
-            kind, src = sources[i]
-            for col in cols:
-                if col in seq:
-                    newv = str(seq[col] + i)
-                elif kind == "row":
-                    newv = (rows.get(src, {}).get(col) or "")
-                else:  # new row keyed by column letter (or canonical field)
-                    newv = src.get(col)
-                    if newv is None:
-                        newv = src.get(col_field.get(col, ""), "")
-                oldv = (rows.get(dest_rn, {}).get(col) or "")
-                if str(newv) != str(oldv):
-                    edits.append({
-                        "ref": f"{col}{dest_rn}", "col": col, "row": dest_rn,
-                        "field": col_field.get(col, ""), "old": str(oldv),
-                        "new": str(newv), "item": str(old_item),
-                        "pn": str(old_pn)})
-        else:  # trailing rows left over after a removal: clear them
-            for col in cols:
-                oldv = (rows.get(dest_rn, {}).get(col) or "")
-                if str(oldv) != "":
-                    edits.append({
-                        "ref": f"{col}{dest_rn}", "col": col, "row": dest_rn,
-                        "field": col_field.get(col, ""), "old": str(oldv),
-                        "new": "", "item": str(old_item), "pn": str(old_pn)})
+        kind, src = plan["seq_list"][i]
+        for col in cols:
+            if col in seq:
+                newv = str(seq[col] + i)
+            elif kind == "orig":
+                newv = (rows.get(src, {}).get(col) or "")
+            else:  # new row keyed by column letter (or canonical field)
+                newv = src.get(col)
+                if newv is None:
+                    newv = src.get(col_field.get(col, ""), "")
+            oldv = (rows.get(dest_rn, {}).get(col) or "")
+            if str(newv) != str(oldv):
+                edits.append({
+                    "ref": f"{col}{dest_rn}", "col": col, "row": dest_rn,
+                    "field": col_field.get(col, ""), "old": str(oldv),
+                    "new": str(newv), "item": str(old_item),
+                    "pn": str(old_pn)})
+    for dest_rn in plan["trailing"]:  # rows left over after a net removal
+        old_item = (rows.get(dest_rn, {}).get(item_col) or "") if item_col else ""
+        old_pn = (rows.get(dest_rn, {}).get(pn_col) or "") if pn_col else ""
+        for col in cols:
+            oldv = (rows.get(dest_rn, {}).get(col) or "")
+            if str(oldv) != "":
+                edits.append({
+                    "ref": f"{col}{dest_rn}", "col": col, "row": dest_rn,
+                    "field": col_field.get(col, ""), "old": str(oldv),
+                    "new": "", "item": str(old_item), "pn": str(old_pn)})
     return edits
 
 
@@ -2295,32 +2370,10 @@ def _parts_add_field_rows(rows: dict, col_field: dict, header_row: int,
                           remove_rownums: set, add_rows: list):
     """The genuinely-new rows expressed as {canonical_field: final_value} dicts
     (with sequence columns already renumbered) -- for drawing into the EMF."""
-    add_rows = list(add_rows or ())
     if not add_rows:
         return []
-    cols = sorted(
-        {c for rn in rows for c in rows[rn]} | set(col_field), key=_col_index)
-    data_rownums = _table_data_rownums(rows, col_field, header_row)
-    keep = [rn for rn in data_rownums if rn not in set(remove_rownums or ())]
-    seq = _detect_seq_cols(rows, data_rownums, cols) or {}
-    item_col = next((c for c, f in col_field.items() if f == "Item"), None)
-    if item_col and item_col not in seq:
-        seq[item_col] = 1
-    out = []
-    for j, src in enumerate(add_rows):
-        fr = {}
-        for col in cols:
-            field = col_field.get(col, "")
-            if col in seq:
-                val = str(seq[col] + len(keep) + j)
-            else:
-                val = src.get(col)
-                if val is None:
-                    val = src.get(field, "")
-            if field and val:
-                fr[field] = str(val)
-        out.append(fr)
-    return out
+    return _parts_plan(rows, col_field, header_row,
+                       remove_rownums, add_rows)["new_field_rows"]
 
 
 def build_visio_parts_ops(path, removals: dict, additions: dict,
@@ -4407,8 +4460,13 @@ HELP_SECTIONS = [
         "equiv.'** still matches the bare part number, and the whole cell is "
         "replaced (put 'or equiv.' in the Replace box to keep it).",
         "* On run, each change is written to the embedded worksheet **and "
-        "drawn into the table's cached picture**, so it shows when the drawing "
-        "opens — no need to double-click the table in Visio.",
+        "drawn into the table's cached picture**.",
+        "* **Note (Visio embedded tables):** Visio keeps its own cached image "
+        "of an embedded Excel object and may not repaint it on the page until "
+        "you **double-click the table once** (which reloads it from the "
+        "corrected worksheet). The underlying data is already right, so it "
+        "prints/exports correctly; the one-time double-click just refreshes "
+        "Visio's on-screen picture.",
     ]),
     ("Parts tab — Remove parts", [
         "On the **Parts** tab, type a part number in the **Remove** box and "
@@ -4417,26 +4475,35 @@ HELP_SECTIONS = [
         "a checkbox.",
         "* Tick the rows to delete and click **Save removals**. They are "
         "staged, not applied yet — the **Run** button does the work.",
-        "* On run, each ticked row is removed, the rows below it **shift up**, "
-        "and any **item / line-number** sequence is renumbered (1, 2, 3, …). "
-        "Works on both Excel BOMs and the embedded Visio parts tables, "
-        "including the cached picture and the table's display range.",
+        "* **Removals accumulate.** Look up another part number and save again "
+        "and the new picks are **added** to the staged list (they don't replace "
+        "it), so you can remove several different parts in one run. Re-open the "
+        "same number to see/clear what's ticked.",
+        "* On run, each ticked row is removed, the rows below it **shift up to "
+        "close the gap**, and any **item / line-number** sequence is renumbered "
+        "(1, 2, 3, …). Works on both Excel BOMs and the embedded Visio parts "
+        "tables (the cached picture and the table's display range too).",
+        "* The parts list ends at the **last row with a Description** — an "
+        "approval or revision block lower in the same sheet is never touched or "
+        "shifted.",
     ]),
     ("Parts tab — Add parts", [
         "On the **Parts** tab, click **Add parts...**. Pick a **file type** "
         "(BOM / Cable Drawing / System Drawing), then the **file** and the "
-        "**sheet / table**. The current parts are shown for reference.",
+        "**sheet / table**. The current parts (including their item numbers) "
+        "are shown for reference.",
         "* Fill in the blank row(s) at the bottom — one row per new part. Use "
-        "**+ Add row** for more. Leave the item/line number blank: it is "
-        "**assigned automatically** when you run.",
+        "**+ Add row** for more.",
+        "* Use the trailing **Insert as item #** box to say where the part "
+        "goes: type **3** and it becomes item 3 and the parts at 3-and-below "
+        "move down. Leave it **blank** to add at the **end** of the parts list "
+        "(right after the last Description, never below an approval block). "
+        "Item/line numbers are renumbered automatically.",
         "* Click **Save** to stage the new parts (you can add to several "
-        "sheets / files before running). The **Run** button appends them to "
-        "the worksheet, renumbers the sequence, grows the table's display "
-        "range, and draws the new rows into the cached picture so they show "
-        "when the drawing opens.",
-        "* **Remove and Add run together**, alongside any Find → Replace rules "
-        "and Approve & Revise actions — fill in whichever tabs you need and "
-        "they are all applied in one run.",
+        "sheets / files before running).",
+        "* **Add happens before Remove**, and both run together with any "
+        "Find → Replace rules and Approve & Revise actions — fill in whichever "
+        "tabs you need and they are all applied in one run.",
     ]),
     ("Step 2 (Visio only) — Add a revision entry", [
         "Click **Visio: add revision entry...** to add a row to the "
@@ -6058,7 +6125,8 @@ def launch_gui() -> int:
                 text=f"Rows containing part number '{pn}', grouped by file and "
                 "sheet. Tick the ones to remove. On run, each ticked row is "
                 "deleted, the rows below it shift up, and the item/line numbers "
-                "are renumbered.",
+                "are renumbered. Removals add up across part numbers — look up "
+                "another number and save again to stack more removals.",
             ).pack(fill="x", padx=10, pady=(10, 4))
 
             body = ttk.Frame(win)
@@ -6110,17 +6178,33 @@ def launch_gui() -> int:
                                       "row": m["row"], "var": var})
 
             def apply():
-                removals: dict = {}
-                n = 0
+                # Merge with anything already staged from earlier lookups (a
+                # different part number), so removals accumulate. Only the rows
+                # shown in THIS lookup are re-set from the checkboxes (so
+                # un-ticking one removes it); everything else is preserved.
+                merged = {f: {s: set(rs) for s, rs in d.items()}
+                          for f, d in self.remove_parts.items()}
+                for s in state:  # clear this lookup's rows, then re-add ticked
+                    rs = merged.get(s["file"], {}).get(s["sheet"])
+                    if rs is not None:
+                        rs.discard(s["row"])
                 for s in state:
                     if s["var"].get():
-                        removals.setdefault(s["file"], {}).setdefault(
+                        merged.setdefault(s["file"], {}).setdefault(
                             s["sheet"], set()).add(s["row"])
-                        n += 1
-                self.remove_parts = removals
+                for f in list(merged):  # drop empties
+                    for sh in list(merged[f]):
+                        if not merged[f][sh]:
+                            del merged[f][sh]
+                    if not merged[f]:
+                        del merged[f]
+                self.remove_parts = merged
+                total = sum(len(rs) for d in merged.values()
+                            for rs in d.values())
                 self.remove_status.configure(
-                    text=(f"{n} part row(s) staged for removal" if n else ""))
-                self.log(f"Staged {n} part removal(s)." if n
+                    text=(f"{total} part row(s) staged for removal"
+                          if total else ""))
+                self.log(f"Staged {total} part removal(s) total." if total
                          else "No part removals staged.")
                 win.destroy()
 
@@ -6149,8 +6233,11 @@ def launch_gui() -> int:
                 win, wraplength=870, justify="left",
                 text="Pick a file type, then the file and the sheet/table to "
                 "add to. The current parts are shown for reference; fill in the "
-                "blank row(s) at the bottom to add new parts. Item/line numbers "
-                "are assigned automatically on run.",
+                "blank row(s) at the bottom to add new parts. Use the trailing "
+                "“Insert as item #” box to choose where a part lands "
+                "(e.g. 3 makes it item 3 and pushes the rest down); leave it "
+                "blank to add at the end. Item/line numbers are renumbered "
+                "automatically on run.",
             ).pack(fill="x", padx=10, pady=(10, 4))
 
             ctl = ttk.Frame(win)
@@ -6212,6 +6299,14 @@ def launch_gui() -> int:
                         e.insert(0, values[col])
                     e.grid(row=r, column=ci, sticky="we", padx=1, pady=1)
                     ents[col] = e
+                # Trailing "Insert as item #" box: where the new part lands in
+                # the table (blank = at the end, after the last part).
+                pos = ttk.Entry(grid, width=10)
+                if values and values.get(ADD_POSITION_KEY):
+                    pos.insert(0, values[ADD_POSITION_KEY])
+                pos.grid(row=r, column=len(st["cols"]), sticky="we",
+                         padx=(10, 1), pady=1)
+                ents[ADD_POSITION_KEY] = pos
                 st["new_entries"].append(ents)
                 canvas.update_idletasks()
                 canvas.configure(scrollregion=canvas.bbox("all"))
@@ -6225,7 +6320,8 @@ def launch_gui() -> int:
                 for ents in st["new_entries"]:
                     vals = {c: e.get().strip() for c, e in ents.items()
                             if e.get().strip()}
-                    if vals:
+                    # A row counts only if it has real data, not just a position.
+                    if any(c != ADD_POSITION_KEY for c in vals):
                         new_rows.append(vals)
                 self.add_parts.setdefault(f, {})
                 if new_rows:
@@ -6262,6 +6358,10 @@ def launch_gui() -> int:
                               font=("Segoe UI", 9, "bold"),
                               foreground=pal["accent"]).grid(
                         row=0, column=ci, sticky="w", padx=2, pady=2)
+                ttk.Label(grid, text="Insert as item #\n(blank = end)",
+                          font=("Segoe UI", 8, "bold"), justify="center",
+                          foreground=pal["green"]).grid(
+                    row=0, column=len(cols), sticky="w", padx=(10, 2), pady=2)
                 for ri, row in enumerate(rows, start=1):
                     for ci, col in enumerate(cols):
                         ttk.Label(grid, text=str(row.get(col, ""))[:30],
