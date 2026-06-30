@@ -5282,6 +5282,120 @@ def launch_gui() -> int:
             self._text = text
             self._draw()
 
+    class ToggleSwitch(tk.Canvas):
+        """An on/off pill slider bound to a BooleanVar, with a label. Smooth
+        (Pillow) track + knob; falls back to plain canvas shapes without PIL."""
+
+        TW, TH, GAP = 46, 24, 12  # track width, track height, gap before label
+
+        def __init__(self, parent, text, variable, palette, command=None,
+                     font=None):
+            self.palette = palette
+            self.var = variable
+            self.command = command
+            self._enabled = True
+            self._hover = False
+            self._text = text
+            self._img = None
+            self.font = font or tkfont.Font(family="Segoe UI", size=10)
+            tw = self.font.measure(text)
+            w = self.TW + self.GAP + tw + 6
+            h = max(self.TH, self.font.metrics("linespace")) + 10
+            super().__init__(parent, width=w, height=h, highlightthickness=0,
+                             bd=0, bg=palette["bg"])
+            self.bind("<Button-1>", self._click)
+            self.bind("<Enter>", lambda e: self._set_hover(True))
+            self.bind("<Leave>", lambda e: self._set_hover(False))
+            try:
+                self._trace = self.var.trace_add(
+                    "write", lambda *a: self._draw())
+            except Exception:  # noqa: BLE001
+                self._trace = None
+            self._draw()
+
+        @staticmethod
+        def _rgb(h):
+            h = h.lstrip("#")
+            return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+        def _click(self, _e):
+            if not self._enabled:
+                return
+            self.var.set(not self.var.get())
+            self._draw()
+            if self.command:
+                self.command()
+
+        def _set_hover(self, v):
+            self._hover = bool(v) and self._enabled
+            self.configure(cursor="hand2" if self._hover else "")
+            self._draw()
+
+        def set_enabled(self, v):
+            self._enabled = bool(v)
+            self._draw()
+
+        def set_palette(self, palette):
+            self.palette = palette
+            self.configure(bg=palette["bg"])
+            self._draw()
+
+        def _track_image(self, track_hex, knob_on):
+            from PIL import Image, ImageDraw, ImageTk
+            ss = 4
+            W, H = self.TW * ss, self.TH * ss
+            img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            r = H // 2
+            d.rounded_rectangle([0, 0, W - 1, H - 1], radius=r,
+                                fill=self._rgb(track_hex) + (255,))
+            pad = 3 * ss
+            kr = r - pad
+            cx = (W - pad - kr) if knob_on else (pad + kr)
+            cy = H // 2
+            d.ellipse([cx - kr - ss, cy - kr - ss, cx + kr + ss,
+                       cy + kr + ss], fill=(0, 0, 0, 40))  # soft shadow
+            d.ellipse([cx - kr, cy - kr, cx + kr, cy + kr],
+                      fill=(255, 255, 255, 255))
+            self._img = ImageTk.PhotoImage(
+                img.resize((self.TW, self.TH), Image.LANCZOS))
+            return self._img
+
+        def _draw(self):
+            self.delete("all")
+            c = self.palette
+            self.configure(bg=c["bg"])
+            w = int(self["width"])
+            h = int(self["height"])
+            on = bool(self.var.get())
+            if not self._enabled:
+                track = c["btn_off"]
+                txt = c["muted"]
+            elif self._hover:
+                track = c["accent_dk"] if on else c["btn"]
+                txt = c["text"]
+            else:
+                track = c["accent"] if on else c["btn_off"]
+                txt = c["text"]
+            cy = h // 2
+            if _HAVE_PIL:
+                img = self._track_image(track, on)
+                self.create_image(0, cy - self.TH // 2, anchor="nw", image=img)
+            else:  # plain-canvas fallback
+                r = self.TH // 2
+                self.create_oval(0, cy - r, self.TH, cy + r, fill=track,
+                                 outline=track)
+                self.create_oval(self.TW - self.TH, cy - r, self.TW, cy + r,
+                                 fill=track, outline=track)
+                self.create_rectangle(r, cy - r, self.TW - r, cy + r,
+                                      fill=track, outline=track)
+                kr = r - 3
+                kx = (self.TW - 3 - kr) if on else (3 + kr)
+                self.create_oval(kx - kr, cy - kr, kx + kr, cy + kr,
+                                 fill="#ffffff", outline="#ffffff")
+            self.create_text(self.TW + self.GAP, cy, anchor="w",
+                             text=self._text, fill=txt, font=self.font)
+
     class RobotMascot(tk.Canvas):
         """A small animated robot mascot with a speech bubble. ``set_state``
         switches its pose + line; it animates itself on a timer. Needs Pillow;
@@ -5722,40 +5836,32 @@ def launch_gui() -> int:
             self.revtext_var = tk.BooleanVar(value=True)
             self.summary_var = tk.BooleanVar(value=True)
 
-            opt_row1 = ttk.Frame(opts)
-            opt_row1.pack(fill="x")
-            ttk.Checkbutton(
-                opt_row1, text="Case sensitive", variable=self.case_var
-            ).pack(side="left", padx=8, pady=6)
-            ttk.Checkbutton(
-                opt_row1, text="Whole word only", variable=self.word_var
-            ).pack(side="left", padx=8, pady=6)
-            ttk.Checkbutton(
-                opt_row1, text="Also export PDF (LibreOffice)",
-                variable=self.pdf_var,
-            ).pack(side="left", padx=8, pady=6)
-
-            opt_row2 = ttk.Frame(opts)
-            opt_row2.pack(fill="x")
-            ttk.Checkbutton(
-                opt_row2,
-                text="Save copy as next revision (REVx → next)",
-                variable=self.rev_var, command=self._sync_rev_options,
-            ).pack(side="left", padx=8, pady=6)
-            self.revtext_chk = ttk.Checkbutton(
-                opt_row2, text="...and update the REV box in the drawing",
-                variable=self.revtext_var,
-            )
-            self.revtext_chk.pack(side="left", padx=8, pady=6)
-
-            opt_row3 = ttk.Frame(opts)
-            opt_row3.pack(fill="x")
-            ttk.Checkbutton(
-                opt_row3,
-                text="Generate change summary (before/after, for approval "
-                "review)",
-                variable=self.summary_var,
-            ).pack(side="left", padx=8, pady=(0, 6))
+            # On/off toggle switches, laid out in two aligned columns.
+            opt_grid = ttk.Frame(opts)
+            opt_grid.pack(fill="x", padx=10, pady=(8, 8))
+            opt_grid.grid_columnconfigure(0, weight=1, uniform="opt")
+            opt_grid.grid_columnconfigure(1, weight=1, uniform="opt")
+            self._toggles = []
+            self.revtext_toggle = None
+            toggle_specs = [
+                (self.rev_var, "Save copy as next revision (REVx → next)",
+                 self._sync_rev_options),
+                (self.revtext_var, "…and update the REV box in the drawing",
+                 None),
+                (self.summary_var, "Generate change summary (before / after)",
+                 None),
+                (self.pdf_var, "Also export PDF (LibreOffice)", None),
+                (self.case_var, "Case sensitive", None),
+                (self.word_var, "Whole word only", None),
+            ]
+            for i, (var, label, cmd) in enumerate(toggle_specs):
+                t = ToggleSwitch(opt_grid, label, var, self.palette,
+                                 command=cmd)
+                t.grid(row=i // 2, column=i % 2, sticky="w",
+                       padx=(2, 18), pady=7)
+                self._toggles.append(t)
+                if var is self.revtext_var:
+                    self.revtext_toggle = t
 
             # Output folder: where all finished files (and the summary) land.
             opt_row4 = ttk.Frame(opts)
@@ -5940,15 +6046,16 @@ def launch_gui() -> int:
             self._draw_stepper()
             if self.mascot is not None:
                 self.mascot.set_palette(c)
+            for t in getattr(self, "_toggles", []):
+                t.set_palette(c)
             self._rbuttons = [b for b in self._rbuttons if b.winfo_exists()]
             for b in self._rbuttons:
                 b.set_palette(c)
             self._refresh_rule_menus()  # recolors the dropdown menus
 
         def _sync_rev_options(self):
-            self.revtext_chk.configure(
-                state="normal" if self.rev_var.get() else "disabled"
-            )
+            if self.revtext_toggle is not None:
+                self.revtext_toggle.set_enabled(self.rev_var.get())
 
         # -- file list ------------------------------------------------------
         def on_mode_change(self):
