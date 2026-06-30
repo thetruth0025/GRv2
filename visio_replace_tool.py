@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.3 (change summary now includes Visio revision & parts tables)"
+__version__ = "2.16.4 (summary lists sheets/pages in natural order)"
 
 import argparse
 import datetime
@@ -3279,6 +3279,13 @@ def diff_files(in_path, out_path) -> list:
     return []
 
 
+def _natural_key(s: str):
+    """Sort key that orders embedded numbers numerically, so sheet names like
+    R0001, R0002, R0010 come out in order (not R0001, R0010, R0002)."""
+    return [int(t) if t.isdigit() else t.lower()
+            for t in re.split(r"(\d+)", s or "")]
+
+
 def generate_change_summary(records, summary_path, run_dt=None) -> Path:
     """Write an HTML before/after change-review document.
 
@@ -3333,6 +3340,7 @@ def generate_change_summary(records, summary_path, run_dt=None) -> Path:
                 s = loc.split("!", 1)[0] if "!" in loc else loc
                 if s not in sheets:
                     sheets.append(s)
+            sheets.sort(key=_natural_key)  # list pages in order
             if len(sheets) == 1:
                 return (f'{_html.escape(sheets[0])} '
                         f'<span class="dim">({len(locs)} cells)</span>')
