@@ -165,6 +165,37 @@ On **Replace & Convert**, each row's staged changes are written to that exact
 cell in that file. Fields you leave unchanged are not touched, numbers stay
 numeric, and the P/N itself is changed by your normal Find → Replace rule.
 
+### Visio: find & edit parts-table rows
+
+The R/C/P/W drawing sheets carry a **parts list** at the bottom (columns
+**Item · Ref/DES # · Cable Name · Description · Part Number · Manufacturer ·
+Qty/Length · Unit**). This is the Visio counterpart of *Excel: find & edit
+rows*, with the same window, buttons and behaviour. Put a part number in a
+**Find** box, then click **Visio: find & edit rows...**. The tool:
+
+1. Scans every loaded `.vsdx`, finds each parts table (they're stored as
+   embedded Excel "Cable BOM" objects), and locates every row whose **Part
+   Number** matches a Find value.
+2. Lists each matched row **grouped by file and sheet** (e.g. *Sheet: R0001*),
+   labelled with its **Part Number** and **row**, showing that row's other
+   fields — **Ref/DES #**, **Cable Name**, **Description**, **Manufacturer**,
+   **Qty/Length**, **Unit** — pre-filled with the current values.
+3. Lets you edit each row **individually**, so the same part can get a
+   different value on one sheet than another. The editor opens in its **own
+   window** with the same helpers as the Excel one:
+   - a **Show find value(s)** dropdown to filter the list;
+   - **Copy 1st down** buttons (**Manufacturer**, **Description**,
+     **Qty/Length**, **Unit**) that copy the first shown row's value into the
+     rest of that find value's rows;
+   - **Reset fields** to restore the originally found data;
+   - **Refresh lookup** to re-scan after adding files or changing Find values.
+
+On **Replace & Convert**, each change is written to that cell in the embedded
+worksheet **and drawn into the table's cached picture**, so the new value shows
+when the drawing is opened — no need to double-click the table in Visio. (A
+heavily re-wrapped long Description may occasionally need a one-time refresh in
+Visio; short fields are always exact.)
+
 ### The "Change Log" sheet is protected
 
 A sheet named **Change Log** is **never** modified by Find → Replace or by the

@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.15.0 (auto-refresh embedded-Excel revision tables in Visio)"
+__version__ = "2.16.0 (Visio find & edit parts-table rows)"
 
 import argparse
 import datetime
@@ -1373,8 +1373,8 @@ def approve_revision_in_emf(emf: bytes, rev_letter: str,
         return None
 
 
-def _embedded_revtable_emf_member(zin: zipfile.ZipFile,
-                                  xlsx_member: str) -> Optional[str]:
+def _embedded_emf_member(zin: zipfile.ZipFile,
+                         xlsx_member: str) -> Optional[str]:
     """The cached-presentation EMF linked from an embedded worksheet's .rels."""
     rels = posixpath.join(posixpath.dirname(xlsx_member), "_rels",
                           posixpath.basename(xlsx_member) + ".rels")
@@ -1391,6 +1391,424 @@ def _embedded_revtable_emf_member(zin: zipfile.ZipFile,
     resolved = posixpath.normpath(
         posixpath.join(posixpath.dirname(xlsx_member), m.group(1)))
     return resolved if resolved in names else None
+
+
+# Backwards-compatible alias (the revision-table code used the old name).
+_embedded_revtable_emf_member = _embedded_emf_member
+
+
+# ---------------------------------------------------------------------------
+# Visio parts tables ("Cable BOM"): the find-&-edit-rows feature for .vsdx
+# ---------------------------------------------------------------------------
+#
+# The R/C/P/W drawing sheets carry a parts list at the bottom, stored the same
+# way as the revision table -- an embedded Excel "Cable BOM" worksheet shown via
+# a cached EMF. We locate those worksheets, find rows by Part Number, and edit
+# their cells (updating both the worksheet data and the cached picture).
+
+_VISIO_BOM_FIELDS = {
+    "Item": {"item", "itemno", "itemnumber", "item#", "no"},
+    "Ref/DES #": {"refdes", "refdes#", "referencedesignator", "designator",
+                  "refdesignator", "refdesno"},
+    "Cable Name": {"cablename", "cable", "wirename"},
+    "Description": {"description", "desc", "descr"},
+    "Part Number": {"partnumber", "partno", "partnum", "pn", "part", "pno"},
+    "Manufacturer": {"manufacturer", "mfg", "mfr", "manuf", "make", "vendor"},
+    "Qty/Length": {"qtylength", "qty", "quantity", "length", "qtylen", "qnty"},
+    "Unit": {"unit", "units", "uom"},
+}
+VISIO_BOM_FIELD_ORDER = ["Item", "Ref/DES #", "Cable Name", "Description",
+                         "Part Number", "Manufacturer", "Qty/Length", "Unit"]
+# Shown as editable (the find key Part Number and the auto Item are omitted).
+VISIO_BOM_EDIT_FIELDS = ["Ref/DES #", "Cable Name", "Description",
+                         "Manufacturer", "Qty/Length", "Unit"]
+VISIO_BOM_COPYDOWN = ["Manufacturer", "Description", "Qty/Length", "Unit"]
+
+
+def _canonical_bom_field(text: str) -> Optional[str]:
+    n = _norm_header(text)
+    if not n:
+        return None
+    for field, variants in _VISIO_BOM_FIELDS.items():
+        if n in variants or any(len(v) >= 4 and n.startswith(v)
+                                for v in variants):
+            return field
+    return None
+
+
+def _read_embedded_sheet_rows(xlsx_bytes: bytes):
+    """Parse an embedded .xlsx's first worksheet. Returns
+    (sheet_member, sheet_xml, rows) where rows is {rownum: {col: value}}."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(xlsx_bytes))
+    except (zipfile.BadZipFile, OSError):
+        return None
+    names = z.namelist()
+    sheet_member = next(
+        (n for n in names if re.match(r"xl/worksheets/sheet\d+\.xml$", n)),
+        None)
+    if not sheet_member:
+        return None
+    sst: List[str] = []
+    if "xl/sharedStrings.xml" in names:
+        try:
+            sroot = ET.fromstring(z.read("xl/sharedStrings.xml"))
+        except ET.ParseError:
+            sroot = None
+        if sroot is not None:
+            for si in sroot:
+                if _localname(si.tag) == "si":
+                    sst.append("".join(
+                        t.text or "" for t in si.iter()
+                        if _localname(t.tag) == "t"))
+    try:
+        sheet_xml = z.read(sheet_member).decode("utf-8", "replace")
+    except (KeyError, OSError):
+        return None
+    try:
+        wroot = ET.fromstring(sheet_xml)
+    except ET.ParseError:
+        return None
+    rows: dict[int, dict[str, str]] = {}
+    for c in wroot.iter():
+        if _localname(c.tag) != "c":
+            continue
+        ref = c.get("r")
+        if not ref:
+            continue
+        cm = re.match(r"([A-Z]+)(\d+)", ref)
+        if not cm:
+            continue
+        col, rownum = cm.group(1), int(cm.group(2))
+        raw_v = None
+        for ch in c:
+            ln = _localname(ch.tag)
+            if ln == "v":
+                raw_v = ch.text
+            elif ln == "is":
+                raw_v = "".join(x.text or "" for x in ch.iter()
+                                if _localname(x.tag) == "t")
+        val = raw_v
+        if c.get("t") == "s" and raw_v is not None and raw_v.isdigit():
+            idx = int(raw_v)
+            val = sst[idx] if idx < len(sst) else ""
+        if val is not None:
+            rows.setdefault(rownum, {})[col] = val
+    return sheet_member, sheet_xml, rows
+
+
+def _embedded_bom_info(xlsx_bytes: bytes):
+    """If an embedded worksheet is a Cable BOM parts table (a Part Number column
+    plus >=2 more known columns), return a dict describing it; else None."""
+    parsed = _read_embedded_sheet_rows(xlsx_bytes)
+    if not parsed:
+        return None
+    sheet_member, sheet_xml, rows = parsed
+    header_row = None
+    col_field: dict[str, str] = {}
+    best = 0
+    for rn in sorted(rows):
+        fields: dict[str, str] = {}
+        for col, val in rows[rn].items():
+            cf = _canonical_bom_field(val or "")
+            if cf and col not in fields:
+                fields[col] = cf
+        distinct = len(set(fields.values()))
+        if distinct > best:
+            best, header_row, col_field = distinct, rn, fields
+    if header_row is None or "Part Number" not in col_field.values() \
+            or len(set(col_field.values())) < 3:
+        return None
+    return {"sheet_member": sheet_member, "sheet_xml": sheet_xml,
+            "rows": rows, "col_field": col_field, "header_row": header_row}
+
+
+def _embedding_page_names(zin: zipfile.ZipFile) -> dict:
+    """Map each embedding member -> the display name of the page that shows it
+    (so a parts table can be labelled with its sheet, e.g. 'R0001')."""
+    out: dict[str, str] = {}
+    # page part -> display name, from pages.xml + its rels.
+    try:
+        pages_xml = zin.read("visio/pages/pages.xml").decode("utf-8", "replace")
+        prels = zin.read(
+            "visio/pages/_rels/pages.xml.rels").decode("utf-8", "replace")
+    except (KeyError, OSError):
+        return out
+    relmap = dict(re.findall(r'Id="([^"]+)"[^>]*?Target="([^"]+)"', prels))
+    rel_ns = ("{http://schemas.openxmlformats.org/officeDocument/2006/"
+              "relationships}id")
+    part_name: dict[str, str] = {}
+    try:
+        proot = ET.fromstring(pages_xml)
+    except ET.ParseError:
+        proot = None
+    if proot is not None:
+        for pg in proot.iter():
+            if _localname(pg.tag) != "Page":
+                continue
+            name = pg.get("Name") or pg.get("NameU") or ""
+            rid = None
+            for ch in pg:
+                if _localname(ch.tag) == "Rel":
+                    rid = ch.get(rel_ns)
+            tgt = relmap.get(rid or "")
+            if tgt:
+                resolved = posixpath.normpath(
+                    posixpath.join("visio/pages", tgt))
+                part_name[resolved] = name
+    # For each page part, read its rels and attribute embeddings to that page.
+    for part, name in part_name.items():
+        rels = posixpath.join(posixpath.dirname(part), "_rels",
+                              posixpath.basename(part) + ".rels")
+        try:
+            text = zin.read(rels).decode("utf-8", "replace")
+        except (KeyError, OSError):
+            continue
+        for tgt in re.findall(r'Target="([^"]*\.xlsx)"', text, re.IGNORECASE):
+            resolved = posixpath.normpath(
+                posixpath.join(posixpath.dirname(part), tgt))
+            out.setdefault(resolved, name)
+    return out
+
+
+def _embedded_bom_members(zin: zipfile.ZipFile) -> List[str]:
+    """Every embedding member whose worksheet is a Cable BOM parts table."""
+    out = []
+    for n in sorted(zin.namelist()):
+        if not _EMBED_XLSX_RE.search(n):
+            continue
+        try:
+            if _embedded_bom_info(zin.read(n)) is not None:
+                out.append(n)
+        except (KeyError, OSError):
+            continue
+    return out
+
+
+def visio_bom_scan_rows(path, part_numbers, case_sensitive=False):
+    """Find parts-table rows whose Part Number matches, across every Cable BOM
+    embedded in a .vsdx. Each match: {file, embed, emf, sheet_name, part, row,
+    matched, fields:{field:(ref,value)}}."""
+    matches = []
+    targets = [(p, p if case_sensitive else p.lower())
+               for p in part_numbers if p]
+    if not targets:
+        return matches
+    try:
+        zin = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return matches
+    with zin:
+        page_names = _embedding_page_names(zin)
+        for member in _embedded_bom_members(zin):
+            info = _embedded_bom_info(zin.read(member))
+            if not info:
+                continue
+            rows, col_field = info["rows"], info["col_field"]
+            hrow = info["header_row"]
+            pn_col = next(c for c, f in col_field.items()
+                          if f == "Part Number")
+            emf = _embedded_emf_member(zin, member)
+            for rn in sorted(rows):
+                if rn <= hrow:
+                    continue
+                pnval = (rows[rn].get(pn_col) or "").strip()
+                if not pnval:
+                    continue
+                cmp_val = pnval if case_sensitive else pnval.lower()
+                hit = next((o for o, t in targets if t == cmp_val), None)
+                if hit is None:
+                    continue
+                fields = {}
+                for col, cf in col_field.items():
+                    ref = f"{col}{rn}"
+                    fields[cf] = (ref, (rows[rn].get(col) or ""))
+                item_cell = fields.get("Item")
+                matches.append({
+                    "file": str(path), "embed": member, "emf": emf,
+                    "sheet_name": page_names.get(member, ""),
+                    "part": pnval, "row": rn, "matched": hit, "fields": fields,
+                    # The Item value and the 0-based data-row ordinal uniquely
+                    # identify the row in the cached picture (the Part Number
+                    # is NOT always unique -- e.g. "See Specifications").
+                    "item": (item_cell[1] if item_cell else ""),
+                    "row_index": rn - hrow - 1})
+    return matches
+
+
+def build_visio_bom_edits(path, bom_edits, case_sensitive=False) -> dict:
+    """Map staged Visio BOM field edits to per-embedding cell edits for one
+    file. bom_edits: {part_number: {field: new_value}}. Returns
+    {embed_member: {"emf": emf_member, "cells": [edit, ...]}} where each edit is
+    {ref, col, row, field, old, new, pn}."""
+    out: dict = {}
+    if not bom_edits:
+        return out
+    for m in visio_bom_scan_rows(path, list(bom_edits.keys()), case_sensitive):
+        for field, new_value in bom_edits.get(m["matched"], {}).items():
+            cell = m["fields"].get(field)
+            if cell is None:
+                continue
+            ref, old = cell
+            if new_value == old:
+                continue
+            col = re.match(r"[A-Z]+", ref).group(0)
+            entry = out.setdefault(m["embed"],
+                                   {"emf": m["emf"], "cells": []})
+            entry["cells"].append({
+                "ref": ref, "col": col, "row": m["row"], "field": field,
+                "old": old, "new": new_value, "pn": m["part"],
+                "item": m.get("item", ""), "row_index": m.get("row_index")})
+    return out
+
+
+def _emf_bom_header(records):
+    """For a parts-table EMF: (header_fields {field: x}, header_bottom_y,
+    col_tol). header_fields includes Part Number. Returns None if not a BOM."""
+    header_fields: dict[str, int] = {}
+    header_bottom = None
+    for r in records:
+        f = _canonical_bom_field(r["text"])
+        if f and f not in header_fields:
+            header_fields[f] = r["refx"]
+            header_bottom = (r["refy"] if header_bottom is None
+                             else max(header_bottom, r["refy"]))
+    if "Part Number" not in header_fields or len(header_fields) < 3:
+        return None
+    xs = sorted(header_fields.values())
+    gaps = [b - a for a, b in zip(xs, xs[1:]) if b - a > 0]
+    col_tol = (min(gaps) * 0.45) if gaps else 60
+    return header_fields, header_bottom, col_tol
+
+
+def apply_bom_edits_to_emf(emf: bytes, cells: list) -> Optional[bytes]:
+    """Patch the cached parts-table EMF for a set of cell edits. Each edit:
+    {col, row, field, old, new, pn}.
+
+    Data text is left-aligned while headers are positioned differently, so we do
+    NOT map columns by header X. Instead each row is found by its (unique) Part
+    Number value, and the target cell is located by matching its *old* value's
+    text on that row -- which also pins the column's real X, so multi-line
+    (wrapped) cells are replaced as a unit. Returns patched bytes, or None."""
+    try:
+        records = _emf_text_records(emf)
+        if not records:
+            return None
+        head = _emf_bom_header(records)
+        if head is None:
+            return None
+        header_fields, header_bottom, col_tol = head
+        charw, default_w = _emf_char_widths(records)
+        group_tol = max(8, col_tol * 0.5)
+
+        data = [r for r in records if r["refy"] > header_bottom]
+        if not data:
+            return None
+        # The left-most (Item) column: single-line, one record per row, so it
+        # anchors each row. Its Y gaps give the row pitch, and its values (the
+        # item numbers) identify rows even when Part Numbers repeat.
+        left_x = min(r["refx"] for r in data)
+        item_recs = sorted((r for r in data
+                            if abs(r["refx"] - left_x) <= group_tol),
+                           key=lambda r: r["refy"])
+        left_ys = [r["refy"] for r in item_recs]
+        gaps = [b - a for a, b in zip(left_ys, left_ys[1:]) if b - a > 0]
+        window = (sorted(gaps)[len(gaps) // 2] * 0.6) if gaps else 16
+
+        ops = []  # (start, end, new_bytes, record_delta)
+        for ed in cells:
+            old = (ed["old"] or "").strip()
+            new = (ed["new"] or "").strip()
+            field = ed["field"]
+            # 1) Find the row by its Item value, falling back to the row's
+            #    ordinal among data rows -- NOT by Part Number (not unique).
+            anchor = None
+            item = (ed.get("item") or "").strip()
+            if item:
+                anchor = next((r for r in item_recs
+                               if r["text"].strip() == item), None)
+            if anchor is None:
+                idx = ed.get("row_index")
+                if isinstance(idx, int) and 0 <= idx < len(item_recs):
+                    anchor = item_recs[idx]
+            if anchor is None:
+                continue
+            row_y = anchor["refy"]
+            row_recs = [r for r in data if abs(r["refy"] - row_y) <= window]
+
+            # 2) Locate the target column's real X.
+            target_x = None
+            if old:
+                prefix = [r for r in row_recs if r["text"].strip()
+                          and old.startswith(r["text"].strip())]
+                if prefix and field in header_fields:
+                    prefix.sort(
+                        key=lambda r: abs(r["refx"] - header_fields[field]))
+                if prefix:
+                    target_x = prefix[0]["refx"]
+            if target_x is None:
+                target_x = header_fields.get(field)
+            if target_x is None:
+                continue
+
+            # 3) All records of that cell (wrapped lines share the column X).
+            col_recs = sorted(
+                (r for r in row_recs if abs(r["refx"] - target_x) <= group_tol),
+                key=lambda r: r["refy"])
+            if col_recs:
+                primary = col_recs[0]
+                if new:
+                    ops.append((primary["off"],
+                                primary["off"] + primary["size"],
+                                _build_emf_text_record(
+                                    emf, primary, new, primary["refy"],
+                                    charw, default_w), 0))
+                else:
+                    ops.append((primary["off"],
+                                primary["off"] + primary["size"], b"", -1))
+                for extra in col_recs[1:]:  # drop extra wrapped lines
+                    ops.append((extra["off"], extra["off"] + extra["size"],
+                                b"", -1))
+            elif new:
+                tmpl = dict(anchor)
+                tmpl["refx"] = target_x
+                tmpl["bounds"] = (target_x, anchor["bounds"][1], target_x,
+                                  anchor["bounds"][3])
+                new_rec = _build_emf_text_record(emf, tmpl, new, row_y,
+                                                 charw, default_w)
+                ins = anchor["off"] + anchor["size"]
+                ops.append((ins, ins, new_rec, 1))
+        if not ops:
+            return None
+        # Apply back-to-front. Guard against overlapping byte ranges (two edits
+        # resolving to the same record would corrupt the metafile).
+        out = bytearray(emf)
+        byte_delta = record_delta = 0
+        last_start = len(emf) + 1
+        for start, end, new_bytes, rdelta in sorted(
+                ops, key=lambda o: (o[0], o[1]), reverse=True):
+            if end > last_start:
+                continue  # overlaps an already-applied op; skip it
+            out[start:end] = new_bytes
+            byte_delta += len(new_bytes) - (end - start)
+            record_delta += rdelta
+            last_start = start
+        _emf_set_counts(out, byte_delta, record_delta)
+        return bytes(out)
+    except (struct.error, ValueError, IndexError):
+        return None
+
+
+def apply_bom_edits_to_embedded(xlsx_bytes: bytes, cells: list) -> bytes:
+    """Set the given cells in an embedded parts worksheet. Each edit: {ref,
+    new, ...}. Returns the new .xlsx bytes (unchanged if it can't be parsed)."""
+    parsed = _read_embedded_sheet_rows(xlsx_bytes)
+    if not parsed:
+        return xlsx_bytes
+    sheet_member, sheet_xml, _rows = parsed
+    for ed in cells:
+        sheet_xml = _set_xlsx_cell_inline(sheet_xml, ed["ref"], ed["new"])
+    return _xlsx_replace_member(xlsx_bytes, sheet_member, sheet_xml)
 
 
 def _revtable_page_part(zin: zipfile.ZipFile) -> Optional[str]:
@@ -1476,6 +1894,7 @@ def replace_text_in_vsdx(
     update_drawing_rev: bool = False,
     rev_entry: Optional[dict] = None,
     approval: Optional[dict] = None,
+    bom_cell_edits: Optional[dict] = None,
 ) -> dict:
     """Copy a .vsdx applying text replacements; return a report dict.
 
@@ -1513,6 +1932,12 @@ def replace_text_in_vsdx(
         v and v.strip() for v in rev_entry.values()))
     do_approval = bool(approval and approval.get("rev") and
                        approval.get("name"))
+
+    bom_cell_edits = bom_cell_edits or {}
+    bom_cells = 0
+    # Reverse map: cached-EMF member -> the cell edits to draw into it.
+    bom_emf_map = {d["emf"]: d["cells"] for d in bom_cell_edits.values()
+                   if d.get("emf")}
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     page_count = 0
@@ -1592,6 +2017,17 @@ def replace_text_in_vsdx(
                             data, approval["rev"], approval["name"])
                         if patched is not None:
                             data = patched
+                elif item.filename in bom_cell_edits:
+                    # A parts-table (Cable BOM) edit: update the worksheet data.
+                    cells = bom_cell_edits[item.filename]["cells"]
+                    data = apply_bom_edits_to_embedded(data, cells)
+                    bom_cells += len(cells)
+                elif item.filename in bom_emf_map:
+                    # Patch the parts table's cached EMF to match the edits.
+                    patched = apply_bom_edits_to_emf(
+                        data, bom_emf_map[item.filename])
+                    if patched is not None:
+                        data = patched
                 # Preserve the original name; recompress with deflate.
                 zout.writestr(item.filename, data)
 
@@ -1604,7 +2040,7 @@ def replace_text_in_vsdx(
     return {"total": total, "by_part": by_part, "rev_drawing": rev_status,
             "rev_sheets": rev_sheets, "rev_table": table_status,
             "approval": approval_status, "page_count": page_count,
-            "rev_table_page": table_loc}
+            "rev_table_page": table_loc, "bom_cells": bom_cells}
 
 
 # ---------------------------------------------------------------------------
@@ -2463,6 +2899,7 @@ def replace_text_in_file(
     case_sensitive=True, whole_word=False,
     revision=None, update_drawing_rev=False,
     cell_edits=None, rev_entry=None, approval=None,
+    bom_cell_edits=None,
 ) -> dict:
     """Dispatch to the Visio or Excel engine based on the file type."""
     fmt = detect_format(in_path)
@@ -2471,6 +2908,7 @@ def replace_text_in_file(
             in_path, out_path, pairs, case_sensitive, whole_word,
             revision=revision, update_drawing_rev=update_drawing_rev,
             rev_entry=rev_entry, approval=approval,
+            bom_cell_edits=bom_cell_edits,
         )
     if fmt == "xlsx":
         return replace_text_in_xlsx(
@@ -3164,6 +3602,21 @@ HELP_SECTIONS = [
         "date's format), on **every sheet except the Change Log**, in every "
         "loaded Excel file.",
     ]),
+    ("Step 2 (Visio only) — Edit parts-table rows", [
+        "Put a part number in a **Find** box, then click **Visio: find & edit "
+        "rows...** to edit the parts list at the bottom of the R/C/P/W sheets "
+        "(Item / Ref/DES # / Cable Name / Description / Part Number / "
+        "Manufacturer / Qty/Length / Unit).",
+        "* Rows are matched by **Part Number** and listed **per file and "
+        "sheet** (e.g. Sheet: R0001), each field pre-filled — edit any of them.",
+        "* Same helpers as the Excel editor: a **Show find value(s)** filter, "
+        "**Copy 1st down** buttons (Manufacturer / Description / Qty/Length / "
+        "Unit), **Reset fields**, and **Refresh lookup**. Opens in its own "
+        "window.",
+        "* On run, each change is written to the embedded worksheet **and "
+        "drawn into the table's cached picture**, so it shows when the drawing "
+        "opens — no need to double-click the table in Visio.",
+    ]),
     ("Step 2 (Visio only) — Add a revision entry", [
         "Click **Visio: add revision entry...** to add a row to the "
         "**revision-history table** on a drawing's cover page (the chart in a "
@@ -3456,6 +3909,9 @@ def launch_gui() -> int:
             self.rule_rows: List[dict] = []
             # Staged Excel row edits: {part_number: {canonical_field: value}}.
             self.bom_edits: dict = {}
+            # Staged Visio parts-table edits, computed per file/embedding:
+            #   {file: {embed_member: {"emf": emf_member, "cells": [edit, ...]}}}
+            self.visio_bom_edits: dict = {}
             # Staged Change Log row to append: {canonical_field: value}.
             self.changelog_entry: dict = {}
             # New name for the "Author" box (date is stamped automatically).
@@ -3561,13 +4017,17 @@ def launch_gui() -> int:
             visio_btns = ttk.Frame(mid)
             visio_btns.pack(fill="x", padx=8, pady=(0, 8))
             self._rbtn(
+                visio_btns, "Visio: find & edit rows...",
+                self.open_visio_bom_editor,
+            ).pack(side="left")
+            self._rbtn(
                 visio_btns, "Visio: add revision entry...",
                 self.open_visio_rev_editor,
-            ).pack(side="left")
+            ).pack(side="left", padx=8)
             self._rbtn(
                 visio_btns, "Visio: approve revision...",
                 self.open_visio_approval, kind="green",
-            ).pack(side="left", padx=8)
+            ).pack(side="left")
 
             # --- 3. Options ------------------------------------------------
             opts = ttk.LabelFrame(root, text="3.  Options")
@@ -4240,6 +4700,288 @@ def launch_gui() -> int:
                 bottom, "Reset fields", reset_fields, kind="orange",
             ).pack(side="left", padx=6)
 
+        # -- Visio parts-table (Cable BOM) row editor ----------------------
+        def open_visio_bom_editor(self):
+            if not self._find_values():
+                messagebox.showinfo(
+                    "No Find values",
+                    "Type the part number(s) into the Find box(es) first.",
+                )
+                return
+            if not any(detect_format(f) == "vsdx" for f in self.files):
+                messagebox.showinfo(
+                    "No Visio files", "Add at least one .vsdx file first."
+                )
+                return
+            self._build_visio_bom_window()
+
+        def _build_visio_bom_window(self):
+            pal = self.palette
+            win = tk.Toplevel(self.root)
+            win.title("Find & edit Visio parts-table rows")
+            win.geometry("860x640")
+            win.minsize(680, 480)
+            win.transient(self.root)
+            win.grab_set()
+            win.configure(bg=pal["bg"])
+
+            # Persistent state, kept across filtering / refresh (mirrors the
+            # Excel editor). Keys are (file, embed, ref).
+            state = {"all": [], "orig": {}, "cur": {}, "rows": []}
+            filter_vars: dict = {}
+
+            def key(mt, ref):
+                return (mt["file"], mt["embed"], ref)
+
+            def capture():
+                for r in state["rows"]:
+                    try:
+                        state["cur"][r["key"]] = r["entry"].get()
+                    except tk.TclError:
+                        pass
+
+            def shown_finds():
+                sel = [fv for fv, v in filter_vars.items() if v.get()]
+                return set(sel) if sel else set(filter_vars)
+
+            ttk.Label(
+                win, wraplength=830, justify="left",
+                text="The parts list at the bottom of each R/C/P/W sheet is an "
+                "embedded table. Rows are matched by Part Number and shown per "
+                "file and sheet. Use the dropdown to show only certain find "
+                "values. The 'Copy 1st down' buttons copy the first shown row's "
+                "value into the rest of that find value's rows. Edit any field, "
+                "then Save.",
+            ).pack(side="top", fill="x", padx=10, pady=(8, 4))
+
+            frow = ttk.Frame(win)
+            frow.pack(side="top", fill="x", padx=10, pady=(0, 2))
+            ttk.Label(frow, text="Show find value(s):").pack(side="left")
+            filt_btn = ttk.Menubutton(frow, text="All", width=22)
+            filt_menu = tk.Menu(filt_btn, tearoff=0)
+            filt_btn["menu"] = filt_menu
+            filt_btn.pack(side="left", padx=(4, 0))
+
+            crow = ttk.Frame(win)
+            crow.pack(side="top", fill="x", padx=10, pady=(0, 4))
+            ttk.Label(
+                crow, text="Copy 1st down (per find value):"
+            ).pack(side="left")
+            for _fld in VISIO_BOM_COPYDOWN:
+                self._rbtn(
+                    crow, _fld, lambda fld=_fld: copy_down(fld),
+                    kind="green", radius=9, padx=10, pady=5,
+                ).pack(side="left", padx=3)
+
+            bottom = ttk.Frame(win)
+            bottom.pack(side="bottom", fill="x", padx=10, pady=10)
+
+            body = ttk.Frame(win)
+            body.pack(side="top", fill="both", expand=True)
+            canvas = tk.Canvas(body, highlightthickness=0, bg=pal["bg"])
+            sb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+            inner = ttk.Frame(canvas)
+            inner.bind(
+                "<Configure>",
+                lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
+            )
+            canvas.create_window((0, 0), window=inner, anchor="nw")
+            canvas.configure(yscrollcommand=sb.set)
+            canvas.pack(side="left", fill="both", expand=True, padx=(10, 0))
+            sb.pack(side="left", fill="y", padx=(0, 10))
+
+            def update_filter_label():
+                sel = [fv for fv, v in filter_vars.items() if v.get()]
+                if not sel:
+                    filt_btn["text"] = "All"
+                elif len(sel) == 1:
+                    filt_btn["text"] = sel[0]
+                else:
+                    filt_btn["text"] = f"{len(sel)} selected"
+
+            def render():
+                for w in inner.winfo_children():
+                    w.destroy()
+                state["rows"] = []
+                finds = shown_finds()
+                matches = [mt for mt in state["all"] if mt["matched"] in finds]
+                if not matches:
+                    ttk.Label(
+                        inner,
+                        text="No matching rows for the current selection.",
+                    ).pack(padx=10, pady=12)
+                    canvas.update_idletasks()
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+                    return
+                by_file: dict = {}
+                for mt in matches:
+                    by_file.setdefault(mt["file"], []).append(mt)
+                for f, fmatches in by_file.items():
+                    ttk.Label(
+                        inner, text="📄  " + Path(f).name,
+                        font=("Segoe UI", 10, "bold"),
+                        foreground=pal["accent"],
+                    ).pack(anchor="w", padx=6, pady=(10, 0))
+                    by_sheet: dict = {}
+                    for mt in fmatches:
+                        by_sheet.setdefault(
+                            mt.get("sheet_name") or "", []).append(mt)
+                    for sn, smatches in by_sheet.items():
+                        if sn:
+                            ttk.Label(
+                                inner, text="     Sheet:  " + sn,
+                                font=("Segoe UI", 9, "bold"),
+                                foreground=pal["muted"],
+                            ).pack(anchor="w", padx=12, pady=(4, 0))
+                        for mt in smatches:
+                            lf = ttk.LabelFrame(
+                                inner,
+                                text=f"P/N: {mt['part']}    (row {mt['row']})",
+                            )
+                            lf.pack(fill="x", padx=12, pady=4)
+                            for field in VISIO_BOM_EDIT_FIELDS:
+                                cell = mt["fields"].get(field)
+                                if cell is None:
+                                    continue
+                                ref, val = cell
+                                k = key(mt, ref)
+                                rowf = ttk.Frame(lf)
+                                rowf.pack(fill="x", padx=6, pady=2)
+                                ttk.Label(
+                                    rowf, text=field + ":", width=14
+                                ).pack(side="left")
+                                e = ttk.Entry(rowf)
+                                e.insert(0, state["cur"].get(k, val))
+                                e.pack(side="left", fill="x", expand=True)
+                                state["rows"].append(
+                                    {"key": k, "field": field, "entry": e}
+                                )
+                canvas.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+
+            def filter_changed():
+                capture()
+                update_filter_label()
+                render()
+
+            def show_all():
+                for v in filter_vars.values():
+                    v.set(False)
+                filter_changed()
+
+            def rebuild_filter_menu():
+                finds = sorted({mt["matched"] for mt in state["all"]})
+                for fv in list(filter_vars):
+                    if fv not in finds:
+                        del filter_vars[fv]
+                for fv in finds:
+                    filter_vars.setdefault(fv, tk.BooleanVar(value=False))
+                filt_menu.configure(
+                    bg=pal["field"], fg=pal["field_fg"],
+                    activebackground=pal["accent"],
+                    activeforeground="#ffffff",
+                    selectcolor=pal["accent"], borderwidth=0,
+                )
+                filt_menu.delete(0, "end")
+                filt_menu.add_command(label="(show all)", command=show_all)
+                filt_menu.add_separator()
+                for fv in finds:
+                    filt_menu.add_checkbutton(
+                        label=fv, variable=filter_vars[fv],
+                        command=filter_changed,
+                    )
+                update_filter_label()
+
+            def copy_down(field):
+                capture()
+                n = 0
+                for fv in shown_finds():
+                    rows_fv = [mt for mt in state["all"]
+                               if mt["matched"] == fv
+                               and mt["fields"].get(field)]
+                    if len(rows_fv) < 2:
+                        continue
+                    src = key(rows_fv[0], rows_fv[0]["fields"][field][0])
+                    val = state["cur"].get(src, "")
+                    for mt in rows_fv[1:]:
+                        k = key(mt, mt["fields"][field][0])
+                        if state["cur"].get(k) != val:
+                            state["cur"][k] = val
+                            n += 1
+                render()
+                self.log(
+                    f"Copied the first {field} value down to {n} row(s)."
+                    if n else f"Nothing to copy for {field}."
+                )
+
+            def reset_fields():
+                state["cur"] = dict(state["orig"])
+                render()
+                self.log("Reset all parts-table fields to the found data.")
+
+            def scan():
+                capture()
+                parts = self._find_values()
+                cs = self.case_var.get()
+                state["all"] = []
+                for f in [x for x in self.files
+                          if detect_format(x) == "vsdx"]:
+                    try:
+                        state["all"].extend(visio_bom_scan_rows(f, parts, cs))
+                    except Exception:  # noqa: BLE001
+                        pass
+                for mt in state["all"]:
+                    for _fld, (ref, val) in mt["fields"].items():
+                        k = key(mt, ref)
+                        state["orig"].setdefault(k, val)
+                        state["cur"].setdefault(k, state["orig"][k])
+                rebuild_filter_menu()
+                render()
+
+            def apply():
+                capture()
+                # {file: {embed: {"emf": emf, "cells": [edit, ...]}}}
+                edits: dict = {}
+                n = 0
+                for mt in state["all"]:
+                    for field, (ref, _v) in mt["fields"].items():
+                        k = key(mt, ref)
+                        cur, orig = state["cur"].get(k), state["orig"].get(k)
+                        if cur is None or cur == orig:
+                            continue
+                        col = re.match(r"[A-Z]+", ref).group(0)
+                        entry = edits.setdefault(mt["file"], {}).setdefault(
+                            mt["embed"], {"emf": mt["emf"], "cells": []})
+                        entry["cells"].append({
+                            "ref": ref, "col": col, "row": mt["row"],
+                            "field": field, "old": orig, "new": cur,
+                            "pn": mt["part"], "item": mt.get("item", ""),
+                            "row_index": mt.get("row_index")})
+                        n += 1
+                self.visio_bom_edits = edits
+                self.bom_status.configure(
+                    text=(f"{n} Visio cell edit(s) staged" if n else "")
+                )
+                self.log(
+                    f"Staged {n} Visio parts-table edit(s) across "
+                    f"{len(edits)} file(s)." if n
+                    else "No Visio parts-table edits staged."
+                )
+                win.destroy()
+
+            scan()
+
+            self._rbtn(bottom, "Save edits", apply, kind="accent").pack(
+                side="right"
+            )
+            self._rbtn(bottom, "Cancel", win.destroy).pack(
+                side="right", padx=6
+            )
+            self._rbtn(bottom, "Refresh lookup", scan).pack(side="left")
+            self._rbtn(
+                bottom, "Reset fields", reset_fields, kind="orange",
+            ).pack(side="left", padx=6)
+
         # -- Change Log entry ----------------------------------------------
         def open_changelog_editor(self):
             excel_files = [f for f in self.files
@@ -4588,6 +5330,7 @@ def launch_gui() -> int:
             self.add_pair()
             # Every staged action.
             self.bom_edits = {}
+            self.visio_bom_edits = {}
             self.changelog_entry = {}
             self.author_name = ""
             self.visio_rev_entry = {}
@@ -4619,7 +5362,8 @@ def launch_gui() -> int:
                     and not any(r["find"].get() for r in self.rule_rows)
                     and not self.bom_edits and not self.changelog_entry
                     and not self.author_name and not self.visio_rev_entry
-                    and not self.visio_approval and not self.excel_approval):
+                    and not self.visio_approval and not self.excel_approval
+                    and not self.visio_bom_edits):
                 messagebox.showwarning(
                     "Nothing to do",
                     "Enter a 'Find' value, tick 'Save copy as next revision', "
@@ -4650,6 +5394,7 @@ def launch_gui() -> int:
                     self.author_name, self.summary_var.get(),
                     dict(self.visio_rev_entry), dict(self.visio_approval),
                     dict(self.excel_approval), self.out_dir,
+                    dict(self.visio_bom_edits),
                 ),
                 daemon=True,
             ).start()
@@ -4657,7 +5402,9 @@ def launch_gui() -> int:
         def _worker(self, files, pairs_by_file, case_sensitive, whole_word,
                     make_pdf, bump_rev, update_rev_text, bom_edits,
                     changelog_entry, author_name, make_summary,
-                    visio_rev_entry, visio_approval, excel_approval, out_dir):
+                    visio_rev_entry, visio_approval, excel_approval, out_dir,
+                    visio_bom_edits=None):
+            visio_bom_edits = visio_bom_edits or {}
             total_repl = 0
             done = 0
             errors = 0
@@ -4712,7 +5459,10 @@ def launch_gui() -> int:
                                         else None)
                     appr = visio_approval if (visio_approval
                                               and is_vsdx) else None
-                    has_edits = bool(cell_edits or staged_rev_entry or appr)
+                    vbom = (visio_bom_edits.get(f)
+                            if (visio_bom_edits and is_vsdx) else None)
+                    has_edits = bool(cell_edits or staged_rev_entry or appr
+                                     or vbom)
                     # An approval signs off an existing revision -- it must NOT
                     # bump the revision; the copy is named "*_approved_<date>".
                     is_approving = bool(appr) or excel_approved
@@ -4778,6 +5528,7 @@ def launch_gui() -> int:
                             cell_edits=cell_edits,
                             rev_entry=rev_entry,
                             approval=appr,
+                            bom_cell_edits=vbom,
                         )
                         total_repl += report["total"]
                         msg = (
@@ -4790,6 +5541,11 @@ def launch_gui() -> int:
                         if report.get("cells_changed"):
                             self.log(
                                 f"    {report['cells_changed']} row cell(s) "
+                                "updated"
+                            )
+                        if report.get("bom_cells"):
+                            self.log(
+                                f"    {report['bom_cells']} parts-table cell(s) "
                                 "updated"
                             )
                         if revision:
