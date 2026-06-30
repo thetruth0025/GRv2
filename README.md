@@ -5,7 +5,12 @@ workbooks (`.xlsx`)** in bulk. It streamlines the repetitive edits of a drawing
 release — find/replace, parts add/remove/edit, revisions, approvals, and Change
 Log — makes a next-revision copy of each file, and optionally exports to PDF.
 
-The window has **three tabs that all run together** in a single pass:
+The app is a **guided 3-step wizard** — **1 Files → 2 Edit → 3 Review & Run** —
+with a stepper across the top and **Back / Next** navigation. A friendly
+**animated robot helper** in the corner shows what to do at each step, and waves,
+thinks, types, sweats, celebrates, or looks worried as the run progresses.
+
+The **Edit** step holds **three tabs that all run together** in a single pass:
 
 - **Find → Replace** — text rules, each aimed at all files or specific ones.
 - **Parts** — add, remove, or edit rows in the Visio parts tables and Excel
@@ -16,13 +21,13 @@ The window has **three tabs that all run together** in a single pass:
 
 Workflow:
 
-1. **Choose** a single file — or switch to **Batch** mode and add many files (or
-   a whole folder). You can mix `.vsdx` and `.xlsx`; each file's type is
-   **detected automatically**.
-2. **Fill in whichever tabs you need** — Find → Replace rules, Parts add/remove,
-   and Approve & Revise actions. Anything you stage on any tab is applied in the
-   same run.
-3. Click **Run**.
+1. **Step 1 — Files:** choose a single file, or switch to **Batch** and add many
+   files (or a whole folder). You can mix `.vsdx` and `.xlsx`; each file's type
+   is **detected automatically**. Click **Next**.
+2. **Step 2 — Edit:** fill in whichever tabs you need — Find → Replace rules,
+   Parts add/remove/edit, and Approve & Revise actions. Anything you stage on any
+   tab is applied in the same run. Click **Next**.
+3. **Step 3 — Review & Run:** check the summary and options, then click **Run**.
 4. Get a **next-revision copy** of each file next to each original. Your
    originals are never modified.
 

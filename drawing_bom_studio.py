@@ -45,7 +45,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.20.1 (How-to-use help rewritten around the three tabs)"
+__version__ = "2.21.0 (guided 3-step wizard + animated robot mascot)"
 
 import argparse
 import datetime
@@ -4529,7 +4529,12 @@ HELP_SECTIONS = [
         "edits of a drawing release in one place, saves each result as a new "
         "**next-revision** copy (your originals are never changed), and can "
         "write a **change summary** you can hand to an approver.",
-        "Work is organised into **three tabs** that all run together when you "
+        "The window guides you through **three steps** — **1 Files**, "
+        "**2 Edit**, **3 Review & Run** — using the stepper at the top and the "
+        "**Back / Next** buttons. A friendly **robot helper** in the corner "
+        "shows what to do at each step (and waves, thinks, types and celebrates "
+        "as you go).",
+        "The **Edit** step holds three tabs that all run together when you "
         "click **Run**:",
         "* **Find → Replace** — text find/replace rules across many files.",
         "* **Parts** — find & edit, **add**, or **remove** rows in the Visio "
@@ -4540,6 +4545,15 @@ HELP_SECTIONS = [
         "stamp the Author box.",
         "Fill in whichever tabs you need — anything staged on any tab is "
         "applied in a single pass over the files.",
+    ]),
+    ("The guided steps", [
+        "* **Step 1 — Files:** add the Visio/Excel files to work on.",
+        "* **Step 2 — Edit:** the Find → Replace, Parts, and Approve & Revise "
+        "tabs (below). Stage anything you like.",
+        "* **Step 3 — Review & Run:** a quick summary of what's staged, the "
+        "**Options**, the **Run** button and the **Status** log.",
+        "Move with **Next** / **Back**; the robot helper updates its tip for "
+        "each step. Nothing is changed until you press **Run** on Step 3.",
     ]),
     ("Before you start", [
         "* Your originals are never modified — every result is a separate copy.",
@@ -4557,9 +4571,9 @@ HELP_SECTIONS = [
         "* **Cable Drawing** — name contains CBLxxxxx",
         "Anything else is **Other**.",
     ]),
-    ("Add your files", [
-        "Above the tabs: pick **Single file**, or **Batch** to process several "
-        "at once (you can mix Visio and Excel).",
+    ("Step 1 · Add your files", [
+        "Pick **Single file**, or **Batch** to process several at once (you "
+        "can mix Visio and Excel), then click **Next: Edit**.",
         "* Use **Add files...** to pick several, or **Add folder...** to add "
         "every .vsdx/.xlsx in a folder.",
         "* **Remove selected** / **Clear** manage the list.",
@@ -4696,8 +4710,8 @@ HELP_SECTIONS = [
         "box is replaced and the date beside it is set to **today** (kept in "
         "the same format).",
     ]),
-    ("Options", [
-        "Below the tabs:",
+    ("Step 3 · Options", [
+        "On the **Review & Run** step:",
         "* **Case sensitive** / **Whole word only** — control matching.",
         "* **Also export PDF (LibreOffice)** — off by default.",
         "* **Save copy as next revision (REVx -> next)** — name each copy "
@@ -4709,16 +4723,19 @@ HELP_SECTIONS = [
         "finished file (and the change summary) to one folder; **Use source "
         "folder** puts each copy next to its original (the default).",
     ]),
-    ("Run it", [
-        "Click **Run**. Everything you staged on the **Find → Replace**, "
-        "**Parts**, and **Approve & Revise** tabs is applied in one pass. Each "
-        "file is saved as its next-revision copy (or *_edited, or "
-        "*_approved_<date> for an approval) — next to the original, or in your "
-        "chosen **output folder**. The **Status** box reports what happened per "
-        "file, and the **change summary** opens when done.",
+    ("Step 3 · Run it", [
+        "Click **Run** (on the Review & Run step). Everything you staged on the "
+        "**Find → Replace**, **Parts**, and **Approve & Revise** tabs is applied "
+        "in one pass. Each file is saved as its next-revision copy (or *_edited, "
+        "or *_approved_<date> for an approval) — next to the original, or in "
+        "your chosen **output folder**. The **Status** box reports what happened "
+        "per file, and the **change summary** opens when done.",
+        "* The robot helper **types away** while it works, **sweats** if it's a "
+        "long batch, **celebrates** when it finishes, and looks **worried** if a "
+        "file couldn't be processed (check the Status log).",
         "* **Reset all** (the orange button) clears the loaded files, every "
-        "rule, all staged edits and the output folder — use it to start fresh "
-        "on a new file or batch.",
+        "rule, all staged edits and the output folder, and returns to Step 1 — "
+        "use it to start fresh on a new file or batch.",
     ]),
     ("The change summary", [
         "An HTML document grouped by **document type**, then **file**. For each "
@@ -4897,6 +4914,241 @@ def build_robot_icon(size, Image, ImageDraw):
     return img.resize((size, size), Image.LANCZOS)
 
 
+# --- Animated mascot character (head + body + arms, posed per app state) ----
+_ROBOT_BODY = (37, 99, 235, 255)
+_ROBOT_BODY_DK = (29, 78, 216, 255)
+_ROBOT_METAL = (206, 214, 227, 255)
+_ROBOT_GLOW = (34, 211, 238, 255)
+_ROBOT_FACE = (15, 23, 42, 255)
+_ROBOT_HAND = (233, 239, 248, 255)
+_ROBOT_HAND_DK = (150, 164, 190, 255)
+_ROBOT_DROP = (96, 191, 255, 255)
+# Logical character canvas (width x height) the poses are laid out on.
+_ROBOT_LW, _ROBOT_LH = 100, 124
+# pose -> default facial expression
+_ROBOT_EXPR = {"hello": "happy", "think": "think", "thumbs": "wink",
+               "work": "focus", "celebrate": "joy", "uhoh": "uhoh",
+               "sweat": "sweat", "idle": "happy"}
+
+
+def _robot_head(px, expr, frame, Image, ImageDraw):
+    """Draw just the robot head with a given expression at ``px`` px."""
+    import math
+    ss = 6
+    s = px * ss
+    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    u = s / 100.0
+    G, FA = _ROBOT_GLOW, _ROBOT_FACE
+    d.line([(50 * u, 6 * u), (50 * u, 22 * u)], fill=_ROBOT_METAL,
+           width=int(3 * u))
+    d.ellipse([42 * u, 0, 58 * u, 14 * u], fill=G, outline=_ROBOT_BODY_DK,
+              width=max(1, int(1.5 * u)))
+    d.rounded_rectangle([8 * u, 42 * u, 20 * u, 64 * u], radius=4 * u,
+                        fill=_ROBOT_METAL)
+    d.rounded_rectangle([80 * u, 42 * u, 92 * u, 64 * u], radius=4 * u,
+                        fill=_ROBOT_METAL)
+    d.rounded_rectangle([18 * u, 20 * u, 82 * u, 82 * u], radius=16 * u,
+                        fill=_ROBOT_BODY, outline=_ROBOT_BODY_DK,
+                        width=int(2.5 * u))
+    d.rounded_rectangle([26 * u, 30 * u, 74 * u, 72 * u], radius=10 * u, fill=FA)
+    le = [33 * u, 40 * u, 45 * u, 52 * u]
+    re = [55 * u, 40 * u, 67 * u, 52 * u]
+
+    def open_eyes():
+        d.ellipse(le, fill=G)
+        d.ellipse(re, fill=G)
+
+    if expr == "happy":
+        if frame == 1:  # blink
+            d.line([(34 * u, 46 * u), (44 * u, 46 * u)], fill=G,
+                   width=int(2.6 * u))
+            d.line([(56 * u, 46 * u), (66 * u, 46 * u)], fill=G,
+                   width=int(2.6 * u))
+        else:
+            open_eyes()
+        d.arc([35 * u, 47 * u, 65 * u, 71 * u], 10, 170, fill=G,
+              width=int(3.5 * u))
+    elif expr == "think":
+        d.line([(33 * u, 38 * u), (45 * u, 35 * u)], fill=G, width=int(2.2 * u))
+        d.ellipse([35 * u, 40 * u, 43 * u, 48 * u], fill=G)
+        d.ellipse([57 * u, 40 * u, 65 * u, 48 * u], fill=G)
+        d.line([(44 * u, 62 * u), (57 * u, 59 * u)], fill=G, width=int(2.6 * u))
+    elif expr == "wink":
+        d.arc([33 * u, 42 * u, 45 * u, 55 * u], 20, 160, fill=G,
+              width=int(3.2 * u))
+        d.ellipse(re, fill=G)
+        d.arc([35 * u, 46 * u, 65 * u, 72 * u], 10, 170, fill=G,
+              width=int(4 * u))
+    elif expr == "focus":
+        d.ellipse([35 * u, 42 * u, 43 * u, 50 * u], fill=G)
+        d.ellipse([57 * u, 42 * u, 65 * u, 50 * u], fill=G)
+        d.line([(45 * u, 61 * u), (55 * u, 61 * u)], fill=G, width=int(2.6 * u))
+    elif expr == "joy":
+        for cx in (39, 61):
+            for a in range(0, 360, 45):
+                r = 6 if a % 90 == 0 else 3
+                x = cx * u + math.cos(math.radians(a)) * r * u
+                y = 46 * u + math.sin(math.radians(a)) * r * u
+                d.line([(cx * u, 46 * u), (x, y)], fill=G, width=int(1.6 * u))
+        d.arc([34 * u, 46 * u, 66 * u, 73 * u], 8, 172, fill=G,
+              width=int(4.2 * u))
+    elif expr == "uhoh":
+        d.line([(33 * u, 37 * u), (45 * u, 33 * u)], fill=G, width=int(2.2 * u))
+        d.line([(55 * u, 33 * u), (67 * u, 37 * u)], fill=G, width=int(2.2 * u))
+        d.ellipse([35 * u, 41 * u, 44 * u, 50 * u], fill=G)
+        d.ellipse([56 * u, 41 * u, 65 * u, 50 * u], fill=G)
+        d.arc([43 * u, 60 * u, 57 * u, 72 * u], 200, 340, fill=G,
+              width=int(2.8 * u))
+        d.line([(80 * u, 14 * u), (80 * u, 22 * u)], fill=(250, 176, 5, 255),
+               width=int(2 * u))
+        d.ellipse([78.5 * u, 24 * u, 81.5 * u, 27 * u], fill=(250, 176, 5, 255))
+    elif expr == "sweat":
+        open_eyes()
+        d.arc([37 * u, 52 * u, 57 * u, 66 * u], 10, 170, fill=G,
+              width=int(2.6 * u))
+        dy = 30 + frame * 6
+        dx = 70
+        d.polygon([(dx * u, (dy - 5) * u), ((dx - 3) * u, dy * u),
+                   ((dx + 3) * u, dy * u)], fill=_ROBOT_DROP)
+        d.ellipse([(dx - 3) * u, dy * u, (dx + 3) * u, (dy + 6) * u],
+                  fill=_ROBOT_DROP)
+    return img.resize((px, px), Image.LANCZOS)
+
+
+def build_robot_character(height, pose, Image, ImageDraw,
+                          accent=(34, 211, 238), expr=None, frame=0):
+    """Draw the full-body mascot in ``pose`` at ``height`` px. ``frame`` (an
+    integer that increases over time) drives the small looping animation of
+    each pose. Returns an RGBA PIL image (its width is ~0.8 x height)."""
+    import math
+    ss = 6
+    Hpx = height * ss
+    u = Hpx / _ROBOT_LH
+    Wpx = int(_ROBOT_LW * u)
+    img = Image.new("RGBA", (Wpx, Hpx), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    expr = expr or _ROBOT_EXPR.get(pose, "happy")
+    B, BD, G = _ROBOT_BODY, _ROBOT_BODY_DK, _ROBOT_GLOW
+
+    def arm(sh, hd, w=9):
+        d.line([(sh[0] * u, sh[1] * u), (hd[0] * u, hd[1] * u)], fill=B,
+               width=int(w * u))
+        d.ellipse([(sh[0] - w / 2) * u, (sh[1] - w / 2) * u,
+                   (sh[0] + w / 2) * u, (sh[1] + w / 2) * u], fill=B)
+
+    def mitt(hd, r=8):
+        d.ellipse([(hd[0] - r) * u, (hd[1] - r) * u, (hd[0] + r) * u,
+                   (hd[1] + r) * u], fill=_ROBOT_HAND, outline=_ROBOT_HAND_DK,
+                  width=int(1.4 * u))
+
+    def thumb_hand(c, r=8):
+        d.ellipse([(c[0] - r) * u, (c[1] - r) * u, (c[0] + r) * u,
+                   (c[1] + r) * u], fill=_ROBOT_HAND, outline=_ROBOT_HAND_DK,
+                  width=int(1.4 * u))
+        d.arc([(c[0] - r + 1) * u, (c[1] - 2) * u, (c[0] + r - 1) * u,
+               (c[1] + r) * u], 205, 335, fill=_ROBOT_HAND_DK,
+              width=int(1.2 * u))
+        bx, by = c[0] - r * 0.35, c[1] - r * 0.35
+        tx, ty = c[0] - r * 0.05, c[1] - r - 4.5
+        d.line([(bx * u, by * u), (tx * u, ty * u)], fill=_ROBOT_HAND,
+               width=int(6 * u))
+        d.ellipse([(tx - 3) * u, (ty - 3) * u, (tx + 3) * u, (ty + 3) * u],
+                  fill=_ROBOT_HAND, outline=_ROBOT_HAND_DK, width=int(1.1 * u))
+
+    if pose == "celebrate":
+        cols = [(34, 211, 238), (250, 176, 5), (34, 197, 94),
+                (244, 114, 182), accent]
+        pts = [(14, 16), (26, 32), (44, 12), (60, 10), (74, 28), (86, 18),
+               (20, 48), (82, 46), (50, 6)]
+        for i, (x, y) in enumerate(pts):
+            yy = y + (frame * 4) % 14
+            c = cols[i % len(cols)] + (255,)
+            if i % 2:
+                d.ellipse([(x - 2) * u, (yy - 2) * u, (x + 2) * u,
+                           (yy + 2) * u], fill=c)
+            else:
+                d.rectangle([(x - 2) * u, (yy - 2) * u, (x + 2) * u,
+                             (yy + 2) * u], fill=c)
+    # body + chest + feet
+    d.rounded_rectangle([34 * u, 54 * u, 66 * u, 94 * u], radius=12 * u, fill=B,
+                        outline=BD, width=int(2.2 * u))
+    d.rounded_rectangle([41 * u, 62 * u, 59 * u, 84 * u], radius=7 * u,
+                        fill=_ROBOT_FACE)
+    d.ellipse([46 * u, 68 * u, 50 * u, 72 * u], fill=G)
+    d.ellipse([50 * u, 76 * u, 54 * u, 80 * u], fill=accent + (255,))
+    d.rounded_rectangle([38 * u, 92 * u, 48 * u, 103 * u], radius=3 * u,
+                        fill=_ROBOT_METAL)
+    d.rounded_rectangle([52 * u, 92 * u, 62 * u, 103 * u], radius=3 * u,
+                        fill=_ROBOT_METAL)
+    Lsh, Rsh = (37, 62), (63, 62)
+    bob = int(math.sin(frame * 1.1) * 2) if pose == "celebrate" else 0
+    # arms drawn behind the head
+    if pose in ("hello", "thumbs", "uhoh"):
+        arm(Lsh, (28, 86))
+    elif pose == "celebrate":
+        arm(Lsh, (14, 24 + bob))
+        arm(Rsh, (86, 24 - bob))
+    # head (tilted up for thinking; small nervous shake for uh-oh)
+    HD = 64
+    hsh = int(math.sin(frame * 2.0) * 2) if pose == "uhoh" else 0
+    head = _robot_head(int(HD * u), expr, frame, Image, ImageDraw)
+    if pose == "think":
+        head = head.rotate(14, expand=True, resample=Image.BICUBIC)
+    img.paste(head, (int(50 * u - head.width / 2) + hsh,
+                     int(32 * u - head.height / 2)), head)
+    # arms / hands in front
+    if pose == "hello":
+        wob = [(86, 18), (83, 15), (88, 16), (84, 20)][frame % 4]
+        arm(Rsh, wob)
+        mitt(wob, r=8)
+        for rr in (10, 15):
+            d.arc([(wob[0] - rr) * u, (wob[1] - rr) * u, (wob[0] + rr) * u,
+                   (wob[1] + rr) * u], -60, 30, fill=accent + (255,),
+                  width=int(1.6 * u))
+    elif pose == "think":
+        tap = [50, 49, 50, 51][frame % 4]
+        arm(Lsh, (46, 78))
+        mitt((46, 78), r=7)
+        arm(Rsh, (54, tap))
+        mitt((54, tap), r=8)
+        if frame % 2:
+            d.ellipse([70 * u, 30 * u, 74 * u, 34 * u], outline=accent + (255,),
+                      width=int(1.2 * u))
+    elif pose == "thumbs":
+        pop = [48, 45, 48, 46][frame % 4]
+        arm(Rsh, (74, pop))
+        thumb_hand((74, pop), r=8)
+        mitt((28, 86), r=8)
+    elif pose == "celebrate":
+        mitt((14, 24 + bob), r=8)
+        mitt((86, 24 - bob), r=8)
+    elif pose == "uhoh":
+        scr = [18, 16, 18, 20][frame % 4]
+        arm(Rsh, (80, scr))
+        mitt((80, scr), r=8)
+    elif pose in ("work", "sweat"):
+        lo = [90, 88][frame % 2]
+        ro = [88, 90][frame % 2]
+        arm(Lsh, (42, lo))
+        arm(Rsh, (58, ro))
+        # laptop: lid BACK facing us, keyboard deck in front, hands typing
+        d.rounded_rectangle([32 * u, 62 * u, 68 * u, 89 * u], radius=5 * u,
+                            fill=(178, 188, 204, 255),
+                            outline=(120, 132, 150, 255), width=int(1.8 * u))
+        d.ellipse([47 * u, 72 * u, 53 * u, 78 * u], fill=G)
+        d.rounded_rectangle([25 * u, 89 * u, 75 * u, 98 * u], radius=3 * u,
+                            fill=(60, 68, 84, 255),
+                            outline=(38, 44, 56, 255), width=int(1.4 * u))
+        for kx in (33, 41, 49, 57, 65):
+            d.line([(kx * u, 92 * u), (kx * u, 95 * u)],
+                   fill=(150, 160, 178, 255), width=int(1.4 * u))
+        mitt((43, lo - 1), r=5)
+        mitt((57, ro - 1), r=5)
+    return img.resize((int(_ROBOT_LW * height / _ROBOT_LH), height),
+                      Image.LANCZOS)
+
+
 def launch_gui() -> int:
     # Imported lazily so the core logic / CLI work without a display.
     import threading
@@ -5029,6 +5281,140 @@ def launch_gui() -> int:
         def configure_text(self, text):
             self._text = text
             self._draw()
+
+    class RobotMascot(tk.Canvas):
+        """A small animated robot mascot with a speech bubble. ``set_state``
+        switches its pose + line; it animates itself on a timer. Needs Pillow;
+        if it's missing the widget just stays blank (harmless)."""
+
+        # pose -> (animation frame count, frame interval ms)
+        _ANIM = {"hello": (4, 180), "think": (4, 320), "thumbs": (4, 170),
+                 "work": (4, 150), "celebrate": (6, 120), "uhoh": (4, 170),
+                 "sweat": (5, 240), "idle": (2, 700)}
+
+        def __init__(self, parent, palette, height=116):
+            self.palette = palette
+            self._h = height
+            self._bubble_w = 300
+            super().__init__(parent, highlightthickness=0, bd=0,
+                             height=height + 8,
+                             width=int(height * 0.8) + self._bubble_w + 30,
+                             bg=palette["bg"])
+            self.pose = "idle"
+            self.text = ""
+            self.frame = 0
+            self._job = None
+            self._photo = None
+            self._font = self._load_font(11)
+            self._tick()
+
+        def _load_font(self, sz):
+            for name in ("segoeui.ttf", "DejaVuSans.ttf", "Arial.ttf",
+                         "arial.ttf", "LiberationSans-Regular.ttf"):
+                try:
+                    from PIL import ImageFont
+                    return ImageFont.truetype(name, sz)
+                except Exception:  # noqa: BLE001
+                    continue
+            try:
+                from PIL import ImageFont
+                return ImageFont.load_default()
+            except Exception:  # noqa: BLE001
+                return None
+
+        def set_palette(self, palette):
+            self.palette = palette
+            self.configure(bg=palette["bg"])
+            self._render()
+
+        def set_state(self, pose, text=None):
+            if pose != self.pose:
+                self.frame = 0
+            self.pose = pose
+            if text is not None:
+                self.text = text
+            self._render()
+
+        def _wrap(self, draw, text, maxw):
+            words, lines, cur = text.split(), [], ""
+            for w in words:
+                t = (cur + " " + w).strip()
+                if draw.textlength(t, font=self._font) <= maxw:
+                    cur = t
+                else:
+                    if cur:
+                        lines.append(cur)
+                    cur = w
+            if cur:
+                lines.append(cur)
+            return lines or [""]
+
+        def _render(self):
+            if not _HAVE_PIL:
+                return
+            try:
+                from PIL import Image, ImageDraw, ImageTk
+            except Exception:  # noqa: BLE001
+                return
+            c = self.palette
+            W = int(self.cget("width"))
+            H = int(self.cget("height"))
+
+            def rgb(h):
+                h = h.lstrip("#")
+                return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+            img = Image.new("RGBA", (W, H), rgb(c["bg"]) + (255,))
+            d = ImageDraw.Draw(img)
+            ch = build_robot_character(self._h, self.pose, Image, ImageDraw,
+                                       accent=rgb(c["accent"]),
+                                       frame=self.frame)
+            img.paste(ch, (4, H - ch.height - 2), ch)
+            # speech bubble to the right of the head
+            if self.text and self._font is not None:
+                bx0 = 4 + ch.width + 14
+                lines = self._wrap(d, self.text, self._bubble_w - 24)
+                tw = max(d.textlength(l, font=self._font) for l in lines)
+                bx1 = min(W - 4, bx0 + int(tw) + 22)
+                bh = len(lines) * 16 + 16
+                head_y = H - ch.height + int(ch.height * 0.22)
+                by0 = max(2, head_y - bh // 2)
+                by1 = by0 + bh
+                d.rounded_rectangle([bx0, by0, bx1, by1], radius=12,
+                                    fill=rgb(c["card"]) + (255,),
+                                    outline=rgb(c["accent"]) + (255,), width=2)
+                mid = (by0 + by1) // 2
+                d.polygon([(bx0 + 2, mid - 8), (bx0 + 2, mid + 8),
+                           (bx0 - 12, mid)], fill=rgb(c["card"]) + (255,))
+                d.line([(bx0 + 2, mid - 8), (bx0 - 12, mid)],
+                       fill=rgb(c["accent"]) + (255,), width=2)
+                d.line([(bx0 + 2, mid + 8), (bx0 - 12, mid)],
+                       fill=rgb(c["accent"]) + (255,), width=2)
+                d.rectangle([bx0, mid - 7, bx0 + 3, mid + 7],
+                            fill=rgb(c["card"]) + (255,))
+                for i, ln in enumerate(lines):
+                    d.text((bx0 + 11, by0 + 8 + i * 16), ln, font=self._font,
+                           fill=rgb(c["text"]))
+            self._photo = ImageTk.PhotoImage(img)
+            self.delete("all")
+            self.create_image(0, 0, anchor="nw", image=self._photo)
+
+        def _tick(self):
+            n, interval = self._ANIM.get(self.pose, (2, 500))
+            self.frame = (self.frame + 1) % n
+            self._render()
+            try:
+                self._job = self.after(interval, self._tick)
+            except Exception:  # noqa: BLE001
+                self._job = None
+
+        def stop(self):
+            if self._job is not None:
+                try:
+                    self.after_cancel(self._job)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._job = None
 
     class App:
         def __init__(self, root: "tk.Tk"):
@@ -5174,11 +5560,27 @@ def launch_gui() -> int:
             root.bind_all("<Button-4>", _on_wheel)     # Linux wheel up
             root.bind_all("<Button-5>", _on_wheel)     # Linux wheel down
 
-            # --- 1. Files --------------------------------------------------
+            # === Wizard scaffold (Layout C: a guided 3-step stepper) =======
+            self.step = 1
+            self._step_titles = ["Files", "Edit", "Review & Run"]
+            self._running = False
+            self.stepper = tk.Canvas(self.body, height=58,
+                                     highlightthickness=0, bd=0,
+                                     bg=self.palette["bg"])
+            self.stepper.pack(fill="x", padx=12, pady=(8, 0))
+            self.stepper.bind("<Configure>", lambda e: self._draw_stepper())
+
+            self.step_container = ttk.Frame(self.body)
+            self.step_container.pack(fill="both", expand=True, **pad)
+            self.step1 = ttk.Frame(self.step_container)
+            self.step2 = ttk.Frame(self.step_container)
+            self.step3 = ttk.Frame(self.step_container)
+
+            # --- Step 1: Files ---------------------------------------------
             top = ttk.LabelFrame(
-                self.body, text="1.  Files (.vsdx Visio / .xlsx Excel)"
+                self.step1, text="Add your files (.vsdx Visio / .xlsx Excel)"
             )
-            top.pack(fill="x", **pad)
+            top.pack(fill="both", expand=True, **pad)
 
             mode_row = ttk.Frame(top)
             mode_row.pack(fill="x", padx=8, pady=(8, 2))
@@ -5220,9 +5622,9 @@ def launch_gui() -> int:
             sb.pack(side="left", fill="y")
             self.files_box.configure(yscrollcommand=sb.set)
 
-            # --- 2. Feature tabs -------------------------------------------
-            self.nb = ttk.Notebook(self.body)
-            self.nb.pack(fill="x", **pad)
+            # --- Step 2: Edit (the feature tabs) ---------------------------
+            self.nb = ttk.Notebook(self.step2)
+            self.nb.pack(fill="both", expand=True, **pad)
 
             # Tab 1 -- Find & Replace (the find->replace rules only).
             tab_fr = ttk.Frame(self.nb)
@@ -5302,8 +5704,14 @@ def launch_gui() -> int:
                            self.open_author_editor),
             ])
 
-            # --- 3. Options ------------------------------------------------
-            opts = ttk.LabelFrame(self.body, text="3.  Options")
+            # --- Step 3: Review & Run --------------------------------------
+            self.review_lbl = ttk.Label(
+                self.step3, wraplength=900, justify="left", text="",
+                foreground=self.palette["accent"],
+                font=("Segoe UI", 10, "bold"))
+            self.review_lbl.pack(fill="x", padx=14, pady=(10, 2))
+
+            opts = ttk.LabelFrame(self.step3, text="Options")
             opts.pack(fill="x", **pad)
             self.case_var = tk.BooleanVar(value=False)
             self.word_var = tk.BooleanVar(value=False)
@@ -5367,25 +5775,13 @@ def launch_gui() -> int:
             )
             self.out_dir_lbl.pack(side="left", padx=6)
 
-            # --- Run -------------------------------------------------------
-            run = ttk.Frame(self.body)
-            run.pack(fill="x", **pad)
-            self.run_btn = self._rbtn(
-                run, "Run", self.run, kind="accent",
-                radius=13, padx=22, pady=10,
-            )
-            self.run_btn.pack(side="left", padx=8)
-            self._rbtn(
-                run, "Reset all", self.reset_all, kind="orange",
-                radius=13, padx=16, pady=10,
-            ).pack(side="right", padx=8)
             self.progress = ttk.Progressbar(
-                run, mode="indeterminate", style="Horizontal.TProgressbar"
+                self.step3, mode="indeterminate",
+                style="Horizontal.TProgressbar"
             )
-            self.progress.pack(side="left", fill="x", expand=True, padx=8)
+            self.progress.pack(fill="x", padx=10, pady=(2, 0))
 
-            # --- Log -------------------------------------------------------
-            logf = ttk.LabelFrame(self.body, text="Status")
+            logf = ttk.LabelFrame(self.step3, text="Status")
             logf.pack(fill="both", expand=True, **pad)
             self.log_box = scrolledtext.ScrolledText(
                 logf, height=8, state="disabled", wrap="word",
@@ -5395,6 +5791,27 @@ def launch_gui() -> int:
             )
             self.log_box.pack(fill="both", expand=True, padx=6, pady=6)
 
+            # === Footer: animated mascot + wizard navigation ===============
+            footer = ttk.Frame(self.body)
+            footer.pack(fill="x", **pad)
+            if _HAVE_PIL:
+                self.mascot = RobotMascot(footer, self.palette)
+                self.mascot.pack(side="left", padx=6, pady=2)
+            else:
+                self.mascot = None
+            self._nav = ttk.Frame(footer)
+            self._nav.pack(side="right", anchor="e")
+            self.back_btn = self._rbtn(self._nav, "←  Back",
+                                       self._wizard_back)
+            self.next_btn = self._rbtn(self._nav, "Next: Review  →",
+                                       self._wizard_next, kind="accent")
+            self.reset_btn = self._rbtn(self._nav, "Reset all",
+                                        self.reset_all, kind="orange")
+            self.run_btn = self._rbtn(self._nav, "Run", self.run,
+                                      kind="accent", radius=13, padx=22,
+                                      pady=10)
+
+            self.show_step(1)
             self.on_mode_change()
             self._sync_rev_options()
             self._log(f"Drawing & BOM Studio  v{__version__}")
@@ -5518,6 +5935,11 @@ def launch_gui() -> int:
             self.out_dir_lbl.configure(foreground=c["muted"])
             self._scroll_outer.configure(bg=c["bg"])
             self._scroll_canvas.configure(bg=c["bg"])
+            self.review_lbl.configure(foreground=c["accent"])
+            self.stepper.configure(bg=c["bg"])
+            self._draw_stepper()
+            if self.mascot is not None:
+                self.mascot.set_palette(c)
             self._rbuttons = [b for b in self._rbuttons if b.winfo_exists()]
             for b in self._rbuttons:
                 b.set_palette(c)
@@ -5712,6 +6134,122 @@ def launch_gui() -> int:
                 self.progress.start(12)
             else:
                 self.progress.stop()
+
+        # -- Wizard (stepper) navigation + mascot ---------------------------
+        def _draw_stepper(self):
+            cv = self.stepper
+            cv.delete("all")
+            c = self.palette
+            W = max(cv.winfo_width(), 200)
+            n = len(self._step_titles)
+            cy = 20
+            margin = 46
+            xs = [margin + (W - 2 * margin) * i / (n - 1) for i in range(n)]
+            for i in range(n - 1):
+                done = i < self.step - 1
+                cv.create_line(xs[i], cy, xs[i + 1], cy, width=3,
+                               fill=(c["accent"] if done else c["border"]))
+            r = 14
+            for i in range(n):
+                on = i <= self.step - 1
+                done = i < self.step - 1
+                cv.create_oval(xs[i] - r, cy - r, xs[i] + r, cy + r, width=2,
+                               fill=(c["accent"] if on else c["card"]),
+                               outline=(c["accent"] if on else c["border"]))
+                cv.create_text(xs[i], cy, text=("✓" if done else str(i + 1)),
+                               fill=("#ffffff" if on else c["muted"]),
+                               font=("Segoe UI", 10, "bold"))
+                cv.create_text(xs[i], cy + r + 12, text=self._step_titles[i],
+                               fill=(c["text"] if on else c["muted"]),
+                               font=("Segoe UI", 9,
+                                     "bold" if on else "normal"))
+
+        def show_step(self, n):
+            self.step = max(1, min(len(self._step_titles), n))
+            for fr in (self.step1, self.step2, self.step3):
+                fr.pack_forget()
+            {1: self.step1, 2: self.step2, 3: self.step3}[self.step].pack(
+                fill="both", expand=True)
+            self._draw_stepper()
+            for b in (self.back_btn, self.next_btn, self.reset_btn,
+                      self.run_btn):
+                b.pack_forget()
+            if self.step > 1:
+                self.back_btn.pack(side="left", padx=4)
+            if self.step < 3:
+                self.next_btn.configure_text(
+                    "Next: Edit  →" if self.step == 1
+                    else "Next: Review  →")
+                self.next_btn.pack(side="left", padx=4)
+            else:
+                self.reset_btn.pack(side="left", padx=4)
+                self.run_btn.pack(side="left", padx=4)
+                self._update_review()
+            if not self._running:
+                msg = {
+                    1: ("hello",
+                        "Hey there! Upload your files and let's begin!"),
+                    2: ("think",
+                        "Alright! Now tell me what you need me to do!"),
+                    3: ("thumbs",
+                        "Ok! If everything looks good, hit “Run” and "
+                        "I'll get to work!"),
+                }[self.step]
+                self._set_mascot(*msg)
+            try:
+                self._scroll_canvas.yview_moveto(0)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _wizard_next(self):
+            if self.step == 1 and not self.files:
+                messagebox.showinfo(
+                    "Add files", "Add at least one file to continue.")
+                return
+            self.show_step(self.step + 1)
+
+        def _wizard_back(self):
+            self.show_step(self.step - 1)
+
+        def _update_review(self):
+            parts = [f"{len(self.files)} file(s)"]
+            rules = sum(1 for r in self.rule_rows if r["find"].get())
+            if rules:
+                parts.append(f"{rules} find/replace rule(s)")
+            if self.bom_edits or self.visio_bom_edits:
+                parts.append("parts/BOM row edits")
+            if self.remove_parts:
+                parts.append("part removals")
+            if self.add_parts:
+                parts.append("part additions")
+            if self.changelog_entry:
+                parts.append("Change Log entry")
+            if self.author_name:
+                parts.append("Author + date")
+            if self.visio_rev_entry:
+                parts.append("revision entry")
+            if self.visio_approval or self.excel_approval:
+                parts.append("approval")
+            if self.rev_var.get():
+                parts.append("revision bump")
+            self.review_lbl.configure(
+                text="Ready to run:   " + "   ·   ".join(parts) + ".")
+
+        def _set_mascot(self, pose, text=None):
+            if self.mascot is None:
+                return
+            # Update directly on the main thread; marshal from the worker.
+            if threading.current_thread() is threading.main_thread():
+                self.mascot.set_state(pose, text)
+            else:
+                self.root.after(
+                    0, lambda: self.mascot.set_state(pose, text))
+
+        def _maybe_sweat(self):
+            # Fired ~15s after a run starts: if still going, look nervous.
+            if self._running:
+                self._set_mascot(
+                    "sweat", "Phew, this is a big batch — almost there!")
 
         def pairs_for_file(self, path: str) -> List[Tuple[str, str]]:
             """Find/replace pairs whose dropdown selection includes this file's
@@ -7017,6 +7555,7 @@ def launch_gui() -> int:
             self.remove_status.configure(text="")
             self.add_status.configure(text="")
             self._clear_out_dir()
+            self.show_step(1)
             self.log(
                 "Reset: cleared files, rules, all staged edits and the output "
                 "folder. Ready for a new file or batch."
@@ -7063,6 +7602,9 @@ def launch_gui() -> int:
                     return
 
             self._set_busy(True)
+            self._running = True
+            self._set_mascot("work", "On it! Crunching through your files...")
+            self.root.after(15000, self._maybe_sweat)
             threading.Thread(
                 target=self._worker,
                 args=(
@@ -7370,6 +7912,8 @@ def launch_gui() -> int:
                     except Exception as exc:  # noqa: BLE001
                         errors += 1
                         self.log(f"! {src.name}: ERROR - {exc}")
+                        self._set_mascot(
+                            "uhoh", f"Uh-oh — I couldn't process {src.name}.")
 
                 summary = (
                     f"Done. {done} file(s) processed, "
@@ -7378,6 +7922,14 @@ def launch_gui() -> int:
                     + "."
                 )
                 self.log(summary)
+                if errors:
+                    self._set_mascot(
+                        "uhoh", "Done, but some files had problems — "
+                        "check the log.")
+                else:
+                    self._set_mascot(
+                        "celebrate",
+                        "All done! Your files are saved and ready!")
 
                 summary_path = None
                 if make_summary and summary_records:
@@ -7407,6 +7959,7 @@ def launch_gui() -> int:
                     0, lambda e=exc: messagebox.showerror("Error", str(e))
                 )
             finally:
+                self._running = False
                 self.root.after(0, self._set_busy, False)
 
         def _reveal(self, path: str):
