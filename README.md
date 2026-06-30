@@ -57,8 +57,13 @@ HTML copy you can save or print to PDF for training/reference.
   - Windows: <https://www.libreoffice.org/download/>
   - macOS: `brew install --cask libreoffice` (or the `.dmg`)
   - Linux: `sudo apt install libreoffice`
+- **Pillow** *(optional)* — `pip install pillow`. If present, the buttons are
+  drawn with smooth anti-aliased corners; without it they still work, just with
+  plainer corners. The app already renders at your display's real DPI so text
+  stays sharp either way.
 
-No `pip install` is required — the app uses only the Python standard library.
+No `pip install` is required — the app uses only the Python standard library
+(Pillow is an optional extra for the smoothest-looking buttons).
 
 ---
 

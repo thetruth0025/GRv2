@@ -39,7 +39,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.16.0 (Visio find & edit parts-table rows)"
+__version__ = "2.16.1 (sharper high-DPI UI, anti-aliased buttons)"
 
 import argparse
 import datetime
@@ -3756,12 +3756,49 @@ def help_to_html(path) -> "Path":
 # Tkinter GUI
 # ---------------------------------------------------------------------------
 
+def _enable_high_dpi() -> None:
+    """Tell Windows this process renders at the screen's real DPI, so text and
+    shapes aren't bitmap-stretched (which looks blurry). Must run before the
+    first Tk window is created. A no-op off Windows."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+    except Exception:  # noqa: BLE001
+        return
+    # Try newest -> oldest: per-monitor-v2 (Win10 1703+), then per-monitor,
+    # then plain system-DPI aware. Any one of these stops the blurry stretch.
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)  # PMv2
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # per-monitor
+        return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()  # system DPI aware
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def launch_gui() -> int:
     # Imported lazily so the core logic / CLI work without a display.
     import threading
     import tkinter as tk
     import tkinter.font as tkfont
     from tkinter import filedialog, messagebox, scrolledtext, ttk
+
+    # Crisp anti-aliased buttons when Pillow is present; plain canvas otherwise.
+    try:
+        from PIL import Image, ImageDraw, ImageTk
+        _HAVE_PIL = True
+    except Exception:  # noqa: BLE001
+        _HAVE_PIL = False
+
+    _enable_high_dpi()
 
     LIGHT = {
         "bg": "#eef1f6", "card": "#ffffff", "accent": "#2563eb",
@@ -3830,13 +3867,32 @@ def launch_gui() -> int:
             self.delete("all")
             w, h, r = int(self["width"]), int(self["height"]), self.radius
             fill, fg = self._fill_fg()
-            self.configure(bg=self.palette[self.bg_key])
-            pts = [r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
-                   w - r, h, r, h, 0, h, 0, h - r, 0, r, 0, 0]
-            self.create_polygon(pts, smooth=True, splinesteps=16,
-                                 fill=fill, outline=fill)
+            bg = self.palette[self.bg_key]
+            self.configure(bg=bg)
+            if _HAVE_PIL and w > 1 and h > 1:
+                self._draw_pil(w, h, r, fill, bg)
+            else:
+                # Fallback: a smoothed canvas polygon (no anti-aliasing, but at
+                # the screen's real DPI it's acceptable once high-DPI is on).
+                pts = [r, 0, w - r, 0, w, 0, w, r, w, h - r, w, h,
+                       w - r, h, r, h, 0, h, 0, h - r, 0, r, 0, 0]
+                self.create_polygon(pts, smooth=True, splinesteps=16,
+                                     fill=fill, outline=fill)
             self.create_text(w // 2, h // 2 + 1, text=self._text, fill=fg,
                              font=self.font)
+
+        def _draw_pil(self, w, h, r, fill, bg):
+            """Render the rounded rectangle super-sampled, then downscale so the
+            corners are smoothly anti-aliased."""
+            ss = 4  # super-sample factor
+            img = Image.new("RGB", (w * ss, h * ss), bg)
+            draw = ImageDraw.Draw(img)
+            draw.rounded_rectangle(
+                (0, 0, w * ss - 1, h * ss - 1), radius=max(0, r) * ss,
+                fill=fill)
+            img = img.resize((w, h), Image.LANCZOS)
+            self._img = ImageTk.PhotoImage(img)  # keep a ref (GC guard)
+            self.create_image(0, 0, anchor="nw", image=self._img)
 
         def _set_hover(self, v):
             if self._enabled:
@@ -3865,8 +3921,15 @@ def launch_gui() -> int:
         def __init__(self, root: "tk.Tk"):
             self.root = root
             root.title(f"Visio / Excel Text Replacer   [v{__version__}]")
-            root.geometry("980x820")
-            root.minsize(800, 680)
+            # The window is sized in pixels, so grow it to match the display's
+            # DPI (otherwise it's tiny and cramped on high-DPI screens now that
+            # the app renders at the real resolution).
+            try:
+                scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
+            except Exception:  # noqa: BLE001
+                scale = 1.0
+            root.geometry(f"{int(980 * scale)}x{int(820 * scale)}")
+            root.minsize(int(800 * scale), int(680 * scale))
             self.dark = False
             self.palette = LIGHT
             self._rbuttons: list = []      # rounded buttons to re-theme
