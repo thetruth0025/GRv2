@@ -6,9 +6,12 @@ release — find/replace, parts add/remove/edit, revisions, approvals, and Chang
 Log — makes a next-revision copy of each file, and optionally exports to PDF.
 
 The app is a **guided 3-step wizard** — **1 Files → 2 Edit → 3 Review & Run** —
-with a stepper across the top and **Back / Next** navigation. A friendly
-**animated robot helper** in the corner shows what to do at each step, and waves,
-thinks, types, sweats, celebrates, or looks worried as the run progresses.
+with a stepper across the top and **Back / Next** navigation. A friendly animated
+robot helper named **Docket** in the corner shows what to do at each step, and
+waves, thinks, types, sweats, celebrates, or looks worried as the run progresses.
+The first time you open the app Docket asks your name and greets you by it on
+Step 1 and when a batch finishes — **click Docket** any time to change the name
+(it's saved locally between sessions).
 
 The **Edit** step holds **three tabs that all run together** in a single pass:
 

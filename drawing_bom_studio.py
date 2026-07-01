@@ -47,11 +47,12 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.22.3"
+__version__ = "2.23.0"
 
 import argparse
 import datetime
 import io
+import json
 import os
 import posixpath
 import re
@@ -4311,6 +4312,43 @@ def generate_change_summary(records, summary_path, run_dt=None) -> Path:
     return summary_path
 
 
+def _settings_dir() -> Path:
+    """Per-user folder for the app's small settings file."""
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    elif sys.platform == "darwin":
+        base = os.path.join(os.path.expanduser("~"), "Library",
+                            "Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+            os.path.expanduser("~"), ".config")
+    return Path(base) / "DrawingBOMStudio"
+
+
+def load_settings() -> dict:
+    """Load saved preferences (e.g. the user's name). Never raises."""
+    try:
+        p = _settings_dir() / "settings.json"
+        if p.exists():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
+def save_settings(data: dict) -> None:
+    """Save preferences, best-effort (a read-only home just means no memory)."""
+    try:
+        d = _settings_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "settings.json").write_text(
+            json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def find_libreoffice() -> str | None:
     """Locate the LibreOffice/soffice executable across platforms."""
     for name in ("soffice", "libreoffice"):
@@ -4739,9 +4777,10 @@ HELP_SECTIONS = [
         "write a **change summary** you can hand to an approver.",
         "The window guides you through **three steps** — **1 Files**, "
         "**2 Edit**, **3 Review & Run** — using the stepper at the top and the "
-        "**Back / Next** buttons. A friendly **robot helper** in the corner "
-        "shows what to do at each step (and waves, thinks, types and celebrates "
-        "as you go).",
+        "**Back / Next** buttons. A friendly robot helper named **Docket** in "
+        "the corner shows what to do at each step (and waves, thinks, types and "
+        "celebrates as you go). The first time you open the app he asks your "
+        "name and greets you by it — **click Docket** any time to change it.",
         "The **Edit** step holds three tabs that all run together when you "
         "click **Run**:",
         "* **Find → Replace** — text find/replace rules across many files.",
@@ -4990,7 +5029,9 @@ HELP_SECTIONS = [
     ]),
     ("Appearance", [
         "* Use the **Dark / Light** button (top-right) to switch themes.",
-        "* The window/taskbar icon is the app's robot mascot.",
+        "* The window/taskbar icon is the app's robot mascot, **Docket**.",
+        "* **Click Docket** (the robot in the corner) to change the name he "
+        "greets you by. Your choice is remembered between sessions.",
     ]),
     ("Tips & troubleshooting", [
         "* Nothing replaced? Check spelling, the **in:** type, and **Case "
@@ -5838,6 +5879,9 @@ def launch_gui() -> int:
             self.excel_approval: dict = {}
             # Optional folder for all finished files ("" = beside each source).
             self.out_dir: str = ""
+            # Saved preferences (the name the robot greets you by).
+            self.settings = load_settings()
+            self.user_name = (self.settings.get("name") or "").strip()
 
             pad = {"padx": 10, "pady": 6}
 
@@ -6128,6 +6172,10 @@ def launch_gui() -> int:
             if _HAVE_PIL:
                 self.mascot = RobotMascot(footer, self.palette)
                 self.mascot.pack(side="left", padx=6, pady=2)
+                # Click Docket to change the name he greets you by.
+                self.mascot.bind("<Button-1>",
+                                 lambda e: self._ask_name(first_run=False))
+                self.mascot.configure(cursor="hand2")
             else:
                 self.mascot = None
             self._nav = ttk.Frame(footer)
@@ -6165,6 +6213,9 @@ def launch_gui() -> int:
                     "LibreOffice from libreoffice.org. Text replacement still "
                     "works without it."
                 )
+            # First run: let Docket introduce himself and ask for a name.
+            if "name" not in self.settings:
+                self.root.after(500, lambda: self._ask_name(first_run=True))
 
         def _setup_style(self):
             """Apply the current palette to the ttk widgets."""
@@ -6536,8 +6587,7 @@ def launch_gui() -> int:
                 self._update_review()
             if not self._running:
                 msg = {
-                    1: ("hello",
-                        "Hey there! Upload your files and let's begin!"),
+                    1: ("hello", self._greeting()),
                     2: ("think",
                         "Alright! Now tell me what you need me to do!"),
                     3: ("thumbs",
@@ -6599,6 +6649,79 @@ def launch_gui() -> int:
             if self._running:
                 self._set_mascot(
                     "sweat", "Phew, this is a big batch — almost there!")
+
+        # -- Docket's name greeting -----------------------------------------
+        def _greeting(self):
+            if self.user_name:
+                return f"Hi {self.user_name}! Upload your files and let's begin!"
+            return "Hey there! Upload your files and let's begin!"
+
+        def _done_line(self):
+            who = f", {self.user_name}" if self.user_name else ""
+            return f"All done{who}! Your files are saved and ready!"
+
+        def _ask_name(self, first_run=False):
+            pal = self.palette
+            win = tk.Toplevel(self.root)
+            win.title("Meet Docket" if first_run else "What should I call you?")
+            win.configure(bg=pal["bg"])
+            win.transient(self.root)
+            win.resizable(False, False)
+            win.grab_set()
+
+            bubble = ("Hey! I'm Docket! What is your name?" if first_run
+                      else "What should I call you?")
+            mini = None
+            if _HAVE_PIL:
+                mini = RobotMascot(win, pal, height=118)
+                mini.pack(padx=12, pady=(12, 2))
+                mini.set_state("hello", bubble)
+            else:
+                ttk.Label(win, text=bubble, font=("Segoe UI", 11, "bold"),
+                          wraplength=320).pack(padx=16, pady=(16, 6))
+
+            row = ttk.Frame(win)
+            row.pack(fill="x", padx=18, pady=(4, 2))
+            ttk.Label(row, text="Call me:").pack(side="left")
+            var = tk.StringVar(value=self.user_name)
+            ent = ttk.Entry(row, textvariable=var, width=22)
+            ent.pack(side="left", padx=8)
+            ent.focus_set()
+
+            def close():
+                if mini is not None:
+                    mini.stop()
+                win.destroy()
+
+            def save():
+                self.user_name = var.get().strip()
+                self.settings["name"] = self.user_name
+                save_settings(self.settings)
+                if self.step == 1 and not self._running:
+                    self._set_mascot("hello", self._greeting())
+                self.log(
+                    f"Nice to meet you, {self.user_name}!" if self.user_name
+                    else "Okay, I'll keep it casual.")
+                close()
+
+            btns = ttk.Frame(win)
+            btns.pack(fill="x", padx=18, pady=(8, 14))
+            self._rbtn(btns, "Nice to meet you!", save, kind="accent").pack(
+                side="right")
+            if not first_run:
+                self._rbtn(btns, "Cancel", close).pack(side="right", padx=6)
+            ent.bind("<Return>", lambda e: save())
+            win.protocol("WM_DELETE_WINDOW", close)
+
+            win.update_idletasks()
+            try:  # center over the main window
+                px = self.root.winfo_rootx() + (self.root.winfo_width()
+                                                - win.winfo_width()) // 2
+                py = self.root.winfo_rooty() + (self.root.winfo_height()
+                                                - win.winfo_height()) // 3
+                win.geometry(f"+{max(0, px)}+{max(0, py)}")
+            except Exception:  # noqa: BLE001
+                pass
 
         def pairs_for_file(self, path: str) -> List[Tuple[str, str]]:
             """Find/replace pairs whose dropdown selection includes this file's
@@ -8290,14 +8413,14 @@ def launch_gui() -> int:
                     + "."
                 )
                 self.log(summary)
+                who = f", {self.user_name}" if self.user_name else ""
                 if errors:
                     self._set_mascot(
-                        "uhoh", "Done, but some files had problems — "
+                        "uhoh", f"Sorry{who}, some files had problems — "
                         "check the log.")
                 else:
                     self._set_mascot(
-                        "celebrate",
-                        "All done! Your files are saved and ready!")
+                        "celebrate", self._done_line())
 
                 summary_path = None
                 if make_summary and summary_records:
