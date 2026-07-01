@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.23.0"
+__version__ = "2.23.1"
 
 import argparse
 import datetime
@@ -5668,7 +5668,7 @@ def launch_gui() -> int:
         def __init__(self, parent, palette, height=116):
             self.palette = palette
             self._h = height
-            self._bubble_w = 300
+            self._bubble_w = 330
             super().__init__(parent, highlightthickness=0, bd=0,
                              height=height + 8,
                              width=int(height * 0.8) + self._bubble_w + 30,
@@ -5678,12 +5678,14 @@ def launch_gui() -> int:
             self.frame = 0
             self._job = None
             self._photo = None
-            self._font = self._load_font(11)
+            self._font = self._load_font(14)   # larger + bold = easier to read
             self._tick()
 
         def _load_font(self, sz):
-            for name in ("segoeui.ttf", "DejaVuSans.ttf", "Arial.ttf",
-                         "arial.ttf", "LiberationSans-Regular.ttf"):
+            # Prefer a bold face so the bubble text is crisp and legible.
+            for name in ("segoeuib.ttf", "seguisb.ttf", "arialbd.ttf",
+                         "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf",
+                         "segoeui.ttf", "DejaVuSans.ttf", "arial.ttf"):
                 try:
                     from PIL import ImageFont
                     return ImageFont.truetype(name, sz)
@@ -5745,29 +5747,31 @@ def launch_gui() -> int:
             img.paste(ch, (4, H - ch.height - 2), ch)
             # speech bubble to the right of the head
             if self.text and self._font is not None:
+                padx, pady = 14, 10
+                lh = max(16, int(self._font.size * 1.55))
                 bx0 = 4 + ch.width + 14
-                lines = self._wrap(d, self.text, self._bubble_w - 24)
+                lines = self._wrap(d, self.text, self._bubble_w - 2 * padx)
                 tw = max(d.textlength(l, font=self._font) for l in lines)
-                bx1 = min(W - 4, bx0 + int(tw) + 22)
-                bh = len(lines) * 16 + 16
+                bx1 = min(W - 4, bx0 + int(tw) + 2 * padx)
+                bh = len(lines) * lh + 2 * pady
                 head_y = H - ch.height + int(ch.height * 0.22)
                 by0 = max(2, head_y - bh // 2)
                 by1 = by0 + bh
-                d.rounded_rectangle([bx0, by0, bx1, by1], radius=12,
+                d.rounded_rectangle([bx0, by0, bx1, by1], radius=13,
                                     fill=rgb(c["card"]) + (255,),
                                     outline=rgb(c["accent"]) + (255,), width=2)
                 mid = (by0 + by1) // 2
-                d.polygon([(bx0 + 2, mid - 8), (bx0 + 2, mid + 8),
-                           (bx0 - 12, mid)], fill=rgb(c["card"]) + (255,))
-                d.line([(bx0 + 2, mid - 8), (bx0 - 12, mid)],
+                d.polygon([(bx0 + 2, mid - 9), (bx0 + 2, mid + 9),
+                           (bx0 - 13, mid)], fill=rgb(c["card"]) + (255,))
+                d.line([(bx0 + 2, mid - 9), (bx0 - 13, mid)],
                        fill=rgb(c["accent"]) + (255,), width=2)
-                d.line([(bx0 + 2, mid + 8), (bx0 - 12, mid)],
+                d.line([(bx0 + 2, mid + 9), (bx0 - 13, mid)],
                        fill=rgb(c["accent"]) + (255,), width=2)
-                d.rectangle([bx0, mid - 7, bx0 + 3, mid + 7],
+                d.rectangle([bx0, mid - 8, bx0 + 3, mid + 8],
                             fill=rgb(c["card"]) + (255,))
                 for i, ln in enumerate(lines):
-                    d.text((bx0 + 11, by0 + 8 + i * 16), ln, font=self._font,
-                           fill=rgb(c["text"]))
+                    d.text((bx0 + padx, by0 + pady + i * lh), ln,
+                           font=self._font, fill=rgb(c["text"]))
             self._photo = ImageTk.PhotoImage(img)
             self.delete("all")
             self.create_image(0, 0, anchor="nw", image=self._photo)
@@ -5903,15 +5907,23 @@ def launch_gui() -> int:
             _body_id = self._scroll_canvas.create_window(
                 (0, 0), window=self.body, anchor="nw")
 
-            def _fit_scroll(_e=None):
+            def _fit_view(_e=None):
+                # Make the form fill the canvas viewport: match its width, and
+                # its height to at least the viewport so the step content can
+                # expand (pushing the mascot to the bottom, growing the file
+                # box). Taller content still scrolls.
+                cw = self._scroll_canvas.winfo_width()
+                ch = self._scroll_canvas.winfo_height()
+                if cw <= 1:
+                    return
+                req_h = self.body.winfo_reqheight()
+                self._scroll_canvas.itemconfigure(
+                    _body_id, width=cw, height=max(req_h, ch))
                 self._scroll_canvas.configure(
                     scrollregion=self._scroll_canvas.bbox("all"))
 
-            def _fit_width(e):
-                self._scroll_canvas.itemconfigure(_body_id, width=e.width)
-
-            self.body.bind("<Configure>", _fit_scroll)
-            self._scroll_canvas.bind("<Configure>", _fit_width)
+            self.body.bind("<Configure>", _fit_view)
+            self._scroll_canvas.bind("<Configure>", _fit_view)
 
             def _on_wheel(e):
                 # Scroll the form; let the log box / file list keep their own
@@ -5982,7 +5994,7 @@ def launch_gui() -> int:
                 btn_row, [self.add_btn, self.folder_btn, _rm_btn, _clr_btn])
 
             list_row = ttk.Frame(top)
-            list_row.pack(fill="x", padx=8, pady=(2, 8))
+            list_row.pack(fill="both", expand=True, padx=8, pady=(2, 8))
             self.files_box = tk.Listbox(
                 list_row, height=5, selectmode="extended",
                 activestyle="none", bg=self.palette["field"],
