@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.22.1 (native PDF: all pages/sheets, each fit to one page)"
+__version__ = "2.22.2"
 
 import argparse
 import datetime
@@ -4525,14 +4525,14 @@ class NativePdfExporter:
         typ = self._const("xlTypePDF", 0)
         wb = app.Workbooks.Open(str(in_path), 0, False)  # UpdateLinks=0, RW
         try:
-            # Fit every sheet's columns to one page wide (rows flow down as
-            # needed), so nothing is cut off the right edge of the PDF.
+            # Squeeze every sheet onto exactly one page (1 wide x 1 tall), so
+            # each Excel sheet becomes a single PDF page.
             try:
                 for ws in wb.Worksheets:
                     setup = ws.PageSetup
                     for attr, val in (("Zoom", False),
                                       ("FitToPagesWide", 1),
-                                      ("FitToPagesTall", False)):
+                                      ("FitToPagesTall", 1)):
                         try:
                             setattr(setup, attr, val)
                         except Exception:  # noqa: BLE001
@@ -4949,8 +4949,8 @@ HELP_SECTIONS = [
         "* **Also export PDF** — off by default. With **Use installed "
         "Visio/Excel for PDF** on (the default), it exports through the "
         "installed apps for best quality on Windows: **every page / sheet**, "
-        "with each **Visio page fit to one PDF page** and each **Excel sheet "
-        "fit to one page wide**. Falls back to LibreOffice; turn it off to "
+        "with each **Visio page** and each **Excel sheet** fit to its own "
+        "single PDF page. Falls back to LibreOffice; turn it off to "
         "always use LibreOffice.",
         "* **Save copy as next revision (REVx -> next)** — name each copy "
         "as the next letter (REVA -> REVB) and bump the REV box inside the "
