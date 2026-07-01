@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.24.0"
+__version__ = "2.25.0"
 
 import argparse
 import datetime
@@ -283,7 +283,8 @@ def _is_rev_label(text: str) -> bool:
     return norm in ("REV", "REVISION")
 
 
-def _choose_rev_candidate(page_xml: str, old_letter: str) -> Optional[int]:
+def _choose_rev_candidate(page_xml: str, old_letter: str,
+                          allow_corner_fallback: bool = True) -> Optional[int]:
     """Pick which single-letter box (in document order) is THE revision.
 
     The revision letter sits next to a "REV"/"Revision" label in the title
@@ -291,6 +292,12 @@ def _choose_rev_candidate(page_xml: str, old_letter: str) -> Optional[int]:
     closest to such a label; if that can't be resolved, we fall back to the
     box nearest the lower-right corner. Returns the index among same-letter
     boxes, or None if it can't be determined.
+
+    ``allow_corner_fallback=False`` disables the lower-right fallback and
+    returns None unless the letter can be tied to a REV label. That matters on
+    a border 'frame' page, whose margins are peppered with single-letter zone
+    markers (A, B, C, D ...): the corner heuristic would happily grab one of
+    those instead of the real revision letter.
     """
     try:
         root = ET.fromstring(page_xml)
@@ -329,6 +336,9 @@ def _choose_rev_candidate(page_xml: str, old_letter: str) -> Optional[int]:
         if best_idx is not None:
             return best_idx
 
+    if not allow_corner_fallback:
+        return None
+
     # Fallback: the candidate nearest the lower-right corner of the page
     # (large X, small Y in Visio coordinates), where the title block lives.
     best_idx, best_score = None, None
@@ -341,10 +351,55 @@ def _choose_rev_candidate(page_xml: str, old_letter: str) -> Optional[int]:
     return best_idx
 
 
-def bump_revision_in_page(page_xml: str, old_letter: str, new_letter: str):
+def _choose_rev_candidate_near_label(page_xml: str, cands: list) -> Optional[int]:
+    """Fallback for a title-block / background 'frame' page: among the
+    single-letter candidate <Text> blocks (in document order), pick the one
+    whose position in the XML sits closest to a REV/Revision label block.
+
+    This is purely positional in the *markup*, so it still works when the
+    letter's shape lacks PinX/PinY -- e.g. when the title block is a group
+    and the letter is a sub-shape -- which is exactly when the coordinate
+    based ``_choose_rev_candidate`` gives up. Returns an index into ``cands``
+    or None.
+    """
+    labels = []  # (start, end) of each REV/Revision label block
+    for m in _TEXT_BLOCK_RE.finditer(page_xml):
+        txt = _TAG_SPLIT_RE.sub("", m.group(2)).strip()
+        if _is_rev_label(txt):
+            labels.append((m.start(), m.end()))
+    if not labels:
+        return None
+    # Title blocks read "REV" then the letter, so a candidate that FOLLOWS a
+    # label is the natural match; one that precedes it is penalised (it's more
+    # likely an unrelated box, e.g. a border zone marker sitting just before).
+    BEFORE_PENALTY = 3
+    best_i, best_d = None, None
+    for i, cm in enumerate(cands):
+        gap = None
+        for ls, le in labels:
+            if cm.start() >= le:            # candidate after the label
+                g = cm.start() - le
+            else:                           # candidate before the label
+                g = (ls - cm.end()) * BEFORE_PENALTY
+            if gap is None or g < gap:
+                gap = g
+        if gap is not None and (best_d is None or gap < best_d):
+            best_d, best_i = gap, i
+    return best_i
+
+
+def bump_revision_in_page(page_xml: str, old_letter: str, new_letter: str,
+                          prefer_title_block: bool = False):
     """Update the revision-letter box on a page. Returns (xml, status).
 
     status: 'updated' | 'not_found' | 'ambiguous'
+
+    When ``prefer_title_block`` is set (the page is a background 'frame' /
+    title-block page that every sheet shares), disambiguation is more
+    assertive: if the coordinate-based chooser can't decide, fall back to the
+    letter box nearest a REV label in the markup rather than giving up. The
+    revision letter on such frames is authoritative, so it's better to change
+    it than to leave every sheet unchanged.
     """
     old_u = old_letter.upper()
     # Single-letter <Text> boxes matching the old revision, in document order.
@@ -359,7 +414,17 @@ def bump_revision_in_page(page_xml: str, old_letter: str, new_letter: str):
 
     index = 0
     if len(cands) > 1:
-        index = _choose_rev_candidate(page_xml, old_u)
+        if prefer_title_block:
+            # On a shared 'frame' page, tie the letter to a REV label and never
+            # let the lower-right corner heuristic pick a border zone marker.
+            index = _choose_rev_candidate(page_xml, old_u,
+                                          allow_corner_fallback=False)
+            if index is None:
+                index = _choose_rev_candidate_near_label(page_xml, cands)
+            if index is None:  # no REV label at all -- last resort
+                index = _choose_rev_candidate(page_xml, old_u)
+        else:
+            index = _choose_rev_candidate(page_xml, old_u)
         if index is None or index >= len(cands):
             return page_xml, "ambiguous"
 
@@ -2712,7 +2777,9 @@ def replace_text_in_vsdx(
     "approval"}. rev_drawing is one of 'na'/'updated'/'not_found'/'ambiguous';
     rev_sheets is the number of pages whose REV box was bumped; rev_table is one
     of 'na'/'filled'/'appended'/'not_found'/'no_slot'; approval is one of
-    'na'/'approved'/'row_not_found'/'no_column'/'not_found'.
+    'na'/'approved'/'row_not_found'/'no_column'/'not_found'. rev_frame_used is
+    True when the letter was bumped on a shared background 'frame' page (the
+    title block the other sheets show through).
     """
     in_path = Path(in_path)
     out_path = Path(out_path)
@@ -2748,9 +2815,14 @@ def replace_text_in_vsdx(
     table_embed = None
     table_embed_emf = None
     rev_picture = "na"  # na/native/patched/patch_failed/unsupported/no_picture
+    rev_frame_used = False  # rev letter was bumped on a background 'frame' page
     with zipfile.ZipFile(in_path, "r") as zin:
         page_count = sum(1 for n in zin.namelist()
                          if _PAGE_NAME_RE.search(n))
+        # Background 'frame' pages hold the shared title-block revision letter;
+        # a sheet that shows the letter through its background has no editable
+        # box of its own, so the frame is where the change must land.
+        frame_parts = _visio_frame_page_parts(zin) if do_rev else set()
         # The revision table / approval go on whichever page actually has the
         # table (often not page1.xml -- part numbers follow creation order).
         if do_table or do_approval:
@@ -2814,12 +2886,16 @@ def replace_text_in_vsdx(
                         # The REV box sits in the title block on every sheet,
                         # so bump it on each page, not just the cover.
                         if do_rev and _PAGE_NAME_RE.search(item.filename):
+                            is_frame = item.filename in frame_parts
                             new_text, st = bump_revision_in_page(
-                                new_text, revision[0], revision[1]
+                                new_text, revision[0], revision[1],
+                                prefer_title_block=is_frame,
                             )
                             if st == "updated":
                                 rev_sheets += 1
                                 rev_status = "updated"
+                                if is_frame:
+                                    rev_frame_used = True
                             elif rev_status == "na":
                                 rev_status = st
                         if do_table and item.filename == table_page:
@@ -2898,7 +2974,7 @@ def replace_text_in_vsdx(
             "rev_sheets": rev_sheets, "rev_table": table_status,
             "approval": approval_status, "page_count": page_count,
             "rev_table_page": table_loc, "bom_cells": bom_cells,
-            "rev_picture": rev_picture}
+            "rev_picture": rev_picture, "rev_frame_used": rev_frame_used}
 
 
 # ---------------------------------------------------------------------------
@@ -4053,6 +4129,58 @@ def _visio_page_names(zin: zipfile.ZipFile) -> dict:
             part = _resolve_part("visio/pages", rid_target[rm.group(1)])
             out[part] = _xml_unescape(nm.group(1))
     return out
+
+
+def _visio_frame_page_parts(zin: zipfile.ZipFile) -> set:
+    """Page parts (visio/pages/pageN.xml) that act as a shared background
+    'frame' / title block: Visio background pages (``Background="1"``), pages
+    named like a frame/border/title block, and any page used as another page's
+    ``BackPage``. On such drawings the lower-right revision letter lives once
+    on this frame and shows through on every sheet, so if a sheet's own REV box
+    can't be edited, the frame is where the letter must be changed."""
+    try:
+        pages = zin.read("visio/pages/pages.xml").decode("utf-8", "replace")
+        rels = zin.read(
+            "visio/pages/_rels/pages.xml.rels"
+        ).decode("utf-8", "replace")
+    except (KeyError, OSError):
+        return set()
+    # Visio writes these files with single OR double quotes, so match either.
+    rid_target = {}
+    for rel in re.finditer(r"<Relationship\b[^>]*>", rels):
+        idm = re.search(r'''Id=["']([^"']+)["']''', rel.group(0))
+        tm = re.search(r'''Target=["']([^"']+)["']''', rel.group(0))
+        if idm and tm:
+            rid_target[idm.group(1)] = tm.group(1)
+
+    id_to_part = {}
+    frame_ids = set()
+    backpage_ids = set()
+    for pm in re.finditer(r"<Page\b[^>]*>.*?</Page>|<Page\b[^>]*/>", pages,
+                          re.DOTALL):
+        block = pm.group(0)
+        open_tag = block[:block.index(">") + 1]
+        pid = re.search(r'''\bID=["']([^"']+)["']''', open_tag)
+        pid = pid.group(1) if pid else None
+        nm = re.search(r'''\bName=["']([^"']*)["']''', open_tag)
+        name = _xml_unescape(nm.group(1)).lower() if nm else ""
+        bg = re.search(r'''\bBackground=["']([^"']+)["']''', open_tag)
+        bp = re.search(r'''\bBackPage=["']([^"']+)["']''', open_tag)
+        rm = re.search(r'''r:id=["']([^"']+)["']''', block)
+        part = None
+        if rm and rm.group(1) in rid_target:
+            part = _resolve_part("visio/pages", rid_target[rm.group(1)])
+        if pid and part:
+            id_to_part[pid] = part
+        is_frameish = any(k in name for k in
+                          ("frame", "border", "title block", "titleblock"))
+        if pid and ((bg and bg.group(1) == "1") or is_frameish):
+            frame_ids.add(pid)
+        if bp and bp.group(1):
+            backpage_ids.add(bp.group(1))
+
+    return {id_to_part[i] for i in (frame_ids | backpage_ids)
+            if i in id_to_part}
 
 
 def _visio_shape_texts(xml_text: str) -> dict:
@@ -8413,6 +8541,12 @@ def launch_gui() -> int:
                             }.get(rd)
                             if note:
                                 self.log(note)
+                            if report.get("rev_frame_used"):
+                                self.log(
+                                    "      (changed on the shared background "
+                                    "'frame' page; it shows through on the "
+                                    "other sheets)"
+                                )
                         if rev_entry:
                             rl = rev_entry.get("Rev", "")
                             tp = report.get("rev_table_page") or "?"
