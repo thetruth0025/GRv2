@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.23.1"
+__version__ = "2.23.2"
 
 import argparse
 import datetime
@@ -5849,9 +5849,11 @@ def launch_gui() -> int:
             )
             self.theme_btn.pack(side="right", padx=(0, 14), pady=8)
             self._rbuttons.append(self.theme_btn)
+            # Green pill so it stands out on the banner (the accent colour
+            # equals the banner colour in light mode, which hid it).
             self.help_btn = RoundedButton(
                 self._banner, text="❓  How to use", command=self.show_help,
-                kind="accent", palette=self.palette, radius=14,
+                kind="green", palette=self.palette, radius=14,
                 bg_key="banner", padx=12, pady=6,
             )
             self.help_btn.pack(side="right", padx=(0, 8), pady=8)
@@ -6547,6 +6549,26 @@ def launch_gui() -> int:
             else:
                 self.progress.stop()
 
+        def _wheelify(self, win, scrollable):
+            """Make the mouse wheel scroll ``scrollable`` (a canvas or text
+            widget) anywhere inside dialog window ``win``."""
+            def _w(e):
+                if getattr(e, "num", None) == 4:
+                    delta = -1
+                elif getattr(e, "num", None) == 5:
+                    delta = 1
+                elif getattr(e, "delta", 0):
+                    delta = -1 if e.delta > 0 else 1
+                else:
+                    return
+                try:
+                    scrollable.yview_scroll(delta * 2, "units")
+                except Exception:  # noqa: BLE001
+                    pass
+                return "break"
+            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                win.bind(seq, _w, add="+")
+
         # -- Wizard (stepper) navigation + mascot ---------------------------
         def _draw_stepper(self):
             cv = self.stepper
@@ -6852,6 +6874,7 @@ def launch_gui() -> int:
             canvas.configure(yscrollcommand=sb.set)
             canvas.pack(side="left", fill="both", expand=True, padx=(10, 0))
             sb.pack(side="left", fill="y", padx=(0, 10))
+            self._wheelify(win, canvas)
 
             def update_filter_label():
                 sel = [fv for fv, v in filter_vars.items() if v.get()]
@@ -7130,6 +7153,7 @@ def launch_gui() -> int:
             canvas.configure(yscrollcommand=sb.set)
             canvas.pack(side="left", fill="both", expand=True, padx=(10, 0))
             sb.pack(side="left", fill="y", padx=(0, 10))
+            self._wheelify(win, canvas)
 
             def update_filter_label():
                 sel = [fv for fv, v in filter_vars.items() if v.get()]
@@ -7393,6 +7417,7 @@ def launch_gui() -> int:
             canvas.configure(yscrollcommand=sb.set)
             canvas.pack(side="left", fill="both", expand=True, padx=(10, 0))
             sb.pack(side="left", fill="y", padx=(0, 10))
+            self._wheelify(win, canvas)
 
             already = self.remove_parts
             state = []  # {file, fmt, sheet, row, var}
@@ -7525,6 +7550,7 @@ def launch_gui() -> int:
             vsb.pack(side="right", fill="y")
             hsb.pack(side="bottom", fill="x")
             canvas.pack(side="left", fill="both", expand=True)
+            self._wheelify(win, canvas)
 
             # mutable view state
             st = {"file": None, "fmt": None, "sheet": None, "cols": [],
