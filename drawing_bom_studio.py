@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.25.0"
+__version__ = "2.25.1"
 
 import argparse
 import datetime
@@ -388,6 +388,29 @@ def _choose_rev_candidate_near_label(page_xml: str, cands: list) -> Optional[int
     return best_i
 
 
+def _replace_letter_in_text_only(inner: str, old_letter: str,
+                                 new_letter: str) -> Optional[str]:
+    """Replace the first ``old_letter`` in the *text* of a <Text> block's inner
+    markup, leaving tags untouched. Returns the new inner, or None if the
+    letter wasn't found in any text node.
+
+    A Visio <Text> block interleaves character-run tags with the text, e.g.
+    ``<cp IX='0'/>C``. A naive case-insensitive regex over the whole inner
+    would match the 'c' in ``<cp`` first -- corrupting the tag and leaving the
+    real letter alone -- so we only ever substitute inside the text segments.
+    """
+    # _TAG_SPLIT_RE captures the tags, so split() yields text, tag, text, ...
+    parts = _TAG_SPLIT_RE.split(inner)
+    old_u = old_letter.upper()
+    for i in range(0, len(parts), 2):  # even indices are the text segments
+        seg = parts[i]
+        pos = seg.upper().find(old_u)
+        if pos != -1:
+            parts[i] = seg[:pos] + new_letter + seg[pos + 1:]
+            return "".join(parts)
+    return None
+
+
 def bump_revision_in_page(page_xml: str, old_letter: str, new_letter: str,
                           prefer_title_block: bool = False):
     """Update the revision-letter box on a page. Returns (xml, status).
@@ -429,10 +452,9 @@ def bump_revision_in_page(page_xml: str, old_letter: str, new_letter: str,
             return page_xml, "ambiguous"
 
     m = cands[index]
-    new_inner = re.sub(
-        re.escape(old_letter), lambda _m: new_letter, m.group(2),
-        count=1, flags=re.IGNORECASE,
-    )
+    new_inner = _replace_letter_in_text_only(m.group(2), old_letter, new_letter)
+    if new_inner is None:  # letter only lived inside markup -- nothing to do
+        return page_xml, "not_found"
     new_block = m.group(1) + new_inner + m.group(3)
     return page_xml[: m.start()] + new_block + page_xml[m.end():], "updated"
 
