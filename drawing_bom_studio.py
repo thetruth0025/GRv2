@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.22.2"
+__version__ = "2.22.3"
 
 import argparse
 import datetime
@@ -4473,45 +4473,21 @@ class NativePdfExporter:
         except Exception:  # noqa: BLE001
             return default
 
-    def _fit_visio_pages(self, doc):
-        """Set every page's print setup to 'fit to 1 sheet across by 1 down',
-        so each Visio page becomes exactly one PDF page (no tiling)."""
-        try:
-            pages = doc.Pages
-            count = pages.Count
-        except Exception:  # noqa: BLE001
-            return
-        for i in range(1, count + 1):
-            try:
-                ps = pages.Item(i).PageSheet
-            except Exception:  # noqa: BLE001
-                continue
-            for cell, formula in (("PrintProps.OnPage", "TRUE"),
-                                  ("PrintProps.PagesX", "1"),
-                                  ("PrintProps.PagesY", "1")):
-                try:
-                    ps.Cells(cell).FormulaForceU = formula
-                except Exception:  # noqa: BLE001
-                    pass
-
     def _export_visio(self, in_path, out):
         app = self._visio_app()
         fmt = self._const("visFixedFormatPDF", 1)
-        intent = self._const("visDocExIntentPrint", 1)
-        prange = self._const("visPrintAll", 0)      # ALL pages
-        # Open writable (macros disabled) so we can adjust each page's print
-        # setup; we never save, so the source copy is untouched.
-        doc = app.Documents.OpenEx(str(in_path), 128)
+        intent = self._const("visDocExIntentScreen", 1)
+        # visPrintAll = ALL pages. Visio's "Save as PDF" already lays each page
+        # on its own PDF page, so we don't touch the print setup. The enum value
+        # is read from the type library (EnsureDispatch); the documented
+        # fallback is 1 (a wrong value here is what threw before).
+        prange = self._const("visPrintAll", 1)
+        doc = app.Documents.OpenEx(str(in_path), 2 + 128)  # read-only, no macros
         try:
-            self._fit_visio_pages(doc)
             if out.exists():
                 out.unlink()
             doc.ExportAsFixedFormat(fmt, str(out), intent, prange)
         finally:
-            try:
-                doc.Saved = True   # no "save changes?" prompt on close
-            except Exception:  # noqa: BLE001
-                pass
             try:
                 doc.Close()
             except Exception:  # noqa: BLE001
