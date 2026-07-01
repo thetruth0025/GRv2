@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.23.2"
+__version__ = "2.24.0"
 
 import argparse
 import datetime
@@ -2522,7 +2522,9 @@ def excel_bom_sheets(path):
 
 def parts_table_view(path, fmt, sheet_id):
     """For displaying a table in the add editor: (col_order [col letters],
-    headers {col: header text}, rows [{col: value}, ...]) or None."""
+    headers {col: header text}, rows [{col: value}, ...], seq_col) or None.
+    ``seq_col`` is the item/line-number column (so the editor can show the
+    existing numbers), or None."""
     try:
         zin = zipfile.ZipFile(path)
     except (zipfile.BadZipFile, OSError):
@@ -2546,7 +2548,16 @@ def parts_table_view(path, fmt, sheet_id):
     data_rownums = _table_data_rownums(rows_map, col_field, hrow)
     rows = [{c: (rows_map.get(rn, {}).get(c) or "") for c in col_order}
             for rn in data_rownums]
-    return col_order, headers, rows
+    # The item/line-number column: the "Item" field, else a detected
+    # consecutive-integer column.
+    seq_col = next((c for c, f in col_field.items() if f == "Item"), None)
+    if seq_col is None:
+        all_cols = ({c for rn in data_rownums for c in rows_map.get(rn, {})}
+                    | set(col_field))
+        seq = _detect_seq_cols(rows_map, data_rownums, list(all_cols))
+        if seq:
+            seq_col = min(seq, key=_col_index)
+    return col_order, headers, rows, seq_col
 
 
 def _excel_bom_table(zin: zipfile.ZipFile, sheet_part: str, shared):
@@ -6569,6 +6580,25 @@ def launch_gui() -> int:
             for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
                 win.bind(seq, _w, add="+")
 
+        def _maximize(self, win):
+            """Open a Toplevel maximized, cross-platform, with graceful
+            fallbacks so it never raises on odd window managers."""
+            try:
+                win.state("zoomed")  # Windows / some Linux WMs
+                return
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                win.attributes("-zoomed", True)  # many Linux WMs
+                return
+            except Exception:  # noqa: BLE001
+                pass
+            try:  # last resort: size to the screen
+                win.geometry(f"{win.winfo_screenwidth()}x"
+                             f"{win.winfo_screenheight()}+0+0")
+            except Exception:  # noqa: BLE001
+                pass
+
         # -- Wizard (stepper) navigation + mascot ---------------------------
         def _draw_stepper(self):
             cv = self.stepper
@@ -7506,6 +7536,8 @@ def launch_gui() -> int:
             win.transient(self.root)
             win.grab_set()
             win.configure(bg=pal["bg"])
+            # Open maximized so every column of the parts table is visible.
+            self._maximize(win)
 
             ttk.Label(
                 win, wraplength=870, justify="left",
@@ -7628,23 +7660,45 @@ def launch_gui() -> int:
                     ttk.Label(grid, text="(couldn't read this table)").grid(
                         row=0, column=0, padx=6, pady=6)
                     return
-                cols, headers, rows = view
+                cols, headers, rows, seq_col = view
                 st.update({"file": f, "fmt": detect_format(f), "sheet": sid,
                            "cols": cols, "headers": headers,
-                           "existing_rows": rows})
+                           "existing_rows": rows, "seq_col": seq_col})
+                # Gather the existing item numbers from the sequence column so
+                # the user can see what numbers are already taken.
+                seq_vals = []
+                if seq_col is not None:
+                    for row in rows:
+                        v = str(row.get(seq_col, "")).strip()
+                        if v:
+                            seq_vals.append(v)
                 for ci, col in enumerate(cols):
+                    is_seq = (col == seq_col)
                     ttk.Label(grid, text=headers.get(col, col),
                               font=("Segoe UI", 9, "bold"),
-                              foreground=pal["accent"]).grid(
+                              foreground=(pal["green"] if is_seq
+                                          else pal["accent"])).grid(
                         row=0, column=ci, sticky="w", padx=2, pady=2)
-                ttk.Label(grid, text="Insert as item #\n(blank = end)",
+                # Trailing "Insert as item #" header, with the range of item
+                # numbers already in use as a hint.
+                hint = "blank = end"
+                nums = [int(v) for v in seq_vals if v.isdigit()]
+                if nums:
+                    hint = f"existing {min(nums)}–{max(nums)}; blank = end"
+                elif seq_vals:
+                    hint = "blank = end"
+                ttk.Label(grid, text=f"Insert as item #\n({hint})",
                           font=("Segoe UI", 8, "bold"), justify="center",
                           foreground=pal["green"]).grid(
                     row=0, column=len(cols), sticky="w", padx=(10, 2), pady=2)
                 for ri, row in enumerate(rows, start=1):
                     for ci, col in enumerate(cols):
-                        ttk.Label(grid, text=str(row.get(col, ""))[:30],
-                                  foreground=pal["muted"]).grid(
+                        is_seq = (col == seq_col)
+                        ttk.Label(
+                            grid, text=str(row.get(col, ""))[:30],
+                            font=(("Segoe UI", 9, "bold") if is_seq else None),
+                            foreground=(pal["green"] if is_seq
+                                        else pal["muted"])).grid(
                             row=ri, column=ci, sticky="w", padx=2, pady=1)
                 # restore any staged new rows, else one blank row
                 staged = self.add_parts.get(f, {}).get(sid, [])
