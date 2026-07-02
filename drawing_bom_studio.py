@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.26.0"
+__version__ = "2.26.1"
 
 import argparse
 import datetime
@@ -4759,22 +4759,45 @@ class NativePdfExporter:
         # is read from the type library (EnsureDispatch); the documented
         # fallback is 1 (a wrong value here is what threw before).
         prange = self._const("visPrintAll", 1)
-        doc = app.Documents.OpenEx(str(in_path), 2 + 128)  # read-only, no macros
-        try:
+        # Open a writable COPY (visOpenCopy=1) with macros disabled (128).
+        # Opening read-only (visOpenRO=2) can make ExportAsFixedFormat fail --
+        # Visio needs to write layout/render data into the doc -- and a copy is
+        # writable yet leaves the user's original file untouched and unlocked.
+        open_flags = 1 + 128
+        # Some Visio builds also refuse to export from a fully hidden window, so
+        # if the invisible attempt fails, retry once with the app shown.
+        last = None
+        for make_visible in (False, True):
             if out.exists():
-                out.unlink()
+                try:
+                    out.unlink()
+                except OSError:
+                    pass
+            if make_visible:
+                try:
+                    app.Visible = 1
+                except Exception:  # noqa: BLE001
+                    pass
+            doc = None
             try:
+                doc = app.Documents.OpenEx(str(in_path), open_flags)
                 doc.ExportAsFixedFormat(fmt, str(out), intent, prange)
-            except Exception as exc:  # noqa: BLE001 - surface the real reason
-                raise RuntimeError(_com_error_text(exc)) from exc
-        finally:
-            try:
-                doc.Close()
-            except Exception:  # noqa: BLE001
-                pass
-        if not out.exists():
-            raise RuntimeError("Visio produced no PDF")
-        return out
+            except Exception as exc:  # noqa: BLE001 - remember the real reason
+                last = RuntimeError(_com_error_text(exc))
+            finally:
+                if doc is not None:
+                    try:
+                        doc.Close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                if make_visible:
+                    try:
+                        app.Visible = 0
+                    except Exception:  # noqa: BLE001
+                        pass
+            if out.exists():
+                return out
+        raise last or RuntimeError("Visio produced no PDF")
 
     def _export_excel(self, in_path, out):
         app = self._excel_app()
