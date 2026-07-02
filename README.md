@@ -163,6 +163,13 @@ Options:
   which renders "Sheet X of Y" as "Sheet 0 of Y". Turn this off to always use
   LibreOffice. The **Status** log reports which engine ran for each file. From
   the CLI, use `--pdf-engine auto|native|libreoffice` (default `auto`).
+  - **Visio needs a normal default printer.** Visio builds its PDF through the
+    Windows **default printer's** layout (Excel does not). If the default is a
+    *Microsoft Print to PDF* / *XPS Document Writer* driver (they pop a Save-As
+    dialog and can't be automated) or an offline/paused printer, the tool now
+    **detects that up front, skips Visio for that file, and uses LibreOffice**
+    instead — so it no longer leaves a stuck print job behind. Set a normal
+    printer as your Windows default to get native Visio PDF quality.
 - **Save copy as next revision (REVx → next)** — name the copy as the next
   revision letter instead of `*_edited` (on by default; see *Revisions* above).
 - **...and update the REV box in the drawing** — also bump the `REVx` letter box

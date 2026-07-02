@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.25.1"
+__version__ = "2.26.0"
 
 import argparse
 import datetime
@@ -4593,6 +4593,76 @@ def convert_to_pdf(
 # correct. Needs pywin32; Windows only. Anything goes wrong -> the caller falls
 # back to LibreOffice.
 
+def _com_error_text(exc) -> str:
+    """A readable one-line message for a COM error (or any exception).
+
+    A raw pywin32 ``com_error`` prints as an opaque nested tuple; this digs out
+    the source/description/scode so the log says something useful."""
+    info = getattr(exc, "excepinfo", None)
+    if info:
+        # excepinfo: (wcode, source, description, helpfile, helpid, scode)
+        src = info[1] if len(info) > 1 else None
+        desc = (info[2] or "").strip() if len(info) > 2 else ""
+        scode = info[5] if len(info) > 5 else None
+        parts = []
+        if desc and desc.lower() != "an exception occurred.":
+            parts.append(desc)
+        if src:
+            parts.append(f"from {src}")
+        if scode is not None:
+            parts.append(f"code 0x{scode & 0xFFFFFFFF:08X}")
+        if parts:
+            return "; ".join(parts)
+    return str(getattr(exc, "strerror", "") or exc)
+
+
+def _visio_export_printer_issue() -> Optional[str]:
+    """Visio's ``ExportAsFixedFormat`` renders PDFs through the Windows *default
+    printer* (unlike Excel, which is printer-independent). If that printer can't
+    be automated -- none set, a prompt-for-file virtual printer, or offline /
+    paused -- the export spools a stuck job and then fails.
+
+    Returns a human-readable reason to skip native Visio export (so we fall back
+    cleanly and never spool that stuck job), or None if the printer looks fine
+    or we can't tell."""
+    try:
+        import win32print
+    except Exception:  # noqa: BLE001
+        return None  # can't check -- let the export try
+    try:
+        name = win32print.GetDefaultPrinter()
+    except Exception:  # noqa: BLE001
+        name = ""
+    if not name:
+        return ("no default Windows printer is set (Visio renders PDFs through "
+                "the default printer)")
+    low = name.lower()
+    # Virtual printers that pop a "Save As" dialog -- can't run unattended.
+    prompts = ("microsoft print to pdf", "microsoft xps document writer",
+               "send to onenote", "onenote", "fax")
+    if any(p in low for p in prompts):
+        return (f"the default printer is \"{name}\", which pops a Save-As "
+                "dialog and can't be automated; Visio renders PDFs through the "
+                "default printer, so set a normal printer as default for native "
+                "Visio export")
+    try:
+        h = win32print.OpenPrinter(name)
+        try:
+            status = win32print.GetPrinter(h, 2).get("Status", 0)
+        finally:
+            win32print.ClosePrinter(h)
+        bad = 0
+        for flag in ("PRINTER_STATUS_OFFLINE", "PRINTER_STATUS_PAUSED",
+                     "PRINTER_STATUS_ERROR", "PRINTER_STATUS_NOT_AVAILABLE"):
+            bad |= getattr(win32print, flag, 0)
+        if status & bad:
+            return (f"the default printer \"{name}\" is offline or paused; "
+                    "Visio renders PDFs through the default printer")
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def native_pdf_available() -> bool:
     """True if native Visio/Excel PDF export *could* work here (Windows with
     pywin32). Whether the apps themselves are installed is only known when we
@@ -4673,6 +4743,14 @@ class NativePdfExporter:
             return default
 
     def _export_visio(self, in_path, out):
+        # Visio's ExportAsFixedFormat lays out pages through the Windows default
+        # printer; a printer that prompts for a file or is offline spools a
+        # stuck job and then throws. Bail out *before* opening/exporting so we
+        # never create that stuck job, and fall back to LibreOffice cleanly.
+        issue = _visio_export_printer_issue()
+        if issue:
+            raise RuntimeError(issue)
+
         app = self._visio_app()
         fmt = self._const("visFixedFormatPDF", 1)
         intent = self._const("visDocExIntentScreen", 1)
@@ -4685,7 +4763,10 @@ class NativePdfExporter:
         try:
             if out.exists():
                 out.unlink()
-            doc.ExportAsFixedFormat(fmt, str(out), intent, prange)
+            try:
+                doc.ExportAsFixedFormat(fmt, str(out), intent, prange)
+            except Exception as exc:  # noqa: BLE001 - surface the real reason
+                raise RuntimeError(_com_error_text(exc)) from exc
         finally:
             try:
                 doc.Close()
@@ -5128,6 +5209,11 @@ HELP_SECTIONS = [
         "with each **Visio page** and each **Excel sheet** fit to its own "
         "single PDF page. Falls back to LibreOffice; turn it off to "
         "always use LibreOffice.",
+        "  * Note: Visio makes its PDF through your **Windows default "
+        "printer**, so it needs a normal printer set as default. If the "
+        "default is *Microsoft Print to PDF* / *XPS* (they pop a Save-As "
+        "dialog) or an offline printer, the tool skips Visio and uses "
+        "LibreOffice for that file instead (Excel is unaffected).",
         "* **Save copy as next revision (REVx -> next)** — name each copy "
         "as the next letter (REVA -> REVB) and bump the REV box inside the "
         "file. On by default. (Ignored for a file you're approving — those are "
