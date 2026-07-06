@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.28.0"
+__version__ = "2.29.0"
 
 import argparse
 import datetime
@@ -232,6 +232,10 @@ def _is_text_part(name: str) -> bool:
 
 # "REV" + optional space/dash/underscore + a single letter, not part of a word.
 _FILENAME_REV_RE = re.compile(r"(?i)(REV)([ _-]?)([A-Za-z])(?![A-Za-z])")
+# "REV-" (a dash-revision: no revision issued yet). The dash is the revision
+# value, so it must NOT be followed by a letter/digit (that would be "REV-A",
+# handled by the letter pattern above). Its next revision is A.
+_FILENAME_REVDASH_RE = re.compile(r"(?i)(REV)([ _]?)(-)(?![A-Za-z0-9])")
 _PAGE_NAME_RE = re.compile(r"visio/pages/page(\d+)\.xml$", re.IGNORECASE)
 
 
@@ -250,21 +254,30 @@ def revision_output_path(in_path: str | os.PathLike):
       'ok'      -> out_path is the bumped-revision name
       'no_rev'  -> no REVx in the name; out_path falls back to *_edited.vsdx
       'at_z'    -> already at REVZ; out_path is None (caller should skip)
+
+    A "REV-" (dash) in the name means no revision has been issued yet; its next
+    revision is A, so old_letter is "-" and the copy is named REVA.
     """
     p = Path(in_path)
     match = list(_FILENAME_REV_RE.finditer(p.stem))
-    if not match:
-        fallback = p.with_name(p.stem + "_edited" + p.suffix)
-        return fallback, None, None, "no_rev"
+    if match:
+        m = match[-1]  # last occurrence is the revision marker
+        old = m.group(3).upper()
+        nxt = next_revision_letter(old)
+        if nxt is None:
+            return None, old, None, "at_z"
+        new_stem = p.stem[: m.start(3)] + nxt + p.stem[m.end(3):]
+        return p.with_name(new_stem + p.suffix), old, nxt, "ok"
 
-    m = match[-1]  # last occurrence is the revision marker
-    old = m.group(3).upper()
-    nxt = next_revision_letter(old)
-    if nxt is None:
-        return None, old, None, "at_z"
+    # No lettered REV -> a "REV-" dash-revision becomes REVA.
+    dmatch = list(_FILENAME_REVDASH_RE.finditer(p.stem))
+    if dmatch:
+        m = dmatch[-1]
+        new_stem = p.stem[: m.start(3)] + "A" + p.stem[m.end(3):]
+        return p.with_name(new_stem + p.suffix), "-", "A", "ok"
 
-    new_stem = p.stem[: m.start(3)] + nxt + p.stem[m.end(3):]
-    return p.with_name(new_stem + p.suffix), old, nxt, "ok"
+    fallback = p.with_name(p.stem + "_edited" + p.suffix)
+    return fallback, None, None, "no_rev"
 
 
 def _cell_value(shape_el, ns: str, name: str) -> Optional[float]:
