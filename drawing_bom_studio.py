@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.27.0"
+__version__ = "2.28.0"
 
 import argparse
 import datetime
@@ -1128,8 +1128,22 @@ def _embedded_revtable_info(xlsx_bytes: bytes):
     for rn in table_rows:
         rv = dict(rows[rn]).get(rev_col)
         data_revs.append((rn, rv))
-    blank_row = next((rn for rn, rv in data_revs if not (rv or "").strip()),
-                     None)
+    # A row is only "available" if its Rev cell is blank AND its Description
+    # cell (if the table has one) is blank too. A blank Rev alone isn't enough:
+    # a row can be part-filled (description written, revision letter not yet
+    # assigned), and treating that as free would overwrite the description.
+    desc_col = next((c for c, f in col_field.items() if f == "Description"),
+                    None)
+    blank_row = None
+    for rn, rv in data_revs:
+        if (rv or "").strip():
+            continue
+        if desc_col is not None:
+            dv = dict(rows[rn]).get(desc_col)
+            if (dv or "").strip():
+                continue
+        blank_row = rn
+        break
     return {
         "sheet_member": sheet_member,
         "sheet_xml": sheet_xml,
