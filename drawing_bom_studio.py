@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.26.1"
+__version__ = "2.27.0"
 
 import argparse
 import datetime
@@ -4135,18 +4135,19 @@ def _visio_page_names(zin: zipfile.ZipFile) -> dict:
         ).decode("utf-8", "replace")
     except KeyError:
         return {}
+    # Visio writes these files with single OR double quotes, so match either.
     rid_target = {}
     for rel in re.finditer(r"<Relationship\b[^>]*>", rels):
-        idm = re.search(r'Id="([^"]+)"', rel.group(0))
-        tm = re.search(r'Target="([^"]+)"', rel.group(0))
+        idm = re.search(r'''Id=["']([^"']+)["']''', rel.group(0))
+        tm = re.search(r'''Target=["']([^"']+)["']''', rel.group(0))
         if idm and tm:
             rid_target[idm.group(1)] = tm.group(1)
     out = {}
     for pm in re.finditer(r"<Page\b[^>]*>.*?</Page>|<Page\b[^>]*/>", pages,
                           re.DOTALL):
         block = pm.group(0)
-        nm = re.search(r'\bName="([^"]+)"', block)
-        rm = re.search(r'r:id="([^"]+)"', block)
+        nm = re.search(r'''\bName=["']([^"']*)["']''', block)
+        rm = re.search(r'''r:id=["']([^"']+)["']''', block)
         if nm and rm and rm.group(1) in rid_target:
             part = _resolve_part("visio/pages", rid_target[rm.group(1)])
             out[part] = _xml_unescape(nm.group(1))
@@ -4359,7 +4360,11 @@ def generate_change_summary(records, summary_path, run_dt=None) -> Path:
         if not changes:
             return head + ('<p class="none">No content changes '
                            '(copied as-is).</p>')
-        noun = "sheet" if any("!" in c["location"] for c in changes) else "page"
+        # Visio drawings and Excel workbooks are both organised into named
+        # sheets, so identify changes by sheet (e.g. "R0011"), not page number.
+        is_visio = detect_format(r.get("input", "")) == "vsdx"
+        noun = ("sheet" if is_visio or any("!" in c["location"] for c in changes)
+                else "page")
 
         # Collapse identical changes (same field + before + after) into one
         # row, collecting every place they happened, so a change repeated on
