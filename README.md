@@ -174,6 +174,14 @@ Options:
   revision letter instead of `*_edited` (on by default; see *Revisions* above).
 - **...and update the REV box in the drawing** — also bump the `REVx` letter box
   inside the drawing to match the new file name (on by default).
+  - **BOM line items follow batch revision bumps.** If a BOM/parts list (an
+    Excel sheet or a Visio parts table) names another cable drawing from the
+    same batch as a line item — e.g. `CBL00132-01 REVD` — and that drawing is
+    being bumped, the line item is updated to the drawing's next revision
+    (`CBL00132-01 REVE`) automatically. Matching is by part number + current
+    revision letter; a drawing file named without the `-NN` suffix
+    (`CBL00132_REVD`) still matches `CBL00132-01 REVD` in the BOM, but a
+    different suffix (`CBL00132-02`) does not.
 
 ### Excel: find & edit BOM rows
 

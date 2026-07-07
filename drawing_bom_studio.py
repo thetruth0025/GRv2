@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.29.0"
+__version__ = "2.30.0"
 
 import argparse
 import datetime
@@ -2090,6 +2090,161 @@ def _merge_bom_edit_dicts(*dicts) -> dict:
             if ed.get("add_rows"):
                 m.setdefault("add_rows", []).extend(ed["add_rows"])
     return merged
+
+
+# ---------------------------------------------------------------------------
+# Follow batch revision bumps into BOM line items
+# ---------------------------------------------------------------------------
+#
+# A parts list often names other cable drawings, with their revision, as line
+# items -- e.g. "CBL00132-01 REVD". When the batch also processes that drawing
+# and bumps it to the next revision, the reference should follow so it points at
+# what the drawing will become (REVE). Matching is by the drawing's part number
+# plus its current revision letter; the part number may drop a trailing "-NN"
+# suffix (a file named "CBL00132_REVD" still matches "CBL00132-01 REVD").
+
+# A drawing reference inside a cell: a part-number token, then REV, then a
+# single letter (not part of a longer word/number).
+_BOM_DRAWING_REF_RE = re.compile(
+    r"([A-Za-z0-9][A-Za-z0-9-]*?)[ _]*REV[ _-]?([A-Za-z])(?![A-Za-z0-9])",
+    re.IGNORECASE)
+
+
+def _drawing_name_from_filename(path) -> str:
+    """The leading part-number token of a drawing's file name, e.g.
+    'CBL00132-01_REVD_...' -> 'CBL00132-01'; 'CBL00132_REVD' -> 'CBL00132'."""
+    m = re.match(r"\s*([A-Za-z0-9]+(?:-[0-9A-Za-z]+)*)", Path(path).stem)
+    return m.group(1) if m else ""
+
+
+def _drawing_part_base(name: str) -> str:
+    """A part number with a trailing '-NN' dash-suffix removed."""
+    m = re.match(r"^(.*?)-[0-9A-Za-z]+$", name)
+    return m.group(1) if m else name
+
+
+def _drawing_parts_match(a: str, b: str) -> bool:
+    """True if two drawing identifiers refer to the same drawing. Exact match
+    always counts; otherwise they match on base part number only when at least
+    one lacks a '-NN' suffix -- so 'CBL00132' matches 'CBL00132-01', but
+    'CBL00132-01' does NOT match 'CBL00132-02'."""
+    a, b = a.strip().upper(), b.strip().upper()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    ba, bb = _drawing_part_base(a), _drawing_part_base(b)
+    if ba != a and bb != b:  # both carry a distinct suffix -> require exact
+        return False
+    return ba == bb
+
+
+def _bump_drawing_refs_in_text(text: str, drawings) -> Optional[str]:
+    """If ``text`` names one of ``drawings`` [(name, old_rev, new_rev)] at its
+    old revision (e.g. 'CBL00132-01 REVD'), return the text with that revision
+    bumped ('... REVE'); else None. Every matching reference in the cell is
+    bumped."""
+    if not text or "REV" not in text.upper():
+        return None
+    changed = False
+
+    def repl(m):
+        nonlocal changed
+        part, letter = m.group(1), m.group(2)
+        for name, old_rev, new_rev in drawings:
+            if (old_rev and new_rev and letter.upper() == old_rev.upper()
+                    and _drawing_parts_match(part, name)):
+                changed = True
+                s = m.start(2) - m.start(0)
+                return m.group(0)[:s] + new_rev + m.group(0)[s + 1:]
+        return m.group(0)
+
+    out = _BOM_DRAWING_REF_RE.sub(repl, text)
+    return out if changed else None
+
+
+def batch_drawing_revs(files) -> list:
+    """[(drawing_name, old_rev, new_rev)] for each batch file whose name carries
+    a bumpable revision -- used to follow those bumps into BOM line items."""
+    out = []
+    for f in files or []:
+        _op, old, new, status = revision_output_path(f)
+        if status != "ok" or not (old and new):
+            continue
+        name = _drawing_name_from_filename(f)
+        if name:
+            out.append((name, old, new))
+    return out
+
+
+def build_visio_bom_drawing_rev_edits(path, drawings) -> dict:
+    """Bump cable-drawing REV references found in a .vsdx's parts tables to the
+    batch drawings' next revisions. Returns the {embed: {emf, cells}} shape."""
+    out: dict = {}
+    if not drawings:
+        return out
+    try:
+        zin = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return out
+    with zin:
+        for member in _embedded_bom_members(zin):
+            info = _embedded_bom_info(zin.read(member))
+            if not info:
+                continue
+            rows, col_field, hrow = (info["rows"], info["col_field"],
+                                     info["header_row"])
+            emf = _embedded_emf_member(zin, member)
+            item_col = next((c for c, f in col_field.items() if f == "Item"),
+                            None)
+            pn_col = next((c for c, f in col_field.items()
+                           if f == "Part Number"), None)
+            for rn in sorted(rows):
+                if rn <= hrow:
+                    continue
+                item = (rows[rn].get(item_col) or "").strip() if item_col else ""
+                pnval = (rows[rn].get(pn_col) or "").strip() if pn_col else ""
+                for col, cf in col_field.items():
+                    old = rows[rn].get(col) or ""
+                    new = _bump_drawing_refs_in_text(str(old), drawings)
+                    if new is None or new == old:
+                        continue
+                    entry = out.setdefault(member, {"emf": emf, "cells": []})
+                    entry["cells"].append({
+                        "ref": f"{col}{rn}", "col": col, "row": rn,
+                        "field": cf, "old": old, "new": new, "pn": pnval,
+                        "item": item, "row_index": rn - hrow - 1})
+    return out
+
+
+def build_excel_bom_drawing_rev_edits(path, drawings) -> dict:
+    """Bump cable-drawing REV references in a standalone .xlsx BOM to the batch
+    drawings' next revisions. Returns {worksheet_part: {cell_ref: new_value}}."""
+    out: dict = {}
+    if not drawings:
+        return out
+    try:
+        zin = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return out
+    with zin:
+        shared = _read_shared_strings(zin)
+        protected = _changelog_part(zin)
+        for n in zin.namelist():
+            if not _WORKSHEET_RE.search(n.lower()) or n == protected:
+                continue
+            tbl = _excel_bom_table(zin, n, shared)
+            if not tbl:
+                continue
+            rows, col_field, hrow = tbl
+            for rn, cols in rows.items():
+                if rn <= hrow:
+                    continue
+                for col, val in cols.items():
+                    new = _bump_drawing_refs_in_text(str(val or ""), drawings)
+                    if new is not None and new != (val or ""):
+                        out.setdefault(n, {})[f"{col}{rn}"] = new
+    return out
 
 
 def _emf_bom_header(records):
@@ -5272,7 +5427,11 @@ HELP_SECTIONS = [
         "* **Save copy as next revision (REVx -> next)** — name each copy "
         "as the next letter (REVA -> REVB) and bump the REV box inside the "
         "file. On by default. (Ignored for a file you're approving — those are "
-        "named *_approved_<date> and keep their revision.)",
+        "named *_approved_<date> and keep their revision.) When a BOM/parts "
+        "list names another cable drawing from the same batch as a line item "
+        "(e.g. “CBL00132-01 REVD”) and that drawing is being bumped, "
+        "the line item follows automatically (→ REVE). A file named "
+        "without the ‑NN suffix (CBL00132) still matches CBL00132-01.",
         "* **Generate change summary** — write a before/after review document.",
         "* **Output folder** — click **Choose folder...** to send every "
         "finished file (and the change summary) to one folder; **Use source "
@@ -8506,6 +8665,14 @@ def launch_gui() -> int:
             elif make_pdf and prefer_native_pdf and sys.platform != "win32":
                 self.log("PDF: native Visio/Excel export is Windows-only; "
                          "using LibreOffice.")
+            # When bumping revisions (and not signing off approvals), work out
+            # what each drawing in the batch will become, so BOM line items that
+            # reference those drawings can follow the bump (CBL00132-01 REVD ->
+            # REVE). Skipped during approval, when revisions don't change.
+            batch_drawings = []
+            if bump_rev and not visio_approval and not excel_approval:
+                batch_drawings = batch_drawing_revs(files)
+
             try:
                 for f in files:
                     src = Path(f)
@@ -8520,7 +8687,7 @@ def launch_gui() -> int:
                     excel_approved = False
                     if ((bom_edits or changelog_entry or author_name
                          or excel_approval or remove_parts.get(f)
-                         or add_parts.get(f))
+                         or add_parts.get(f) or batch_drawings)
                             and detect_format(f) == "xlsx"):
                         merged: dict = {}
                         try:
@@ -8552,6 +8719,12 @@ def launch_gui() -> int:
                                     f, remove_parts.get(f, {}),
                                     add_parts.get(f, {}),
                                 ).items():
+                                    merged.setdefault(sheet, {}).update(d)
+                            # Follow batch drawing rev bumps into BOM line items.
+                            if batch_drawings:
+                                for sheet, d in (
+                                    build_excel_bom_drawing_rev_edits(
+                                        f, batch_drawings).items()):
                                     merged.setdefault(sheet, {}).update(d)
                         except Exception:  # noqa: BLE001
                             merged = {}
@@ -8595,8 +8768,17 @@ def launch_gui() -> int:
                                     add_parts.get(f, {}), case_sensitive)
                             except Exception:  # noqa: BLE001
                                 parts_ops = {}
+                        # Follow batch drawing rev bumps into parts-table line
+                        # items that reference those drawings.
+                        dwg_rev = {}
+                        if batch_drawings:
+                            try:
+                                dwg_rev = build_visio_bom_drawing_rev_edits(
+                                    f, batch_drawings)
+                            except Exception:  # noqa: BLE001
+                                dwg_rev = {}
                         merged = _merge_bom_edit_dicts(
-                            staged_vbom, pn_repl, parts_ops)
+                            staged_vbom, pn_repl, parts_ops, dwg_rev)
                         vbom = merged or None
                     has_edits = bool(cell_edits or staged_rev_entry or appr
                                      or vbom)
