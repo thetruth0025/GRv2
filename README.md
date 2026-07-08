@@ -25,14 +25,28 @@ The **Edit** step holds **three tabs that all run together** in a single pass:
 Workflow:
 
 1. **Step 1 — Files:** choose a single file, or switch to **Batch** and add many
-   files (or a whole folder). You can mix `.vsdx` and `.xlsx`; each file's type
-   is **detected automatically**. Click **Next**.
+   files (or a whole folder). **Drag files or a folder straight onto the window**,
+   or browse. Each row shows a **Visio/Excel badge**, and you can **reorder**
+   (↑/↓) or remove files. You can mix `.vsdx` and `.xlsx`; each file's type is
+   **detected automatically**. Click **Next**.
 2. **Step 2 — Edit:** fill in whichever tabs you need — Find → Replace rules,
-   Parts add/remove/edit, and Approve & Revise actions. Anything you stage on any
-   tab is applied in the same run. Click **Next**.
-3. **Step 3 — Review & Run:** check the summary and options, then click **Run**.
+   Parts add/remove/edit, and Approve & Revise actions. The **Add-parts** dialog
+   has a **live preview** that shows exactly where a new part lands and how the
+   list renumbers as you type. Anything you stage on any tab is applied in the
+   same run. Click **Next**.
+3. **Step 3 — Review & Run:** a **per-file preview table** shows what each file
+   becomes (new name, changes, and any files that will be skipped) — nothing is
+   written until you press **Run**. Hover any option's **?** for a one-line
+   reminder, and save your options + rules as a named **preset** for next time.
+   A **progress bar** tracks the batch, and a **results panel** at the end gives
+   per-file outcomes with **Open output folder** / **Open change summary**
+   buttons. Options and the output folder are **remembered** between sessions.
 4. Get a **next-revision copy** of each file next to each original. Your
    originals are never modified.
+
+> **Drag-and-drop** uses the optional `tkinterdnd2` package. It's bundled in the
+> Windows `.exe`; if you run from source, `pip install tkinterdnd2` to enable it
+> (the app still works without it — just use the Add buttons).
 
 ### Revisions
 
