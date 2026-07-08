@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.31.0"
+__version__ = "2.32.0"
 
 import argparse
 import datetime
@@ -6729,6 +6729,10 @@ def launch_gui() -> int:
                 style="Horizontal.TProgressbar"
             )
             self.progress.pack(fill="x", padx=10, pady=(2, 0))
+            self.progress_lbl = ttk.Label(
+                self.step3, text="", foreground=self.palette["muted"],
+                font=("Segoe UI", 9))
+            self.progress_lbl.pack(fill="x", padx=12, pady=(0, 2))
 
             logf = ttk.LabelFrame(self.step3, text="Status")
             logf.pack(fill="both", expand=True, **pad)
@@ -7105,9 +7109,24 @@ def launch_gui() -> int:
         def _set_busy(self, busy: bool):
             self.run_btn.set_enabled(not busy)
             if busy:
-                self.progress.start(12)
+                # Determinate: filled per file as the batch advances.
+                self.progress.stop()
+                self.progress.configure(mode="determinate", value=0)
             else:
                 self.progress.stop()
+                self.progress.configure(value=0)
+                self.progress_lbl.configure(text="")
+
+        def _set_progress(self, i, total, name):
+            """Advance the batch progress bar (worker-thread safe)."""
+            def apply():
+                try:
+                    self.progress.configure(maximum=max(total, 1), value=i)
+                    self.progress_lbl.configure(
+                        text=f"File {i} of {total}:  {name}")
+                except Exception:  # noqa: BLE001
+                    pass
+            self.root.after(0, apply)
 
         def _wheelify(self, win, scrollable):
             """Make the mouse wheel scroll ``scrollable`` (a canvas or text
@@ -8891,6 +8910,7 @@ def launch_gui() -> int:
             errors = 0
             last_output = None
             summary_records = []
+            results = []  # per-file outcome for the post-run summary panel
             native_exporter = None
             if make_pdf and prefer_native_pdf and native_pdf_available():
                 try:
@@ -8913,8 +8933,10 @@ def launch_gui() -> int:
                 batch_drawings = batch_drawing_revs(files)
 
             try:
-                for f in files:
+                total_files = len(files)
+                for _idx, f in enumerate(files, 1):
                     src = Path(f)
+                    self._set_progress(_idx, total_files, src.name)
                     # Key by the original string used to build the dict (path
                     # separators differ between tkinter and Path on Windows).
                     pairs = pairs_by_file.get(f, [])
@@ -9201,20 +9223,30 @@ def launch_gui() -> int:
                                 "changes": diff_files(src, out_vsdx),
                             })
 
+                        pdf_detail = ""
                         if make_pdf:
                             pdf_path, engine, note = export_pdf(
                                 out_vsdx, out_vsdx.parent, native_exporter)
                             if note:
                                 self.log(f"    ({note})")
+                                pdf_detail = f" · PDF via {engine}"
+                            else:
+                                pdf_detail = f" · PDF ✓ ({engine})"
                             self.log(
                                 f"    PDF [{engine}] -> {pdf_path.name}")
                             last_output = pdf_path
                         done += 1
+                        results.append({
+                            "name": src.name, "ok": True,
+                            "detail": f"→ {out_vsdx.name}{pdf_detail}"})
                     except Exception as exc:  # noqa: BLE001
                         errors += 1
                         self.log(f"! {src.name}: ERROR - {exc}")
                         self._set_mascot(
                             "uhoh", f"Uh-oh — I couldn't process {src.name}.")
+                        results.append({
+                            "name": src.name, "ok": False,
+                            "detail": _com_error_text(exc)})
 
                 summary = (
                     f"Done. {done} file(s) processed, "
@@ -9247,13 +9279,15 @@ def launch_gui() -> int:
                     except Exception as exc:  # noqa: BLE001
                         self.log(f"(could not write change summary: {exc})")
 
+                # Where finished files landed (for the "Open folder" button).
+                out_folder = (out_dir if out_dir
+                              else str(Path(str(last_output)).parent)
+                              if last_output else str(Path(files[0]).parent))
+                sp = str(summary_path) if summary_path else None
                 self.root.after(
-                    0, lambda: messagebox.showinfo("Finished", summary)
-                )
-                if summary_path is not None:
-                    self._open_path(str(summary_path))
-                if last_output is not None:
-                    self._reveal(str(last_output))
+                    0, lambda: self._show_summary_panel(
+                        list(results), done, errors, total_repl,
+                        out_folder, sp))
             except Exception as exc:  # noqa: BLE001 - never kill the thread
                 self.log(f"UNEXPECTED ERROR: {exc}")
                 self.root.after(
@@ -9268,6 +9302,69 @@ def launch_gui() -> int:
         def _reveal(self, path: str):
             """Open the folder containing the result, best-effort."""
             self._open_path(str(Path(path).parent))
+
+        def _show_summary_panel(self, results, done, errors, total_repl,
+                                out_folder, summary_path):
+            """Post-run results panel: counts, per-file outcomes, and buttons
+            to open the output folder / change summary."""
+            c = self.palette
+            win = tk.Toplevel(self.root)
+            win.title("Finished")
+            win.configure(bg=c["bg"])
+            win.transient(self.root)
+            win.geometry("660x540")
+            win.grab_set()
+
+            ok = errors == 0
+            head = tk.Frame(win, bg=c["bg"])
+            head.pack(fill="x", padx=20, pady=(18, 4))
+            tk.Label(head, text=("✓  All done!" if ok
+                                 else "⚠  Finished with issues"),
+                     bg=c["bg"], fg=(c["green"] if ok else c["orange"]),
+                     font=("Segoe UI", 17, "bold")).pack(anchor="w")
+            n = len(results)
+            line = f"{done} of {n} file(s) succeeded"
+            if errors:
+                line += f"  ·  {errors} failed"
+            line += f"  ·  {total_repl} replacement(s)"
+            tk.Label(head, text=line, bg=c["bg"], fg=c["muted"],
+                     font=("Segoe UI", 10)).pack(anchor="w", pady=(2, 0))
+
+            br = ttk.Frame(win)
+            br.pack(fill="x", padx=20, pady=(8, 6))
+            self._rbtn(br, "📂  Open output folder",
+                       lambda: self._open_path(out_folder),
+                       kind="green").pack(side="left")
+            if summary_path:
+                self._rbtn(br, "📄  Open change summary",
+                           lambda: self._open_path(summary_path)).pack(
+                    side="left", padx=8)
+
+            lf = ttk.Frame(win)
+            lf.pack(fill="both", expand=True, padx=16, pady=6)
+            tree = ttk.Treeview(lf, columns=("detail",),
+                                show="tree headings", height=11)
+            tree.heading("#0", text="File")
+            tree.heading("detail", text="Result")
+            tree.column("#0", width=250, anchor="w")
+            tree.column("detail", width=360, anchor="w")
+            sb = ttk.Scrollbar(lf, orient="vertical", command=tree.yview)
+            tree.configure(yscrollcommand=sb.set)
+            tree.tag_configure("ok", foreground=c["text"])
+            tree.tag_configure("fail", foreground=c["orange"])
+            tree.pack(side="left", fill="both", expand=True)
+            sb.pack(side="right", fill="y")
+            for r in results:
+                mark = "✓" if r.get("ok") else "▲"
+                tree.insert("", "end", text=f" {mark}  {r['name']}",
+                            values=(r.get("detail", ""),),
+                            tags=("ok" if r.get("ok") else "fail",))
+            self._wheelify(win, tree)
+
+            fr = ttk.Frame(win)
+            fr.pack(fill="x", padx=20, pady=(4, 16))
+            self._rbtn(fr, "Done", win.destroy, kind="accent").pack(
+                side="right")
 
         def show_help(self):
             """Open the in-app job aid: a scrollable How-to window."""
