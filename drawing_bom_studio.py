@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.34.0"
+__version__ = "2.35.0"
 
 import argparse
 import datetime
@@ -8406,9 +8406,32 @@ def launch_gui() -> int:
 
             body = ttk.Frame(win)
             body.pack(fill="both", expand=True, padx=10, pady=6)
-            canvas = tk.Canvas(body, highlightthickness=0, bg=pal["bg"])
-            vsb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
-            hsb = ttk.Scrollbar(body, orient="horizontal",
+
+            # Right: a live preview of the resulting item order as you type.
+            prev_wrap = ttk.LabelFrame(
+                body, text="Live preview — resulting item order")
+            prev_wrap.pack(side="right", fill="both", expand=True,
+                           padx=(10, 0))
+            prev_tree = ttk.Treeview(prev_wrap, columns=("num",),
+                                     show="headings", height=18)
+            prev_tree.heading("num", text="#")
+            prev_tree.column("num", width=44, anchor="center")
+            pvsb = ttk.Scrollbar(prev_wrap, orient="vertical",
+                                 command=prev_tree.yview)
+            prev_tree.configure(yscrollcommand=pvsb.set)
+            prev_tree.pack(side="left", fill="both", expand=True, padx=(4, 0),
+                           pady=4)
+            pvsb.pack(side="right", fill="y", pady=4)
+            prev_tree.tag_configure(
+                "new", background=("#14331f" if self.dark else "#eafaf0"),
+                foreground=pal["green"])
+
+            # Left: the editable grid (existing rows + new-row entries).
+            left = ttk.Frame(body)
+            left.pack(side="left", fill="both", expand=True)
+            canvas = tk.Canvas(left, highlightthickness=0, bg=pal["bg"])
+            vsb = ttk.Scrollbar(left, orient="vertical", command=canvas.yview)
+            hsb = ttk.Scrollbar(left, orient="horizontal",
                                 command=canvas.xview)
             grid = ttk.Frame(canvas)
             grid.bind("<Configure>", lambda e: canvas.configure(
@@ -8422,7 +8445,53 @@ def launch_gui() -> int:
 
             # mutable view state
             st = {"file": None, "fmt": None, "sheet": None, "cols": [],
-                  "headers": {}, "new_entries": [], "existing_rows": []}
+                  "headers": {}, "new_entries": [], "existing_rows": [],
+                  "disp_cols": []}
+
+            def _pick_disp(cols, headers, seq_col):
+                """Up to two informative columns to show in the preview."""
+                picks = []
+                for kw in ("desc", "part", "name", "ref"):
+                    for c in cols:
+                        if (c != seq_col and c not in picks
+                                and kw in (headers.get(c, "") or "").lower()):
+                            picks.append(c)
+                            break
+                for c in cols:
+                    if len(picks) >= 2:
+                        break
+                    if c != seq_col and c not in picks:
+                        picks.append(c)
+                return picks[:2]
+
+            def update_preview():
+                """Recompute the merged, renumbered item order and show it."""
+                seq_col = st.get("seq_col")
+                disp = st.get("disp_cols") or []
+                existing = st.get("existing_rows") or []
+                news = []
+                for ents in st["new_entries"]:
+                    vals = {c: e.get().strip() for c, e in ents.items()}
+                    if any(c != ADD_POSITION_KEY and vals.get(c)
+                           for c in vals):
+                        news.append(vals)
+
+                def keyf(v):
+                    p = (v.get(ADD_POSITION_KEY) or "").strip()
+                    return (0, int(p)) if p.isdigit() else (1, 0)
+
+                ordered = [(False, r) for r in existing]
+                for vals in sorted(news, key=keyf):
+                    p = (vals.get(ADD_POSITION_KEY) or "").strip()
+                    idx = (max(0, min(len(ordered), int(p) - 1))
+                           if p.isdigit() else len(ordered))
+                    ordered.insert(idx, (True, vals))
+                prev_tree.delete(*prev_tree.get_children())
+                for i, (is_new, row) in enumerate(ordered, 1):
+                    cells = [str(row.get(c, "") or "")[:26] for c in disp]
+                    prev_tree.insert(
+                        "", "end", values=[i] + cells,
+                        tags=("new",) if is_new else ())
 
             def file_map():
                 return {Path(f).name: f for f in self.files}
@@ -8445,6 +8514,7 @@ def launch_gui() -> int:
                     if values and col in values:
                         e.insert(0, values[col])
                     e.grid(row=r, column=ci, sticky="we", padx=1, pady=1)
+                    e.bind("<KeyRelease>", lambda _e: update_preview())
                     ents[col] = e
                 # Trailing "Insert as item #" box: where the new part lands in
                 # the table (blank = at the end, after the last part).
@@ -8453,10 +8523,12 @@ def launch_gui() -> int:
                     pos.insert(0, values[ADD_POSITION_KEY])
                 pos.grid(row=r, column=len(st["cols"]), sticky="we",
                          padx=(10, 1), pady=1)
+                pos.bind("<KeyRelease>", lambda _e: update_preview())
                 ents[ADD_POSITION_KEY] = pos
                 st["new_entries"].append(ents)
                 canvas.update_idletasks()
                 canvas.configure(scrollregion=canvas.bbox("all"))
+                update_preview()
 
             def commit_current():
                 """Capture the current sheet's filled new rows into add_parts."""
@@ -8486,6 +8558,7 @@ def launch_gui() -> int:
                 st["existing_rows"] = []
                 st["file"] = None
                 st["sheet"] = None
+                prev_tree.delete(*prev_tree.get_children())
                 f = file_map().get(file_var.get())
                 smap = {nm: sid for sid, nm in sheets_for(f)} if f else {}
                 sid = smap.get(sheet_var.get())
@@ -8497,9 +8570,19 @@ def launch_gui() -> int:
                         row=0, column=0, padx=6, pady=6)
                     return
                 cols, headers, rows, seq_col = view
+                disp = _pick_disp(cols, headers, seq_col)
                 st.update({"file": f, "fmt": detect_format(f), "sheet": sid,
                            "cols": cols, "headers": headers,
-                           "existing_rows": rows, "seq_col": seq_col})
+                           "existing_rows": rows, "seq_col": seq_col,
+                           "disp_cols": disp})
+                # Re-shape the live-preview columns for this sheet.
+                pcols = ["num"] + [f"c{i}" for i in range(len(disp))]
+                prev_tree.configure(columns=pcols)
+                prev_tree.heading("num", text="#")
+                prev_tree.column("num", width=44, anchor="center", stretch=False)
+                for i, dc in enumerate(disp):
+                    prev_tree.heading(f"c{i}", text=headers.get(dc, dc))
+                    prev_tree.column(f"c{i}", width=180, anchor="w")
                 # Gather the existing item numbers from the sequence column so
                 # the user can see what numbers are already taken.
                 seq_vals = []
