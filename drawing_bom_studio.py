@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.32.0"
+__version__ = "2.33.0"
 
 import argparse
 import datetime
@@ -6501,16 +6501,47 @@ def launch_gui() -> int:
                 variable=self.mode_var, command=self.on_mode_change,
             ).pack(side="left")
 
+            # Drop zone: a real OS drag-drop target when tkinterdnd2 is
+            # available, and always a clear "drop or browse" prompt.
+            self._dnd_ok = hasattr(self.root, "drop_target_register")
+            drop = tk.Frame(top, bg=self.palette["field"],
+                            highlightbackground=self.palette["accent"],
+                            highlightthickness=2, bd=0)
+            drop.pack(fill="x", padx=8, pady=(6, 2))
+            dz_text = ("⬇   Drag Visio / Excel files or a folder here"
+                       if self._dnd_ok
+                       else "⬇   Add Visio / Excel files below")
+            tk.Label(drop, text=dz_text, bg=self.palette["field"],
+                     fg=self.palette["accent"],
+                     font=("Segoe UI", 11, "bold")).pack(pady=(10, 2))
+            tk.Label(drop, text="(.vsdx and .xlsx — a whole folder works too)",
+                     bg=self.palette["field"], fg=self.palette["muted"],
+                     font=("Segoe UI", 9)).pack(pady=(0, 10))
+            self._drop_zone = drop
+            if self._dnd_ok:
+                try:
+                    from tkinterdnd2 import DND_FILES
+                    for w in (drop, ):
+                        w.drop_target_register(DND_FILES)
+                        w.dnd_bind("<<Drop>>", self._on_drop)
+                except Exception:  # noqa: BLE001
+                    self._dnd_ok = False
+
             btn_row = ttk.Frame(top)
             btn_row.pack(fill="x", padx=8, pady=2)
             self.add_btn = self._rbtn(btn_row, "Add file...", self.add_files)
             self.folder_btn = self._rbtn(
                 btn_row, "Add folder...", self.add_folder)
+            _up_btn = self._rbtn(btn_row, "↑ Up",
+                                 lambda: self._move_selected(-1), radius=10)
+            _dn_btn = self._rbtn(btn_row, "↓ Down",
+                                 lambda: self._move_selected(1), radius=10)
             _rm_btn = self._rbtn(
                 btn_row, "Remove selected", self.remove_selected_files)
             _clr_btn = self._rbtn(btn_row, "Clear", self.clear_files)
             self._make_flow(
-                btn_row, [self.add_btn, self.folder_btn, _rm_btn, _clr_btn])
+                btn_row, [self.add_btn, self.folder_btn, _up_btn, _dn_btn,
+                          _rm_btn, _clr_btn])
 
             list_row = ttk.Frame(top)
             list_row.pack(fill="both", expand=True, padx=8, pady=(2, 8))
@@ -6528,6 +6559,13 @@ def launch_gui() -> int:
             )
             sb.pack(side="left", fill="y")
             self.files_box.configure(yscrollcommand=sb.set)
+            if self._dnd_ok:
+                try:
+                    from tkinterdnd2 import DND_FILES
+                    self.files_box.drop_target_register(DND_FILES)
+                    self.files_box.dnd_bind("<<Drop>>", self._on_drop)
+                except Exception:  # noqa: BLE001
+                    pass
 
             # --- Step 2: Edit (the feature tabs) ---------------------------
             self.nb = ttk.Notebook(self.step2)
@@ -6990,10 +7028,72 @@ def launch_gui() -> int:
             self.files = []
             self.refresh_files_box()
 
+        def _move_selected(self, delta):
+            """Move the selected file(s) up (-1) or down (+1) in the batch."""
+            sel = list(self.files_box.curselection())
+            if not sel:
+                return
+            if delta < 0:
+                if sel[0] == 0:
+                    return
+                for i in sel:
+                    self.files[i - 1], self.files[i] = \
+                        self.files[i], self.files[i - 1]
+                newsel = [i - 1 for i in sel]
+            else:
+                if sel[-1] >= len(self.files) - 1:
+                    return
+                for i in reversed(sel):
+                    self.files[i + 1], self.files[i] = \
+                        self.files[i], self.files[i + 1]
+                newsel = [i + 1 for i in sel]
+            self.refresh_files_box()
+            for i in newsel:
+                self.files_box.selection_set(i)
+
+        @staticmethod
+        def _parse_dnd(data):
+            """Split a tkdnd path list, honouring {..}-wrapped paths (spaces)."""
+            out = []
+            for m in re.finditer(r"\{([^}]*)\}|(\S+)", data or ""):
+                out.append(m.group(1) if m.group(1) is not None
+                           else m.group(2))
+            return out
+
+        def _on_drop(self, event):
+            """Handle files/folders dropped onto the window (tkinterdnd2)."""
+            added = 0
+            for p in self._parse_dnd(getattr(event, "data", "")):
+                pp = Path(p)
+                try:
+                    is_dir = pp.is_dir()
+                except OSError:
+                    is_dir = False
+                if is_dir:
+                    for c in sorted(pp.iterdir()):
+                        if (c.suffix.lower() in (".vsdx", ".xlsx")
+                                and str(c) not in self.files):
+                            self.files.append(str(c))
+                            added += 1
+                elif (pp.suffix.lower() in (".vsdx", ".xlsx")
+                      and str(pp) not in self.files):
+                    self.files.append(str(pp))
+                    added += 1
+            if self.mode_var.get() == "single" and len(self.files) > 1:
+                self.files = self.files[-1:]
+            self.refresh_files_box()
+            if added:
+                self.log(f"Added {added} file(s) via drag-and-drop.")
+            else:
+                self.log("Dropped items had no .vsdx / .xlsx files.")
+
         def refresh_files_box(self):
             self.files_box.delete(0, "end")
             for f in self.files:
-                self.files_box.insert("end", Path(f).name)
+                fmt = detect_format(f)
+                badge = ("▣ Visio " if fmt == "vsdx"
+                         else "▦ Excel " if fmt == "xlsx" else "•  ")
+                self.files_box.insert("end", f"{badge}   {Path(f).name}")
             self._refresh_rule_menus()
 
         def _present_categories(self) -> List[str]:
@@ -9456,7 +9556,13 @@ def launch_gui() -> int:
             except Exception:
                 pass
 
-    root = tk.Tk()
+    # Prefer a drag-and-drop-capable root (optional tkinterdnd2); fall back to
+    # a plain Tk if it isn't installed, so the app always launches.
+    try:
+        from tkinterdnd2 import TkinterDnD
+        root = TkinterDnD.Tk()
+    except Exception:  # noqa: BLE001
+        root = tk.Tk()
     root._app_ref = App(root)  # keep a reference (also handy for testing)
     root.mainloop()
     return 0

@@ -21,7 +21,7 @@ where %PY% >nul 2>nul || (
 )
 
 echo Installing PyInstaller (if not already present)...
-%PY% -m pip install --upgrade pyinstaller || (
+%PY% -m pip install --upgrade pyinstaller pillow tkinterdnd2 || (
     echo Failed to install PyInstaller. Check your internet connection.
     pause
     exit /b 1
@@ -29,7 +29,7 @@ echo Installing PyInstaller (if not already present)...
 
 echo.
 echo Building the EXE...
-%PY% -m PyInstaller --onefile --windowed --name DrawingBOMStudio --icon robot_icon.ico drawing_bom_studio.py || (
+%PY% -m PyInstaller --onefile --windowed --name DrawingBOMStudio --icon robot_icon.ico --collect-all tkinterdnd2 drawing_bom_studio.py || (
     echo Build failed.
     pause
     exit /b 1

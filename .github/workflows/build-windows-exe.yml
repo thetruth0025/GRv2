@@ -28,10 +28,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install PyInstaller
-        run: pip install pyinstaller pillow
+        run: pip install pyinstaller pillow tkinterdnd2
 
       - name: Build the EXE
-        run: pyinstaller --onefile --windowed --name DrawingBOMStudio --icon robot_icon.ico drawing_bom_studio.py
+        run: pyinstaller --onefile --windowed --name DrawingBOMStudio --icon robot_icon.ico --collect-all tkinterdnd2 drawing_bom_studio.py
 
       - name: Upload the EXE artifact
         uses: actions/upload-artifact@v4
