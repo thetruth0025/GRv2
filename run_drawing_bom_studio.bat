@@ -9,12 +9,15 @@ cd /d "%~dp0"
 REM Prefer the Windows "py" launcher, then fall back to "python".
 where py >nul 2>nul
 if %errorlevel%==0 (
+    REM Optional extras: Pillow (mascot) + tkinterdnd2 (drag-and-drop).
+    py -m pip install --quiet --disable-pip-version-check pillow tkinterdnd2 >nul 2>nul
     py "%~dp0drawing_bom_studio.py"
     goto :end
 )
 
 where python >nul 2>nul
 if %errorlevel%==0 (
+    python -m pip install --quiet --disable-pip-version-check pillow tkinterdnd2 >nul 2>nul
     python "%~dp0drawing_bom_studio.py"
     goto :end
 )

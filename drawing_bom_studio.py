@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.35.0"
+__version__ = "2.35.1"
 
 import argparse
 import datetime
@@ -6503,7 +6503,15 @@ def launch_gui() -> int:
 
             # Drop zone: a real OS drag-drop target when tkinterdnd2 is
             # available, and always a clear "drop or browse" prompt.
-            self._dnd_ok = hasattr(self.root, "drop_target_register")
+            self._dnd_files = None
+            self._dnd_ok = False
+            if hasattr(self.root, "drop_target_register"):
+                try:
+                    from tkinterdnd2 import DND_FILES
+                    self._dnd_files = DND_FILES
+                    self._dnd_ok = True
+                except Exception as exc:  # noqa: BLE001
+                    self.root._dnd_error = f"{type(exc).__name__}: {exc}"
             drop = tk.Frame(top, bg=self.palette["field"],
                             highlightbackground=self.palette["accent"],
                             highlightthickness=2, bd=0)
@@ -6511,21 +6519,19 @@ def launch_gui() -> int:
             dz_text = ("⬇   Drag Visio / Excel files or a folder here"
                        if self._dnd_ok
                        else "⬇   Add Visio / Excel files below")
-            tk.Label(drop, text=dz_text, bg=self.palette["field"],
-                     fg=self.palette["accent"],
-                     font=("Segoe UI", 11, "bold")).pack(pady=(10, 2))
-            tk.Label(drop, text="(.vsdx and .xlsx — a whole folder works too)",
-                     bg=self.palette["field"], fg=self.palette["muted"],
-                     font=("Segoe UI", 9)).pack(pady=(0, 10))
+            dz_lbl1 = tk.Label(drop, text=dz_text, bg=self.palette["field"],
+                               fg=self.palette["accent"],
+                               font=("Segoe UI", 11, "bold"))
+            dz_lbl1.pack(pady=(10, 2))
+            dz_lbl2 = tk.Label(
+                drop, text="(.vsdx and .xlsx — a whole folder works too)",
+                bg=self.palette["field"], fg=self.palette["muted"],
+                font=("Segoe UI", 9))
+            dz_lbl2.pack(pady=(0, 10))
             self._drop_zone = drop
-            if self._dnd_ok:
-                try:
-                    from tkinterdnd2 import DND_FILES
-                    for w in (drop, ):
-                        w.drop_target_register(DND_FILES)
-                        w.dnd_bind("<<Drop>>", self._on_drop)
-                except Exception:  # noqa: BLE001
-                    self._dnd_ok = False
+            # Register the whole window plus the zone and its labels, so a drop
+            # anywhere — including on the prompt text — is accepted.
+            self._register_dnd(self.root, drop, dz_lbl1, dz_lbl2, top)
 
             btn_row = ttk.Frame(top)
             btn_row.pack(fill="x", padx=8, pady=2)
@@ -6559,13 +6565,7 @@ def launch_gui() -> int:
             )
             sb.pack(side="left", fill="y")
             self.files_box.configure(yscrollcommand=sb.set)
-            if self._dnd_ok:
-                try:
-                    from tkinterdnd2 import DND_FILES
-                    self.files_box.drop_target_register(DND_FILES)
-                    self.files_box.dnd_bind("<<Drop>>", self._on_drop)
-                except Exception:  # noqa: BLE001
-                    pass
+            self._register_dnd(self.files_box, list_row)
 
             # --- Step 2: Edit (the feature tabs) ---------------------------
             self.nb = ttk.Notebook(self.step2)
@@ -6839,6 +6839,15 @@ def launch_gui() -> int:
             self._sync_rev_options()
             self._sync_pdf_options()
             self._log(f"Drawing & BOM Studio  v{__version__}")
+            if self._dnd_ok:
+                self._log("Drag-and-drop: ON — drop files or a folder onto "
+                          "the window.")
+            else:
+                err = getattr(self.root, "_dnd_error", None)
+                self._log(
+                    "Drag-and-drop: OFF (optional 'tkinterdnd2' not active"
+                    + (f" — {err}" if err else "")
+                    + "). Use the Add buttons, or run: pip install tkinterdnd2")
             if native_pdf_available():
                 self._log(
                     "PDF: will use installed Visio/Excel for best quality "
@@ -7078,6 +7087,17 @@ def launch_gui() -> int:
             self.refresh_files_box()
             for i in newsel:
                 self.files_box.selection_set(i)
+
+        def _register_dnd(self, *widgets):
+            """Make each widget an OS file drop target (no-op without dnd)."""
+            if not self._dnd_ok or self._dnd_files is None:
+                return
+            for w in widgets:
+                try:
+                    w.drop_target_register(self._dnd_files)
+                    w.dnd_bind("<<Drop>>", self._on_drop)
+                except Exception:  # noqa: BLE001
+                    pass
 
         @staticmethod
         def _parse_dnd(data):
@@ -9797,11 +9817,14 @@ def launch_gui() -> int:
 
     # Prefer a drag-and-drop-capable root (optional tkinterdnd2); fall back to
     # a plain Tk if it isn't installed, so the app always launches.
+    dnd_error = None
     try:
         from tkinterdnd2 import TkinterDnD
         root = TkinterDnD.Tk()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        dnd_error = f"{type(exc).__name__}: {exc}"
         root = tk.Tk()
+    root._dnd_error = dnd_error
     root._app_ref = App(root)  # keep a reference (also handy for testing)
     root.mainloop()
     return 0
