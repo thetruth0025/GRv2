@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.30.0"
+__version__ = "2.31.0"
 
 import argparse
 import datetime
@@ -6116,6 +6116,62 @@ def launch_gui() -> int:
             self.create_text(self.TW + self.GAP, cy, anchor="w",
                              text=self._text, fill=txt, font=self.font)
 
+    class Tooltip:
+        """A hover tooltip: a small dark popup that appears after a short delay
+        when the pointer rests on ``widget``. ``palette`` styles it; the text
+        can be updated later via ``set_text``."""
+
+        def __init__(self, widget, text, palette):
+            self.widget = widget
+            self.text = text
+            self.pal = palette
+            self.tip = None
+            self._after = None
+            widget.bind("<Enter>", self._schedule, add="+")
+            widget.bind("<Leave>", self._hide, add="+")
+            widget.bind("<ButtonPress>", self._hide, add="+")
+
+        def set_text(self, text):
+            self.text = text
+
+        def _schedule(self, _e=None):
+            self._cancel()
+            self._after = self.widget.after(450, self._show)
+
+        def _cancel(self):
+            if self._after is not None:
+                try:
+                    self.widget.after_cancel(self._after)
+                except Exception:  # noqa: BLE001
+                    pass
+                self._after = None
+
+        def _show(self):
+            if self.tip is not None or not self.text:
+                return
+            try:
+                x = self.widget.winfo_rootx() + 24
+                y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+            except Exception:  # noqa: BLE001
+                return
+            self.tip = tk.Toplevel(self.widget)
+            self.tip.wm_overrideredirect(True)
+            self.tip.wm_geometry(f"+{x}+{y}")
+            frame = tk.Frame(self.tip, bg="#0f1522", bd=0)
+            frame.pack()
+            tk.Label(frame, text=self.text, bg="#0f1522", fg="#eef4ff",
+                     font=("Segoe UI", 9), justify="left", wraplength=320,
+                     padx=11, pady=8).pack()
+
+        def _hide(self, _e=None):
+            self._cancel()
+            if self.tip is not None:
+                try:
+                    self.tip.destroy()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.tip = None
+
     class RobotMascot(tk.Canvas):
         """A small animated robot mascot with a speech bubble. ``set_state``
         switches its pose + line; it animates itself on a timer. Needs Pillow;
@@ -6562,6 +6618,34 @@ def launch_gui() -> int:
                 font=("Segoe UI", 10, "bold"))
             self.review_lbl.pack(fill="x", padx=14, pady=(10, 2))
 
+            # Per-file preview of exactly what each file becomes (nothing is
+            # written until Run). Populated by _update_review via plan_batch().
+            prev = ttk.LabelFrame(
+                self.step3,
+                text="Preview — what will happen (nothing is written yet)")
+            prev.pack(fill="x", **pad)
+            pcols = ("becomes", "changes", "status")
+            self.preview_tree = ttk.Treeview(
+                prev, columns=pcols, show="tree headings", height=6)
+            self.preview_tree.heading("#0", text="File")
+            self.preview_tree.heading("becomes", text="Becomes")
+            self.preview_tree.heading("changes", text="Changes")
+            self.preview_tree.heading("status", text="Status")
+            self.preview_tree.column("#0", width=300, anchor="w")
+            self.preview_tree.column("becomes", width=250, anchor="w")
+            self.preview_tree.column("changes", width=250, anchor="w")
+            self.preview_tree.column("status", width=110, anchor="center")
+            psb = ttk.Scrollbar(prev, orient="vertical",
+                                command=self.preview_tree.yview)
+            self.preview_tree.configure(yscrollcommand=psb.set)
+            self.preview_tree.pack(side="left", fill="both", expand=True,
+                                   padx=(6, 0), pady=6)
+            psb.pack(side="right", fill="y", pady=6)
+            self.preview_tree.tag_configure(
+                "skip", foreground=self.palette["orange"])
+            self.preview_tree.tag_configure(
+                "ready", foreground=self.palette["text"])
+
             opts = ttk.LabelFrame(self.step3, text="Options")
             opts.pack(fill="x", **pad)
             self.case_var = tk.BooleanVar(value=False)
@@ -6585,23 +6669,38 @@ def launch_gui() -> int:
             self.native_pdf_toggle = None
             toggle_specs = [
                 (self.rev_var, "Save copy as next revision (REVx → next)",
-                 self._sync_rev_options),
+                 self._sync_rev_options,
+                 "Names each copy as the next letter (REVA → REVB) and bumps "
+                 "the REV box inside the file. A REV- file becomes REVA. "
+                 "BOM line items that reference batch drawings follow too."),
                 (self.revtext_var, "…and update the REV box in the drawing",
-                 None),
-                (self.pdf_var, "Also export PDF", self._sync_pdf_options),
+                 None,
+                 "Also bumps the REVx letter box in the drawing's title block "
+                 "to match the new file name."),
+                (self.pdf_var, "Also export PDF", self._sync_pdf_options,
+                 "Writes a PDF of each finished file next to it (or in the "
+                 "output folder). Off by default."),
                 (self.native_pdf_var,
-                 "Use installed Visio/Excel for PDF (best quality)", None),
+                 "Use installed Visio/Excel for PDF (best quality)", None,
+                 "Exports through installed Visio/Excel for best fidelity and "
+                 "correct “Sheet X of Y”. Visio needs a normal default printer "
+                 "(not “Print to PDF”); otherwise falls back to LibreOffice."),
                 (self.summary_var, "Generate change summary (before / after)",
-                 None),
-                (self.case_var, "Case sensitive", None),
-                (self.word_var, "Whole word only", None),
+                 None,
+                 "Writes an HTML before/after report of every change, grouped "
+                 "by sheet name."),
+                (self.case_var, "Case sensitive", None,
+                 "Find/Replace matches only when the letter case matches."),
+                (self.word_var, "Whole word only", None,
+                 "Find/Replace matches only whole words, not substrings."),
             ]
-            for i, (var, label, cmd) in enumerate(toggle_specs):
+            for i, (var, label, cmd, tip) in enumerate(toggle_specs):
                 t = ToggleSwitch(opt_grid, label, var, self.palette,
                                  command=cmd)
                 t.grid(row=i // 2, column=i % 2, sticky="w",
                        padx=(2, 18), pady=7)
                 self._toggles.append(t)
+                Tooltip(t, tip, self.palette)
                 if var is self.revtext_var:
                     self.revtext_toggle = t
                 if var is self.native_pdf_var:
@@ -7100,14 +7199,14 @@ def launch_gui() -> int:
                 self.run_btn.pack(side="left", padx=4)
                 self._update_review()
             if not self._running:
-                msg = {
-                    1: ("hello", self._greeting()),
-                    2: ("think",
-                        "Alright! Now tell me what you need me to do!"),
-                    3: ("thumbs",
-                        "Ok! If everything looks good, hit “Run” and "
-                        "I'll get to work!"),
-                }[self.step]
+                if self.step == 3:
+                    msg = self._review_tips()
+                else:
+                    msg = {
+                        1: ("hello", self._greeting()),
+                        2: ("think",
+                            "Alright! Now tell me what you need me to do!"),
+                    }[self.step]
                 self._set_mascot(*msg)
             try:
                 self._scroll_canvas.yview_moveto(0)
@@ -7123,6 +7222,97 @@ def launch_gui() -> int:
 
         def _wizard_back(self):
             self.show_step(self.step - 1)
+
+        def plan_batch(self):
+            """Compute, WITHOUT writing anything, what each file will become.
+            Returns a list of dicts: {name, fmt, becomes, chips [(text,kind)],
+            status ('ready'|'skip'), note}."""
+            bump = self.rev_var.get()
+            approving_batch = bool(self.visio_approval or self.excel_approval)
+            drawings = []
+            if bump and not approving_batch:
+                try:
+                    drawings = batch_drawing_revs(self.files)
+                except Exception:  # noqa: BLE001
+                    drawings = []
+            plans = []
+            stamp = datetime.date.today().strftime("%Y-%m-%d")
+            for f in self.files:
+                fmt = detect_format(f)
+                is_vsdx = fmt == "vsdx"
+                name = Path(f).name
+                chips, status, note = [], "ready", ""
+                # Approval keeps the revision and names *_approved_<date>.
+                appr_rev = None
+                if (self.visio_approval and is_vsdx
+                        and self.visio_approval.get("name")):
+                    appr_rev = (self.visio_approval.get("rev") or "").strip() \
+                        or (vsdx_latest_revision_letter(f) or "")
+                is_approving = bool(appr_rev) or bool(
+                    self.excel_approval and fmt == "xlsx")
+                if is_approving:
+                    becomes = f"{Path(f).stem}_approved_{stamp}{Path(f).suffix}"
+                    rv = appr_rev or (self.excel_approval or {}).get("rev", "")
+                    chips.append((f"approve REV {rv}".strip(), "green"))
+                elif bump:
+                    _op, old, new, st = revision_output_path(f)
+                    if st == "at_z":
+                        becomes = "—"
+                        status, note = "skip", "already REVZ"
+                    elif st == "no_rev":
+                        becomes = f"{Path(f).stem}_edited{Path(f).suffix}"
+                        note = "no REV in name"
+                    else:
+                        becomes = Path(_op).name
+                        disp = "−" if old == "-" else old
+                        chips.append((f"REV {disp}→{new}", "green"))
+                else:
+                    becomes = f"{Path(f).stem}_edited{Path(f).suffix}"
+                # Staged edits -> chips.
+                try:
+                    if self.pairs_for_file(f):
+                        chips.append(("find/replace", "blue"))
+                except Exception:  # noqa: BLE001
+                    pass
+                rc = self.remove_parts.get(f)
+                if rc:
+                    try:
+                        n = sum(len(rs) for d in rc.values()
+                                for rs in d.values())
+                    except Exception:  # noqa: BLE001
+                        n = len(rc)
+                    chips.append((f"−{n} part(s)", "orange"))
+                ac = self.add_parts.get(f)
+                if ac:
+                    n = sum(len(v) for v in ac.values())
+                    chips.append((f"+{n} part(s)", "blue"))
+                if is_vsdx and self.visio_bom_edits.get(f):
+                    chips.append(("row edits", "blue"))
+                if fmt == "xlsx" and self.bom_edits.get(f):
+                    chips.append(("row edits", "blue"))
+                if is_vsdx and self.visio_rev_entry:
+                    chips.append(("+ rev row", "blue"))
+                if fmt == "xlsx" and self.changelog_entry:
+                    chips.append(("change log", "blue"))
+                if fmt == "xlsx" and self.author_name:
+                    chips.append(("author", "blue"))
+                # BOM line items that reference batch drawings.
+                if drawings and not is_approving:
+                    try:
+                        if is_vsdx:
+                            e = build_visio_bom_drawing_rev_edits(f, drawings)
+                            nref = sum(len(v.get("cells", []))
+                                       for v in e.values())
+                        else:
+                            e = build_excel_bom_drawing_rev_edits(f, drawings)
+                            nref = sum(len(v) for v in e.values())
+                        if nref:
+                            chips.append((f"{nref} BOM ref(s)", "green"))
+                    except Exception:  # noqa: BLE001
+                        pass
+                plans.append({"name": name, "fmt": fmt, "becomes": becomes,
+                              "chips": chips, "status": status, "note": note})
+            return plans
 
         def _update_review(self):
             parts = [f"{len(self.files)} file(s)"]
@@ -7147,6 +7337,55 @@ def launch_gui() -> int:
                 parts.append("revision bump")
             self.review_lbl.configure(
                 text="Ready to run:   " + "   ·   ".join(parts) + ".")
+            self._populate_preview()
+
+        def _populate_preview(self):
+            """Fill the Review preview table from a fresh plan_batch()."""
+            tree = getattr(self, "preview_tree", None)
+            if tree is None:
+                return
+            tree.delete(*tree.get_children())
+            try:
+                plans = self.plan_batch()
+            except Exception:  # noqa: BLE001
+                plans = []
+            self._last_plans = plans
+            for p in plans:
+                mark = "▣" if p["fmt"] == "vsdx" else "▦"
+                changes = "  ·  ".join(t for t, _k in p["chips"]) or "—"
+                if p["status"] == "skip":
+                    status = f"⚠ skip — {p['note']}" if p["note"] else "⚠ skip"
+                else:
+                    status = "✓ ready"
+                tag = "skip" if p["status"] == "skip" else "ready"
+                becomes = p["becomes"]
+                if p["note"] and p["status"] != "skip":
+                    becomes += f"  ({p['note']})"
+                tree.insert("", "end", text=f" {mark}  {p['name']}",
+                            values=(becomes, changes, status), tags=(tag,))
+
+        def _review_tips(self):
+            """A short, data-driven Docket line for the Review step, or the
+            default encouragement if nothing notable stands out."""
+            plans = getattr(self, "_last_plans", None) or []
+            tips = []
+            dash = sum(1 for p in plans
+                       for t, _k in p["chips"] if t.startswith("REV −"))
+            if dash:
+                tips.append(f"{dash} REV− file(s) → REVA")
+            refs = sum(1 for p in plans
+                       for t, _k in p["chips"] if "BOM ref" in t)
+            if refs:
+                tips.append(f"{refs} BOM ref(s) will follow the bump")
+            skips = sum(1 for p in plans if p["status"] == "skip")
+            if skips:
+                tips.append(f"{skips} file(s) skipped (already REVZ)")
+            who = f", {self.user_name}" if self.user_name else ""
+            if tips:
+                return ("think", "Heads up" + who + ": " + "; ".join(tips)
+                        + ". Hit Run when it looks right!")
+            return ("thumbs", "Ok! If everything looks good, hit “Run” and "
+                    "I'll get to work!")
 
         def _set_mascot(self, pose, text=None):
             if self.mascot is None:
