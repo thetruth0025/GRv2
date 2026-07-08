@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.33.0"
+__version__ = "2.34.0"
 
 import argparse
 import datetime
@@ -6686,6 +6686,23 @@ def launch_gui() -> int:
 
             opts = ttk.LabelFrame(self.step3, text="Options")
             opts.pack(fill="x", **pad)
+
+            # Presets: save/apply a named set of options + find/replace rules.
+            preset_row = ttk.Frame(opts)
+            preset_row.pack(fill="x", padx=10, pady=(8, 2))
+            ttk.Label(preset_row, text="Preset:").pack(side="left")
+            self.preset_var = tk.StringVar()
+            self.preset_cb = ttk.Combobox(
+                preset_row, textvariable=self.preset_var, width=26,
+                state="readonly", values=[])
+            self.preset_cb.pack(side="left", padx=(4, 8))
+            self.preset_cb.bind(
+                "<<ComboboxSelected>>", lambda e: self._apply_preset())
+            self._rbtn(preset_row, "Save preset…", self._save_preset_dialog,
+                       radius=10).pack(side="left", padx=(0, 4))
+            self._rbtn(preset_row, "Delete", self._delete_preset,
+                       radius=10, kind="orange").pack(side="left")
+
             self.case_var = tk.BooleanVar(value=False)
             self.word_var = tk.BooleanVar(value=False)
             # PDF export is off by default. When on, prefer the installed
@@ -6805,6 +6822,17 @@ def launch_gui() -> int:
             self.run_btn = self._rbtn(self._nav, "Run", self.run,
                                       kind="accent", radius=13, padx=22,
                                       pady=10)
+
+            # Restore last-used options + saved presets, and remember on exit.
+            self._refresh_preset_list()
+            self._apply_prefs(self.settings.get("prefs") or {})
+            geo = self.settings.get("geometry")
+            if geo:
+                try:
+                    self.root.geometry(geo)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
             self.show_step(1)
             self.on_mode_change()
@@ -8893,6 +8921,133 @@ def launch_gui() -> int:
             self.out_dir = ""
             self.out_dir_lbl.configure(text="(same folder as each source file)")
 
+        # -- remembered settings + presets ---------------------------------
+        def _collect_prefs(self) -> dict:
+            return {
+                "rev": self.rev_var.get(), "revtext": self.revtext_var.get(),
+                "pdf": self.pdf_var.get(),
+                "native_pdf": self.native_pdf_var.get(),
+                "summary": self.summary_var.get(), "case": self.case_var.get(),
+                "word": self.word_var.get(), "out_dir": self.out_dir,
+                "mode": self.mode_var.get(),
+            }
+
+        def _apply_prefs(self, d: dict):
+            if not isinstance(d, dict):
+                return
+            for key, var in (("rev", self.rev_var),
+                             ("revtext", self.revtext_var),
+                             ("pdf", self.pdf_var),
+                             ("native_pdf", self.native_pdf_var),
+                             ("summary", self.summary_var),
+                             ("case", self.case_var), ("word", self.word_var)):
+                if key in d:
+                    try:
+                        var.set(bool(d[key]))
+                    except Exception:  # noqa: BLE001
+                        pass
+            if d.get("mode") in ("single", "batch"):
+                self.mode_var.set(d["mode"])
+            if d.get("out_dir"):
+                self.out_dir = d["out_dir"]
+                self.out_dir_lbl.configure(text=d["out_dir"])
+            try:
+                self._sync_rev_options()
+                self._sync_pdf_options()
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _rule_specs(self) -> list:
+            specs = []
+            for r in self.rule_rows:
+                find = r["find"].get()
+                if not find:
+                    continue
+                specs.append({
+                    "find": find, "repl": r["repl"].get(),
+                    "all": bool(r["all_var"].get()),
+                    "cats": [c for c, v in r["cat_vars"].items() if v.get()],
+                })
+            return specs
+
+        def _apply_rule_specs(self, specs):
+            for r in list(self.rule_rows):
+                r["frame"].destroy()
+            self.rule_rows = []
+            if not specs:
+                self.add_pair()
+                return
+            for spec in specs:
+                self.add_pair()
+                rule = self.rule_rows[-1]
+                rule["find"].delete(0, "end")
+                rule["find"].insert(0, spec.get("find", ""))
+                rule["repl"].delete(0, "end")
+                rule["repl"].insert(0, spec.get("repl", ""))
+                cats = spec.get("cats") or []
+                rule["all_var"].set(bool(spec.get("all", True)) and not cats)
+                for c, v in rule["cat_vars"].items():
+                    v.set(c in cats)
+                self._update_menu_label(rule)
+
+        def _refresh_preset_list(self):
+            names = sorted((self.settings.get("presets") or {}).keys())
+            try:
+                self.preset_cb.configure(values=names)
+            except Exception:  # noqa: BLE001
+                pass
+
+        def _apply_preset(self):
+            name = self.preset_var.get()
+            d = (self.settings.get("presets") or {}).get(name)
+            if not d:
+                return
+            self._apply_prefs(d.get("prefs") or {})
+            self._apply_rule_specs(d.get("rules") or [])
+            self.log(f"Applied preset “{name}”.")
+
+        def _save_preset_dialog(self):
+            from tkinter import simpledialog
+            name = simpledialog.askstring(
+                "Save preset",
+                "Name this preset (options + find/replace rules):",
+                parent=self.root)
+            if not name or not name.strip():
+                return
+            name = name.strip()
+            self.settings.setdefault("presets", {})[name] = {
+                "prefs": self._collect_prefs(), "rules": self._rule_specs()}
+            save_settings(self.settings)
+            self._refresh_preset_list()
+            self.preset_var.set(name)
+            self.log(f"Saved preset “{name}”.")
+
+        def _delete_preset(self):
+            name = self.preset_var.get()
+            presets = self.settings.get("presets") or {}
+            if name in presets:
+                del presets[name]
+                save_settings(self.settings)
+                self._refresh_preset_list()
+                self.preset_var.set("")
+                self.log(f"Deleted preset “{name}”.")
+
+        def _save_prefs_now(self):
+            """Persist current options as the 'last used' preferences."""
+            self.settings["prefs"] = self._collect_prefs()
+            try:
+                self.settings["geometry"] = self.root.winfo_geometry()
+            except Exception:  # noqa: BLE001
+                pass
+            save_settings(self.settings)
+
+        def _on_close(self):
+            try:
+                self._save_prefs_now()
+            except Exception:  # noqa: BLE001
+                pass
+            self.root.destroy()
+
         # -- reset everything ----------------------------------------------
         def reset_all(self):
             """Clear loaded files, all find/replace rules, every staged edit
@@ -8973,6 +9128,7 @@ def launch_gui() -> int:
                     )
                     return
 
+            self._save_prefs_now()  # remember these options for next time
             self._set_busy(True)
             self._running = True
             self._set_mascot("work", "On it! Crunching through your files...")
