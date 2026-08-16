@@ -1,0 +1,19 @@
+{
+  "name": "Pallet & Pouch Shipping Calculator",
+  "short_name": "Ship Calc",
+  "description": "Calculate pallet count, weight, and dimensions for IT equipment shipments, checked against Dept. of State pouch and despatch limits.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
