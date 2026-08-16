@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0f1115" />
+<link rel="manifest" href="manifest.json" />
+<title>Pallet & Pouch Shipping Calculator</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f1115;
+    --surface: #171a21;
+    --surface2: #1f232c;
+    --surface3: #272c37;
+    --border: #2b3140;
+    --accent: #2dd4bf;
+    --accent2: #38bdf8;
+    --green: #4ade80;
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --text: #eef1f7;
+    --text2: #93a0b4;
+    --text3: #5b6579;
+    --radius: 12px;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  html, body { min-height: 100%; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: calc(40px + var(--safe-bottom));
+  }
+
+  #app { max-width: 980px; margin: 0 auto; padding: 0 16px; }
+
+  /* ── HEADER ── */
+  header {
+    padding: calc(22px + var(--safe-top)) 4px 18px;
+  }
+  header .eyebrow {
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  header h1 {
+    font-family: 'Syne', sans-serif;
+    font-weight: 800;
+    font-size: 1.6rem;
+    letter-spacing: -0.01em;
+  }
+  header p {
+    color: var(--text2);
+    font-size: 0.88rem;
+    margin-top: 6px;
+    max-width: 60ch;
+    line-height: 1.5;
+  }
+
+  /* ── SECTION CARD ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.02rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .card h2 .num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px; height: 22px;
+    border-radius: 7px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    color: #0a0c10;
+    font-size: 0.72rem;
+    font-weight: 800;
+    flex-shrink: 0;
+  }
+  .card .sub {
+    color: var(--text2);
+    font-size: 0.82rem;
+    margin-bottom: 14px;
+    line-height: 1.5;
+  }
+
+  /* ── FORM GRID ── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px;
+  }
+  label.field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    font-size: 0.72rem;
+    color: var(--text2);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  input[type=text], input[type=number], select {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    color: var(--text);
+    padding: 9px 10px;
+    font-size: 0.9rem;
+    font-family: inherit;
+    width: 100%;
+    transition: border-color .15s;
+  }
+  input:focus, select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  input[type=number] { -moz-appearance: textfield; }
+
+  .preset-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+  .preset-btn {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    color: var(--text2);
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 7px 12px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .preset-btn:hover { border-color: var(--accent); color: var(--text); }
+  .preset-btn.active {
+    background: rgba(45,212,191,0.14);
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* ── ITEMS TABLE ── */
+  .items-wrap { overflow-x: auto; }
+  table.items {
+    width: 100%;
+    border-collapse: collapse;
+    min-width: 760px;
+  }
+  table.items th {
+    text-align: left;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text3);
+    font-weight: 700;
+    padding: 0 8px 8px;
+    white-space: nowrap;
+  }
+  table.items td {
+    padding: 5px 8px;
+    vertical-align: middle;
+  }
+  table.items tr:not(:last-child) td { border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+  table.items tr td { padding-top: 10px; }
+  table.items input[type=text] { min-width: 150px; }
+  table.items input[type=number] { width: 68px; }
+  .stack-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px; height: 30px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: all .15s;
+  }
+  .stack-toggle.on { border-color: var(--green); background: rgba(74,222,128,0.12); }
+  .stack-toggle.off { border-color: var(--red); background: rgba(248,113,113,0.12); }
+  .row-remove {
+    background: none;
+    border: none;
+    color: var(--text3);
+    font-size: 1.1rem;
+    cursor: pointer;
+    width: 28px; height: 28px;
+    border-radius: 6px;
+  }
+  .row-remove:hover { color: var(--red); background: rgba(248,113,113,0.1); }
+
+  .add-item-btn {
+    margin-top: 12px;
+    background: var(--surface2);
+    border: 1px dashed var(--border);
+    color: var(--text2);
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 9px 14px;
+    border-radius: 8px;
+    cursor: pointer;
+    width: 100%;
+    transition: all .15s;
+  }
+  .add-item-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ── RESULTS ── */
+  .summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+  .stat {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .stat .label {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text3);
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .stat .value {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: var(--text);
+  }
+  .stat .value.accent { color: var(--accent); }
+  .stat .hint { font-size: 0.74rem; color: var(--text2); margin-top: 4px; }
+
+  table.breakdown { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+  table.breakdown th {
+    text-align: left;
+    font-size: 0.66rem;
+    text-transform: uppercase;
+    color: var(--text3);
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  table.breakdown td { padding: 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  table.breakdown tr:last-child td { border-bottom: none; }
+  .breakdown-wrap { overflow-x: auto; margin-top: 8px;}
+  .warn-badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(248,113,113,0.14);
+    color: var(--red);
+  }
+
+  .method-list { display: flex; flex-direction: column; gap: 10px; }
+  .method {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .method-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+  .method-head .name { font-weight: 700; font-size: 0.92rem; }
+  .badge {
+    font-size: 0.68rem;
+    font-weight: 800;
+    padding: 3px 9px;
+    border-radius: 999px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    white-space: nowrap;
+  }
+  .badge.ok { background: rgba(74,222,128,0.14); color: var(--green); }
+  .badge.no { background: rgba(248,113,113,0.14); color: var(--red); }
+  .badge.na { background: rgba(147,160,180,0.14); color: var(--text2); }
+  .method .note { color: var(--text2); font-size: 0.78rem; line-height: 1.5; }
+  .method .limits { display: flex; gap: 14px; flex-wrap: wrap; margin: 8px 0; }
+  .method .limits label.field { min-width: 130px; flex: 1; }
+
+  .recommend-banner {
+    border: 1px solid var(--accent);
+    background: rgba(45,212,191,0.08);
+    border-radius: 10px;
+    padding: 12px 14px;
+    font-size: 0.86rem;
+    line-height: 1.55;
+    margin-bottom: 14px;
+  }
+  .recommend-banner b { color: var(--accent); }
+
+  footer {
+    text-align: center;
+    color: var(--text3);
+    font-size: 0.74rem;
+    padding: 20px 0 10px;
+    line-height: 1.6;
+  }
+
+  .reset-link {
+    background: none;
+    border: none;
+    color: var(--text3);
+    font-size: 0.78rem;
+    text-decoration: underline;
+    cursor: pointer;
+    padding: 0;
+  }
+  .reset-link:hover { color: var(--red); }
+
+  @media (max-width: 520px) {
+    header h1 { font-size: 1.32rem; }
+    .stat .value { font-size: 1.2rem; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="eyebrow">Freight &amp; Diplomatic Shipping</div>
+    <h1>Pallet &amp; Pouch Shipping Calculator</h1>
+    <p>Enter the IT equipment being shipped, and this figures the pallet footprint, weight, and pallet count for a standard North American pallet — plus how it stacks up against Unclassified Pouch, Classified Pouch, and Despatch Agency shipping limits for posts overseas.</p>
+  </header>
+
+  <!-- 1. PALLET CONFIG -->
+  <section class="card">
+    <h2><span class="num">1</span>Pallet Configuration</h2>
+    <div class="sub">Pick a standard North American pallet size or customize. Max stack height is measured from the floor (includes the pallet itself).</div>
+    <div class="preset-row" id="palletPresets"></div>
+    <div class="grid">
+      <label class="field">Length (in)<input type="number" id="palletL" min="1" step="0.5"></label>
+      <label class="field">Width (in)<input type="number" id="palletW" min="1" step="0.5"></label>
+      <label class="field">Pallet Height (in)<input type="number" id="palletHeight" min="0" step="0.25"></label>
+      <label class="field">Max Stack Height (in)<input type="number" id="maxStackHeight" min="1" step="0.5"></label>
+      <label class="field">Max Gross Weight (lb)<input type="number" id="maxWeight" min="1" step="1"></label>
+      <label class="field">Pallet Tare Weight (lb)<input type="number" id="tareWeight" min="0" step="1"></label>
+    </div>
+  </section>
+
+  <!-- 2. ITEMS -->
+  <section class="card">
+    <h2><span class="num">2</span>Items Being Shipped</h2>
+    <div class="sub">Quantity, boxed dimensions and weight per unit. Toggle <b>Stack</b> off for items that cannot be stacked (e.g. monitors, some printers) — those get a single layer per pallet.</div>
+    <div class="items-wrap">
+      <table class="items">
+        <thead>
+          <tr>
+            <th>Item</th>
+            <th>Qty</th>
+            <th>L (in)</th>
+            <th>W (in)</th>
+            <th>H (in)</th>
+            <th>Weight (lb)</th>
+            <th>Stack</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="itemsBody"></tbody>
+      </table>
+    </div>
+    <button class="add-item-btn" id="addItemBtn">+ Add Item</button>
+  </section>
+
+  <!-- 3. RESULTS -->
+  <section class="card">
+    <h2><span class="num">3</span>Pallet &amp; Freight Results</h2>
+    <div class="sub">Per-item pallet math, then totals for the whole shipment.</div>
+    <div class="summary-grid" id="summaryGrid"></div>
+    <div class="breakdown-wrap">
+      <table class="breakdown" id="breakdownTable"></table>
+    </div>
+  </section>
+
+  <!-- 4. SHIPPING METHOD -->
+  <section class="card">
+    <h2><span class="num">4</span>Department of State Shipping Method</h2>
+    <div class="sub">
+      Reference limits for overseas pouch &amp; freight channels. Defaults are drawn from general public 14 FAM / 14 FAH-4 guidance on diplomatic pouch and Despatch Agency service — <b>confirm current figures with your post's Diplomatic Pouch &amp; Mail (DPM) or Despatch Agency contact before shipping</b>, since per-post restrictions and thresholds do change.
+    </div>
+    <div id="recommendBanner"></div>
+    <div class="method-list" id="methodList"></div>
+  </section>
+
+  <footer>
+    <div>Estimates only — actual carrier/pouch acceptance depends on packaging, post-specific restrictions, and current DPM/Despatch Agency guidance.</div>
+    <div style="margin-top:8px;"><button class="reset-link" id="resetBtn">Reset all to defaults</button></div>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var STORAGE_KEY = 'shipcalc_state_v1';
+
+  var PALLET_PRESETS = [
+    { key: 'gma',   label: '48″ × 40″ (GMA Standard)', L: 48, W: 40, palletHeight: 6.5, tare: 37 },
+    { key: 'sq48',  label: '48″ × 48″',                L: 48, W: 48, palletHeight: 6.5, tare: 42 },
+    { key: '42',    label: '42″ × 42″',                L: 42, W: 42, palletHeight: 6,   tare: 35 },
+    { key: 'sq40',  label: '40″ × 40″',                L: 40, W: 40, palletHeight: 6,   tare: 33 },
+    { key: 'custom',label: 'Custom',                   L: 48, W: 40, palletHeight: 6.5, tare: 37 }
+  ];
+
+  var DEFAULT_ITEMS = [
+    { name: 'Laptop',                     qty: 0, L: 19, W: 13, H: 6,  weight: 10, stackable: true  },
+    { name: 'Desktop',                    qty: 0, L: 22, W: 11, H: 19, weight: 28, stackable: true  },
+    { name: 'Monitor (24″)',              qty: 0, L: 23, W: 7,  H: 17, weight: 13, stackable: false },
+    { name: 'Monitor (34″)',              qty: 0, L: 36, W: 9,  H: 23, weight: 24, stackable: false },
+    { name: 'Printer – Basic / Color',    qty: 0, L: 20, W: 16, H: 12, weight: 18, stackable: true  },
+    { name: 'Printer – Multifunction',    qty: 0, L: 24, W: 20, H: 18, weight: 35, stackable: false }
+  ];
+
+  var DEFAULT_METHODS = {
+    unclassified: {
+      label: 'Unclassified Pouch',
+      unitLabel: 'per bag',
+      limitWeight: 66,
+      note: 'Sized for mail & small parcels — typical bag capacities run about 66 lb (O-bag) to 110 lb (W-bag). Not intended for palletized freight; route bulk equipment orders through the Despatch Agency instead.'
+    },
+    classified: {
+      label: 'Classified Pouch',
+      unitLabel: 'per package (typical)',
+      limitWeight: 70,
+      note: 'Hand-carried by diplomatic courier. The Department sets no blanket size/weight cap, but individual posts and courier routes impose practical limits — this default is a conservative placeholder, not a regulation. Confirm with your Diplomatic Courier contact.'
+    },
+    despatch: {
+      label: 'Despatch Agency (Freight / Pallet)',
+      unitLabel: 'per shipment',
+      limitWeight: 5000,
+      limitVolume: 500,
+      note: 'Standard channel for palletized/freight equipment shipments to post. Shipments over the weight/volume threshold require advance coordination with the Despatch Agency before pickup.'
+    }
+  };
+
+  function cubicFtFromIn3(in3) { return in3 / 1728; }
+  function fmt(n, d) {
+    if (d === undefined) d = 1;
+    if (!isFinite(n)) return '—';
+    var r = Math.round(n * Math.pow(10, d)) / Math.pow(10, d);
+    return r.toLocaleString(undefined, { maximumFractionDigits: d });
+  }
+  function uid() { return 'i' + Math.random().toString(36).slice(2, 10); }
+
+  // ── STATE ──
+  var state = loadState();
+
+  function defaultState() {
+    return {
+      palletPreset: 'gma',
+      pallet: { L: 48, W: 40, palletHeight: 6.5, maxStackHeight: 48, maxWeight: 2200, tareWeight: 37 },
+      items: DEFAULT_ITEMS.map(function (it) { return Object.assign({ id: uid() }, it); }),
+      methods: JSON.parse(JSON.stringify(DEFAULT_METHODS))
+    };
+  }
+
+  function loadState() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) return defaultState();
+      var parsed = JSON.parse(raw);
+      if (!parsed.pallet || !parsed.items) return defaultState();
+      return parsed;
+    } catch (e) { return defaultState(); }
+  }
+
+  function saveState() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (e) {}
+  }
+
+  // ── PALLET PRESET UI ──
+  var palletPresetsEl = document.getElementById('palletPresets');
+  PALLET_PRESETS.forEach(function (p) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'preset-btn';
+    btn.textContent = p.label;
+    btn.dataset.key = p.key;
+    btn.addEventListener('click', function () {
+      state.palletPreset = p.key;
+      if (p.key !== 'custom') {
+        state.pallet.L = p.L;
+        state.pallet.W = p.W;
+        state.pallet.palletHeight = p.palletHeight;
+        state.pallet.tareWeight = p.tare;
+      }
+      syncPalletInputs();
+      renderPresets();
+      recalc();
+    });
+    palletPresetsEl.appendChild(btn);
+  });
+
+  function renderPresets() {
+    Array.prototype.forEach.call(palletPresetsEl.children, function (btn) {
+      btn.classList.toggle('active', btn.dataset.key === state.palletPreset);
+    });
+  }
+
+  var palletFields = ['L', 'W', 'palletHeight', 'maxStackHeight', 'maxWeight', 'tareWeight'];
+  var palletInputIds = { L: 'palletL', W: 'palletW', palletHeight: 'palletHeight', maxStackHeight: 'maxStackHeight', maxWeight: 'maxWeight', tareWeight: 'tareWeight' };
+
+  function syncPalletInputs() {
+    palletFields.forEach(function (f) {
+      document.getElementById(palletInputIds[f]).value = state.pallet[f];
+    });
+  }
+
+  palletFields.forEach(function (f) {
+    var el = document.getElementById(palletInputIds[f]);
+    el.addEventListener('input', function () {
+      var v = parseFloat(el.value);
+      state.pallet[f] = isFinite(v) ? v : 0;
+      if (f === 'L' || f === 'W' || f === 'palletHeight' || f === 'tareWeight') {
+        state.palletPreset = 'custom';
+        renderPresets();
+      }
+      recalc();
+    });
+  });
+
+  // ── ITEMS UI ──
+  var itemsBody = document.getElementById('itemsBody');
+
+  function renderItems() {
+    itemsBody.innerHTML = '';
+    state.items.forEach(function (item) {
+      var tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td><input type="text" data-field="name" data-id="' + item.id + '" value="' + escapeHtml(item.name) + '"></td>' +
+        '<td><input type="number" min="0" step="1" data-field="qty" data-id="' + item.id + '" value="' + item.qty + '"></td>' +
+        '<td><input type="number" min="0" step="0.25" data-field="L" data-id="' + item.id + '" value="' + item.L + '"></td>' +
+        '<td><input type="number" min="0" step="0.25" data-field="W" data-id="' + item.id + '" value="' + item.W + '"></td>' +
+        '<td><input type="number" min="0" step="0.25" data-field="H" data-id="' + item.id + '" value="' + item.H + '"></td>' +
+        '<td><input type="number" min="0" step="0.5" data-field="weight" data-id="' + item.id + '" value="' + item.weight + '"></td>' +
+        '<td><button type="button" class="stack-toggle ' + (item.stackable ? 'on' : 'off') + '" data-id="' + item.id + '" title="' + (item.stackable ? 'Stackable' : 'Not stackable') + '">' + (item.stackable ? '✓' : '✕') + '</button></td>' +
+        '<td><button type="button" class="row-remove" data-id="' + item.id + '" title="Remove item">✕</button></td>';
+      itemsBody.appendChild(tr);
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  itemsBody.addEventListener('input', function (e) {
+    var field = e.target.getAttribute('data-field');
+    var id = e.target.getAttribute('data-id');
+    if (!field) return;
+    var item = state.items.find(function (i) { return i.id === id; });
+    if (!item) return;
+    if (field === 'name') {
+      item.name = e.target.value;
+    } else {
+      var v = parseFloat(e.target.value);
+      item[field] = isFinite(v) ? v : 0;
+    }
+    recalc();
+  });
+
+  itemsBody.addEventListener('click', function (e) {
+    var id = e.target.getAttribute('data-id');
+    if (!id) return;
+    if (e.target.classList.contains('stack-toggle')) {
+      var item = state.items.find(function (i) { return i.id === id; });
+      item.stackable = !item.stackable;
+      renderItems();
+      recalc();
+    } else if (e.target.classList.contains('row-remove')) {
+      state.items = state.items.filter(function (i) { return i.id !== id; });
+      renderItems();
+      recalc();
+    }
+  });
+
+  document.getElementById('addItemBtn').addEventListener('click', function () {
+    state.items.push({ id: uid(), name: 'New Item', qty: 0, L: 12, W: 12, H: 12, weight: 5, stackable: true });
+    renderItems();
+    recalc();
+  });
+
+  // ── CALCULATION ──
+  function computeItem(item, pallet) {
+    var result = {
+      item: item, unitsPerPallet: 0, layers: 0, perLayer: 0,
+      palletsNeeded: 0, totalWeight: 0, totalVolumeFt3: 0,
+      grossWeightFullPallet: 0, error: null
+    };
+
+    result.totalVolumeFt3 = cubicFtFromIn3(item.L * item.W * item.H) * item.qty;
+
+    if (item.qty <= 0) return result;
+
+    var fitA = Math.floor(pallet.L / item.L) * Math.floor(pallet.W / item.W);
+    var fitB = Math.floor(pallet.L / item.W) * Math.floor(pallet.W / item.L);
+    var perLayer = Math.max(fitA, fitB);
+
+    if (perLayer <= 0) {
+      result.error = 'Box footprint exceeds pallet size';
+      return result;
+    }
+
+    var availableHeight = pallet.maxStackHeight - pallet.palletHeight;
+    var layers;
+    if (!item.stackable) {
+      layers = item.H <= availableHeight ? 1 : 0;
+    } else {
+      layers = Math.floor(availableHeight / item.H);
+    }
+
+    if (layers <= 0) {
+      result.error = 'Box height exceeds max stack height';
+      return result;
+    }
+
+    var byFootprint = perLayer * layers;
+    var netWeightCapacity = Math.max(0, pallet.maxWeight - pallet.tareWeight);
+    var byWeight = item.weight > 0 ? Math.floor(netWeightCapacity / item.weight) : Infinity;
+
+    var unitsPerPallet = Math.min(byFootprint, byWeight);
+    if (unitsPerPallet <= 0) {
+      result.error = 'Unit weight exceeds pallet weight capacity';
+      return result;
+    }
+
+    var palletsNeeded = Math.ceil(item.qty / unitsPerPallet);
+
+    result.perLayer = perLayer;
+    result.layers = layers;
+    result.unitsPerPallet = unitsPerPallet;
+    result.palletsNeeded = palletsNeeded;
+    result.totalWeight = item.qty * item.weight + palletsNeeded * pallet.tareWeight;
+    result.grossWeightFullPallet = unitsPerPallet * item.weight + pallet.tareWeight;
+    result.limitedBy = byWeight < byFootprint ? 'weight' : 'space';
+    return result;
+  }
+
+  function recalc() {
+    saveState();
+    var pallet = state.pallet;
+    var results = state.items.map(function (item) { return computeItem(item, pallet); });
+
+    var activeResults = results.filter(function (r) { return r.item.qty > 0; });
+    var totalPallets = activeResults.reduce(function (s, r) { return s + r.palletsNeeded; }, 0);
+    var totalWeight = activeResults.reduce(function (s, r) { return s + r.totalWeight; }, 0);
+    var totalProductVolume = results.reduce(function (s, r) { return s + r.totalVolumeFt3; }, 0);
+    var shippingCubeFt3 = totalPallets * cubicFtFromIn3(pallet.L * pallet.W * pallet.maxStackHeight);
+    var hasErrors = activeResults.some(function (r) { return r.error; });
+
+    renderSummary(totalPallets, totalWeight, totalProductVolume, shippingCubeFt3, hasErrors);
+    renderBreakdown(activeResults, pallet);
+    renderMethods(totalWeight, shippingCubeFt3, totalPallets, activeResults);
+  }
+
+  function renderSummary(totalPallets, totalWeight, productVolume, shippingCube, hasErrors) {
+    var grid = document.getElementById('summaryGrid');
+    var stats = [
+      { label: 'Pallets Required', value: totalPallets, hint: totalPallets === 1 ? '1 standard pallet' : (totalPallets > 1 ? 'multi-pallet shipment' : 'add quantities below'), accent: true },
+      { label: 'Total Gross Weight', value: fmt(totalWeight, 0) + ' lb', hint: 'includes pallet tare weight' },
+      { label: 'Product Volume', value: fmt(productVolume, 1) + ' ft³', hint: 'boxed items only' },
+      { label: 'Shipping Cube', value: fmt(shippingCube, 1) + ' ft³', hint: 'pallet footprint × stack height' }
+    ];
+    grid.innerHTML = stats.map(function (s) {
+      return '<div class="stat"><div class="label">' + s.label + '</div><div class="value' + (s.accent ? ' accent' : '') + '">' + s.value + '</div><div class="hint">' + s.hint + '</div></div>';
+    }).join('');
+    if (hasErrors) {
+      grid.innerHTML += '<div class="stat" style="border-color:var(--red);"><div class="label">Packing Warning</div><div class="value" style="color:var(--red);font-size:1rem;">Check items below</div><div class="hint">One or more items don\'t fit the current pallet config</div></div>';
+    }
+  }
+
+  function renderBreakdown(activeResults, pallet) {
+    var table = document.getElementById('breakdownTable');
+    if (!activeResults.length) {
+      table.innerHTML = '<tr><td style="color:var(--text3);padding:14px 8px;">No quantities entered yet — set a quantity for at least one item above.</td></tr>';
+      return;
+    }
+    var rows = activeResults.map(function (r) {
+      if (r.error) {
+        return '<tr><td>' + escapeHtml(r.item.name) + '</td><td colspan="6"><span class="warn-badge">' + r.error + '</span></td></tr>';
+      }
+      return '<tr>' +
+        '<td>' + escapeHtml(r.item.name) + '</td>' +
+        '<td>' + r.item.qty + '</td>' +
+        '<td>' + r.perLayer + ' / layer × ' + r.layers + '</td>' +
+        '<td>' + r.unitsPerPallet + ' units</td>' +
+        '<td>' + r.palletsNeeded + '</td>' +
+        '<td>' + fmt(r.grossWeightFullPallet, 0) + ' lb/pallet</td>' +
+        '<td>' + fmt(r.totalWeight, 0) + ' lb total</td>' +
+        '</tr>';
+    }).join('');
+    table.innerHTML =
+      '<thead><tr><th>Item</th><th>Qty</th><th>Layout</th><th>Per Pallet</th><th>Pallets</th><th>Gross/Pallet</th><th>Item Total Wt.</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody>';
+  }
+
+  function renderMethods(totalWeight, shippingCube, totalPallets, activeResults) {
+    var banner = document.getElementById('recommendBanner');
+    if (totalPallets === 0) {
+      banner.innerHTML = '';
+    } else if (totalPallets === 1 && totalWeight <= 150) {
+      banner.innerHTML = '<div class="recommend-banner"><b>Small shipment.</b> This load is light enough that it may fit within pouch bag limits — check the Unclassified / Classified Pouch limits below before defaulting to freight.</div>';
+    } else {
+      var overThreshold = totalWeight > state.methods.despatch.limitWeight || shippingCube > state.methods.despatch.limitVolume;
+      banner.innerHTML = '<div class="recommend-banner"><b>Route via Despatch Agency</b> — ' + totalPallets + ' pallet' + (totalPallets > 1 ? 's' : '') + ' of equipment is palletized freight, not pouch mail.' +
+        (overThreshold ? ' This shipment exceeds the standard coordination threshold (' + fmt(state.methods.despatch.limitWeight, 0) + ' lb / ' + fmt(state.methods.despatch.limitVolume, 0) + ' ft³) — contact your Despatch Agency in advance.' : ' It is within the standard coordination threshold.') +
+        '</div>';
+    }
+
+    var list = document.getElementById('methodList');
+    var keys = ['unclassified', 'classified', 'despatch'];
+    list.innerHTML = keys.map(function (key) {
+      var m = state.methods[key];
+      var badge, status;
+      if (totalPallets === 0) {
+        badge = '<span class="badge na">—</span>';
+      } else if (key === 'despatch') {
+        var fits = totalWeight <= m.limitWeight && shippingCube <= m.limitVolume;
+        badge = fits ? '<span class="badge ok">Within Threshold</span>' : '<span class="badge no">Needs Coordination</span>';
+      } else {
+        badge = totalPallets > 1 ? '<span class="badge na">Freight — Not Applicable</span>' : (totalWeight <= m.limitWeight ? '<span class="badge ok">Fits Limit</span>' : '<span class="badge no">Over Limit</span>');
+      }
+
+      var limitFields = '<div class="limits">' +
+        '<label class="field">Weight Limit (lb)<input type="number" min="0" step="1" data-method="' + key + '" data-mfield="limitWeight" value="' + m.limitWeight + '"></label>' +
+        (m.limitVolume !== undefined ? '<label class="field">Volume Limit (ft³)<input type="number" min="0" step="1" data-method="' + key + '" data-mfield="limitVolume" value="' + m.limitVolume + '"></label>' : '') +
+        '</div>';
+
+      return '<div class="method">' +
+        '<div class="method-head"><span class="name">' + m.label + '</span>' + badge + '</div>' +
+        limitFields +
+        '<div class="note">' + m.note + '</div>' +
+        '</div>';
+    }).join('');
+
+    Array.prototype.forEach.call(list.querySelectorAll('input[data-method]'), function (el) {
+      el.addEventListener('input', function () {
+        var key = el.getAttribute('data-method');
+        var field = el.getAttribute('data-mfield');
+        var v = parseFloat(el.value);
+        state.methods[key][field] = isFinite(v) ? v : 0;
+        recalc();
+      });
+    });
+  }
+
+  document.getElementById('resetBtn').addEventListener('click', function () {
+    if (!confirm('Reset all pallet settings, items, and shipping limits to defaults? This clears your saved data.')) return;
+    state = defaultState();
+    init();
+  });
+
+  function init() {
+    syncPalletInputs();
+    renderPresets();
+    renderItems();
+    recalc();
+  }
+
+  init();
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js').catch(function () {});
+    });
+  }
+})();
+</script>
+</body>
+</html>
