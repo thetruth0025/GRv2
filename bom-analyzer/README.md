@@ -6,6 +6,11 @@ for every part, from **DigiKey** and **Mouser**, side by side in one table.
 Each supplier gets its own column group, so you can see at a glance which one is cheaper for a
 given line, which one can ship today, and which parts are heading for end of life.
 
+Two front ends over the same engine:
+
+- **`python3 server.py`** — a browser app at <http://localhost:8787> for interactive work.
+- **`python3 bom.py my-bom.csv -o comparison.xlsx`** — a CLI for scripting and one-shot runs.
+
 ---
 
 ## What it does
@@ -79,18 +84,81 @@ cp .env.example .env
 ### 3. Run
 
 ```bash
-python3 server.py
+python3 server.py          # web app on http://localhost:8787
+python3 bom.py --help      # or use the command line
 ```
 
-Then open <http://localhost:8787>. The status pills under the title confirm which suppliers are
-connected.
+The status pills under the web app's title confirm which suppliers are connected.
 
 To try the interface before you have keys, click **Load sample BOM** — parsing and column mapping
 work without any credentials; only the lookup needs them.
 
 ---
 
-## Using it
+## The command line
+
+```bash
+python3 bom.py samples/sample-bom.csv -o comparison.xlsx
+```
+
+```
+Analyzing 10 parts from sample-bom.csv against DigiKey and Mouser…
+
+ROW  PART                QTY  DIGIKEY STOCK  LEAD          EXT  MOUSER STOCK  LEAD         EXT  BEST     LIFECYCLE
+  2  GRM188R71H104KA93D  300         21,450  in stock  $154.80        57,763  in stock  $85.50  Mouser   Obsolete
+  3  RC0603FR-0710KL     500         17,902  in stock   $33.60        16,703  in stock $154.50  DigiKey  Active
+  …
+
+Summary
+  Lines analyzed         10 across 1,100 units
+  DigiKey cart           $317.54  (1 not carried)
+  Mouser cart            $364.40  (2 not carried)
+  Cheapest per line      $259.34  (saves $58.20 vs. single-sourcing)
+  Stock risk             0
+  Lifecycle risk         7
+
+Needs attention
+  • GRM188R71H104KA93D  Obsolete — find a replacement; 81.1% price spread between suppliers
+  • STM32F103C8T6       Not Recommended for New Designs; Single source — only DigiKey carries it
+```
+
+The written `.xlsx` has a frozen header, autofilter, one column group per supplier and every
+number stored as a number, so it sorts and totals correctly in Excel. `.csv` and `.json` come out
+of the same column layout — `-f json` gives you the whole analysis for scripting.
+
+**Options worth knowing:**
+
+| Flag | What it does |
+| --- | --- |
+| `-o FILE` | Write the comparison (`.xlsx`, `.csv` or `.json`; `-f` overrides the extension) |
+| `-b N` | Building N units — multiplies every BOM quantity by N before pricing |
+| `-s digikey` / `-s mouser` | Query one supplier only |
+| `--limit N` | Analyze just the first N parts, e.g. to sanity-check a big BOM |
+| `--list-columns` | Show the detected headers and mapping, then exit |
+| `--mpn-column COL` | Force a column by header name or 0-based index (one flag per field) |
+| `--fail-on risk` | Exit non-zero when any line is flagged — for CI and scripts |
+| `--no-cache`, `--clear-cache` | Bypass or empty the cached supplier answers |
+
+Reading part numbers from stdin works too, one per line with an optional quantity:
+
+```bash
+printf 'STM32F103C8T6, 25\nLM358DR, 100\n' | python3 bom.py - -o quote.xlsx
+```
+
+If nothing is found, `--list-columns` is the fastest way to see what the header detection made of
+your file and which flag to reach for:
+
+```
+  IDX  HEADER                           MAPPED TO
+  0    Item
+  1    Reference                        reference
+  2    Qty                              quantity
+  4    Manufacturer Part Number         mpn
+```
+
+---
+
+## Using the web app
 
 1. **Load your BOM** — drop a file on the upload area, or paste a list of part numbers with
    optional quantities (`GRM188R71H104KA93D, 100`).
@@ -135,12 +203,14 @@ Settings panel, and set `ALLOWED_ORIGINS` on the server to the origin serving th
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 67 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 112 tests, no network access required
 python3 server.py                            # http://localhost:8787
+python3 bom.py samples/sample-bom.csv        # the CLI
 ```
 
 ```
 server.py                 HTTP server, static hosting, API routes, SSE streaming
+bom.py                    Command-line front end: argument parsing, terminal output
 bomlib/spreadsheet.py     CSV/TSV parsing, .xlsx reading, header detection, column mapping
 bomlib/digikey.py         OAuth 2.0 + Product Information V4 → catalog record
 bomlib/mouser.py          Search API v1 → catalog record
@@ -148,8 +218,13 @@ bomlib/normalize.py       Lead time, lifecycle and price-break normalization; cr
 bomlib/lookup.py          Deduplication, caching, concurrency, BOM roll-up
 bomlib/cache.py           TTL cache with disk persistence
 bomlib/http_client.py     urllib with timeout, retry and backoff
-public/                   The frontend (plain HTML/CSS/JS, no build step)
+bomlib/report.py          One column layout shared by the CSV, .xlsx and terminal output
+bomlib/xlsx_writer.py     Minimal styled .xlsx writer (zipfile + hand-built XML)
+public/                   The web frontend (plain HTML/CSS/JS, no build step)
 ```
+
+`server.py` and `bom.py` are both thin shells over `bomlib/`: they parse input, call
+`LookupService`, and render. Neither knows anything about DigiKey or Mouser specifically.
 
 The server is `ThreadingHTTPServer`; supplier lookups run on a `ThreadPoolExecutor` bounded by
 `LOOKUP_CONCURRENCY`. Since the work is entirely network-bound, threads sidestep the GIL and the
@@ -164,8 +239,9 @@ supplier-agnostic place.
 The tests cover the parts that are easy to get quietly wrong: price break selection at a quantity,
 minimum-order and packaging-multiple arithmetic, the lead time and lifecycle vocabularies of both
 suppliers, packaging choice, header detection against four different BOM dialects, `.xlsx`
-container reading, and the comparison verdicts. Supplier clients are tested against recorded
-response shapes, so no network access is needed.
+container reading, `.xlsx` writing, the CSV formula-injection guard, the CLI's column overrides
+and exit codes, and the comparison verdicts. Supplier clients are tested against recorded response
+shapes, so no network access is needed.
 
 ---
 
