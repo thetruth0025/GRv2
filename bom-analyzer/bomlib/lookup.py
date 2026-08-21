@@ -50,6 +50,64 @@ class LookupService:
         stats = {'apiCalls': 0, 'cacheHits': 0, 'errors': 0, 'lookups': len(job_list), 'completed': 0}
         lock = threading.Lock()
 
+        def note_progress(client, part):
+            with lock:
+                stats['completed'] += 1
+                progress = {
+                    'completed': stats['completed'],
+                    'total': len(job_list),
+                    'supplier': client.name,
+                    'mpn': part.get('mpn'),
+                    'apiCalls': stats['apiCalls'],
+                    'cacheHits': stats['cacheHits'],
+                    'errors': stats['errors'],
+                }
+            if on_progress:
+                on_progress(progress)
+
+        def run_batch(batch):
+            """One request covering several parts, for aggregators that accept
+            a list. Cache hits are served first so only genuine misses go out."""
+            client = batch[0][1]
+            pending = []
+            for key, _, part in batch:
+                cached = self.cache.get(key) if self.cache is not None else None
+                if cached is not None:
+                    with lock:
+                        stats['cacheHits'] += 1
+                        resolved[key] = cached
+                    note_progress(client, part)
+                else:
+                    pending.append((key, part))
+
+            if not pending:
+                return
+
+            parts = [part for _, part in pending]
+            try:
+                records = client.fetch_records(parts) or {}
+                with lock:
+                    stats['apiCalls'] += 1
+                for key, part in pending:
+                    record = records.get(part.get('mpn'))
+                    entry = {'record': record} if record else {'notFound': True}
+                    if self.cache is not None:
+                        self.cache.set(key, entry)
+                    with lock:
+                        resolved[key] = entry
+            except Exception as err:
+                message = str(err) or repr(err)
+                with lock:
+                    stats['apiCalls'] += 1
+                    stats['errors'] += 1
+                    # One failed request fails every part it carried, but the
+                    # failure is not cached, so the next run retries them.
+                    for key, _ in pending:
+                        resolved[key] = {'error': message}
+            finally:
+                for _, part in pending:
+                    note_progress(client, part)
+
         def run(job):
             key, client, part = job
             try:
@@ -76,23 +134,33 @@ class LookupService:
                         stats['errors'] += 1
                         resolved[key] = {'error': str(err) or repr(err)}
             finally:
-                with lock:
-                    stats['completed'] += 1
-                    progress = {
-                        'completed': stats['completed'],
-                        'total': len(job_list),
-                        'supplier': client.name,
-                        'mpn': part.get('mpn'),
-                        'apiCalls': stats['apiCalls'],
-                        'cacheHits': stats['cacheHits'],
-                        'errors': stats['errors'],
-                    }
-                if on_progress:
-                    on_progress(progress)
+                note_progress(client, part)
 
-        if job_list:
-            with ThreadPoolExecutor(max_workers=min(self.concurrency, len(job_list))) as pool:
-                list(pool.map(run, job_list))
+        # Split the work: clients that accept a list of parts get chunked
+        # requests, the rest keep one request per part.
+        batches = []
+        singles = []
+        by_client = {}
+        for job in job_list:
+            by_client.setdefault(job[1].id, []).append(job)
+
+        for client_jobs in by_client.values():
+            client = client_jobs[0][1]
+            size = getattr(client, 'batch_size', 1) or 1
+            if size > 1 and hasattr(client, 'fetch_records'):
+                for start in range(0, len(client_jobs), size):
+                    batches.append(client_jobs[start:start + size])
+            else:
+                singles.extend(client_jobs)
+
+        units = [('batch', b) for b in batches] + [('single', s) for s in singles]
+        if units:
+            workers = min(self.concurrency, len(units))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(
+                    lambda unit: run_batch(unit[1]) if unit[0] == 'batch' else run(unit[1]),
+                    units,
+                ))
 
         rows = []
         for index, part in enumerate(parts):

@@ -340,3 +340,14 @@ class EndToEndTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class NameJoiningTests(unittest.TestCase):
+    def test_supplier_names_read_as_a_sentence(self):
+        self.assertEqual(bom._join_names([]), '')
+        self.assertEqual(bom._join_names(['DigiKey']), 'DigiKey')
+        self.assertEqual(bom._join_names(['DigiKey', 'Mouser']), 'DigiKey and Mouser')
+        self.assertEqual(
+            bom._join_names(['DigiKey', 'Mouser', 'TrustedParts']),
+            'DigiKey, Mouser and TrustedParts',
+        )

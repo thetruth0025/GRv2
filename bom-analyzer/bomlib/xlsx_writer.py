@@ -162,49 +162,75 @@ def _styles_xml():
     )
 
 
-def _content_types_xml():
+def _content_types_xml(sheet_count):
     ns = 'http://schemas.openxmlformats.org/package/2006/content-types'
     doc = 'application/vnd.openxmlformats-officedocument.spreadsheetml'
+    sheets = ''.join(
+        '<Override PartName="/xl/worksheets/sheet%d.xml" ContentType="%s.worksheet+xml"/>'
+        % (i + 1, doc) for i in range(sheet_count)
+    )
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Types xmlns="%s">'
         '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
         '<Default Extension="xml" ContentType="application/xml"/>'
         '<Override PartName="/xl/workbook.xml" ContentType="%s.sheet.main+xml"/>'
-        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="%s.worksheet+xml"/>'
+        '%s'
         '<Override PartName="/xl/styles.xml" ContentType="%s.styles+xml"/>'
-        '</Types>' % (ns, doc, doc, doc)
+        '</Types>' % (ns, doc, sheets, doc)
     )
 
 
-def write_xlsx(path, rows, sheet_name='BOM', widths=None, freeze_rows=1, autofilter=True):
-    """Write `rows` (lists of Cell or bare values) to a single-sheet workbook."""
-    normalized = [
-        [c if isinstance(c, Cell) else Cell(c) for c in row]
-        for row in rows
-    ]
-    width = max((len(row) for row in normalized), default=0)
-    for row in normalized:
-        while len(row) < width:
-            row.append(Cell(None))
+def write_xlsx(path, sheets, sheet_name='BOM', widths=None, freeze_rows=1, autofilter=True):
+    """Write one or more sheets to a workbook.
+
+    `sheets` is either a list of rows (a single sheet, named by `sheet_name`)
+    or a list of {'name', 'rows', 'widths'} dicts for a multi-sheet workbook.
+    """
+    if sheets and isinstance(sheets[0], dict) and 'rows' in sheets[0]:
+        specs = sheets
+    else:
+        specs = [{'name': sheet_name, 'rows': sheets, 'widths': widths}]
+
+    prepared = []
+    for index, spec in enumerate(specs):
+        rows = [
+            [c if isinstance(c, Cell) else Cell(c) for c in row]
+            for row in (spec.get('rows') or [])
+        ]
+        width = max((len(row) for row in rows), default=0)
+        for row in rows:
+            while len(row) < width:
+                row.append(Cell(None))
+        prepared.append({
+            'name': _escape(spec.get('name') or ('Sheet%d' % (index + 1)))[:31] or ('Sheet%d' % (index + 1)),
+            'rows': rows,
+            'widths': spec.get('widths'),
+        })
 
     ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
     rel_ns = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
     pkg_ns = 'http://schemas.openxmlformats.org/package/2006/relationships'
-    safe_name = _escape(sheet_name)[:31] or 'Sheet1'
 
+    sheet_tags = ''.join(
+        '<sheet name="%s" sheetId="%d" r:id="rId%d"/>' % (spec['name'], i + 1, i + 1)
+        for i, spec in enumerate(prepared)
+    )
     workbook = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<workbook xmlns="%s" xmlns:r="%s"><sheets>'
-        '<sheet name="%s" sheetId="1" r:id="rId1"/></sheets></workbook>'
-        % (ns, rel_ns, safe_name)
+        '<workbook xmlns="%s" xmlns:r="%s"><sheets>%s</sheets></workbook>'
+        % (ns, rel_ns, sheet_tags)
+    )
+
+    sheet_rels = ''.join(
+        '<Relationship Id="rId%d" Type="%s/worksheet" Target="worksheets/sheet%d.xml"/>'
+        % (i + 1, rel_ns, i + 1) for i in range(len(prepared))
     )
     workbook_rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="%s">'
-        '<Relationship Id="rId1" Type="%s/worksheet" Target="worksheets/sheet1.xml"/>'
-        '<Relationship Id="rId2" Type="%s/styles" Target="styles.xml"/>'
-        '</Relationships>' % (pkg_ns, rel_ns, rel_ns)
+        '<Relationships xmlns="%s">%s'
+        '<Relationship Id="rId%d" Type="%s/styles" Target="styles.xml"/>'
+        '</Relationships>' % (pkg_ns, sheet_rels, len(prepared) + 1, rel_ns)
     )
     root_rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -214,13 +240,14 @@ def write_xlsx(path, rows, sheet_name='BOM', widths=None, freeze_rows=1, autofil
     )
 
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr('[Content_Types].xml', _content_types_xml())
+        archive.writestr('[Content_Types].xml', _content_types_xml(len(prepared)))
         archive.writestr('_rels/.rels', root_rels)
         archive.writestr('xl/workbook.xml', workbook)
         archive.writestr('xl/_rels/workbook.xml.rels', workbook_rels)
         archive.writestr('xl/styles.xml', _styles_xml())
-        archive.writestr(
-            'xl/worksheets/sheet1.xml',
-            _sheet_xml(normalized, widths, freeze_rows, autofilter),
-        )
+        for index, spec in enumerate(prepared):
+            archive.writestr(
+                'xl/worksheets/sheet%d.xml' % (index + 1),
+                _sheet_xml(spec['rows'], spec['widths'], freeze_rows, autofilter),
+            )
     return path

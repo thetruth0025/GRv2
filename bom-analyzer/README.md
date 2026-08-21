@@ -1,10 +1,14 @@
 # BOM Supplier Analyzer
 
 Upload a bill of materials and get **lead time, cost, stock availability and lifecycle status**
-for every part, from **DigiKey** and **Mouser**, side by side in one table.
+for every part, from **DigiKey**, **Mouser** and **TrustedParts**, side by side in one table.
 
 Each supplier gets its own column group, so you can see at a glance which one is cheaper for a
 given line, which one can ship today, and which parts are heading for end of life.
+
+TrustedParts is an aggregator rather than a distributor: it searches many authorized distributors
+at once. Its column quotes whichever distributor is cheapest for your quantity, and expanding a row
+lists **every** distributor it found, with stock, minimum order and price for each.
 
 Two front ends over the same engine:
 
@@ -21,9 +25,10 @@ automatically — `Qty`, `MPN`, `Mfr. Part #`, `RefDes` and the other spellings 
 map to the right field, and a title block above the header row does not confuse it. If a guess is
 wrong you can remap any column from a dropdown without re-uploading.
 
-**Looks each part up at both suppliers.** One query per distinct part number per supplier, run
+**Looks each part up at every supplier.** One query per distinct part number per supplier, run
 with bounded parallelism and cached, so a 200-line BOM with repeated part numbers does not burn
-through a free-tier quota.
+through a free-tier quota. TrustedParts accepts up to 50 parts per request, so that whole BOM
+costs it four calls rather than two hundred.
 
 **Puts the answers side by side.** For each supplier: stock on hand, lead time, unit price at your
 quantity, extended price for the line, and lifecycle status. The cheapest and the soonest are
@@ -39,8 +44,9 @@ DigiKey lists several packaging options, the one that can actually ship your qua
 lowest total cost is chosen — a reel with a lower unit price but a 5,000-piece minimum is not a
 better way to buy 500.
 
-**Exports the comparison.** One CSV with every field for every supplier, respecting the current
-filter.
+**Exports the comparison.** One row per BOM line with every field for every supplier, respecting
+the current filter. When an aggregator is in play the `.xlsx` gains a second **Distributors** sheet
+carrying one row per distributor offer, and CSV gets a `-distributors` companion file.
 
 ---
 
@@ -69,6 +75,7 @@ Both are free. Either one alone is enough to start — the app just shows one su
 | --- | --- | --- |
 | DigiKey | [developer.digikey.com](https://developer.digikey.com/) | Create an organization and an app, add the **Product Information** API to it, then copy the **Client ID** and **Client Secret** |
 | Mouser | [mouser.com/api-hub](https://www.mouser.com/api-hub/) | Request a **Search API** key (not the Order API key) |
+| TrustedParts | [trustedparts.com](https://www.trustedparts.com/) | Register, then request API access under **My Account → Additional Features**. The key arrives as *Trial* with an expiry — email `user-requests@trustedparts.com` to move it to *Active* |
 
 DigiKey issues both Sandbox and Production keys. Sandbox returns fixed demo data, so use the
 Production pair unless you are specifically testing against the sandbox.
@@ -132,7 +139,7 @@ of the same column layout — `-f json` gives you the whole analysis for scripti
 | --- | --- |
 | `-o FILE` | Write the comparison (`.xlsx`, `.csv` or `.json`; `-f` overrides the extension) |
 | `-b N` | Building N units — multiplies every BOM quantity by N before pricing |
-| `-s digikey` / `-s mouser` | Query one supplier only |
+| `-s digikey` / `-s mouser` / `-s trustedparts` | Query one supplier only (repeatable) |
 | `--limit N` | Analyze just the first N parts, e.g. to sanity-check a big BOM |
 | `--list-columns` | Show the detected headers and mapping, then exit |
 | `--mpn-column COL` | Force a column by header name or 0-based index (one flag per field) |
@@ -181,6 +188,9 @@ All settings live in `.env`; `.env.example` documents each one. The ones worth k
 | --- | --- | --- |
 | `CACHE_TTL_HOURS` | `6` | How long a supplier answer is reused before being re-fetched |
 | `LOOKUP_CONCURRENCY` | `3` | Parallel supplier requests (worker threads) — raising it is faster but invites rate limiting |
+| `TRUSTEDPARTS_DISTRIBUTORS` | *(all)* | Comma-separated distributor names to restrict TrustedParts to |
+| `TRUSTEDPARTS_IN_STOCK_ONLY` | `false` | Return only distributors holding stock |
+| `TRUSTEDPARTS_USE_CACHED_DATA` | `false` | Use TrustedParts' cached data instead of real-time distributor feeds |
 | `MAX_PARTS_PER_REQUEST` | `500` | Largest BOM accepted in one run |
 | `ALLOWED_ORIGINS` | `*` | Restrict which origins may call the API if you host the frontend separately |
 | `CACHE_FILE` | `./.cache/parts.json` | On-disk cache location, or `none` to keep it in memory |
@@ -203,7 +213,7 @@ Settings panel, and set `ALLOWED_ORIGINS` on the server to the origin serving th
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 112 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 138 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py samples/sample-bom.csv        # the CLI
 ```
@@ -214,6 +224,7 @@ bom.py                    Command-line front end: argument parsing, terminal out
 bomlib/spreadsheet.py     CSV/TSV parsing, .xlsx reading, header detection, column mapping
 bomlib/digikey.py         OAuth 2.0 + Product Information V4 → catalog record
 bomlib/mouser.py          Search API v1 → catalog record
+bomlib/trustedparts.py    Inventory API v2 (aggregator, batched) → catalog record
 bomlib/normalize.py       Lead time, lifecycle and price-break normalization; cross-supplier comparison
 bomlib/lookup.py          Deduplication, caching, concurrency, BOM roll-up
 bomlib/cache.py           TTL cache with disk persistence
@@ -232,7 +243,9 @@ async machinery alike.
 
 Supplier responses are converted into a common **catalog record** — the quantity-independent facts
 about a product, including every packaging option with its own stock, minimum, multiple and price
-ladder. Pricing for a specific BOM line happens afterwards, in `record_to_offer`. That split is what
+ladder. An aggregator fits the same shape: each distributor's listing becomes a packaging option
+tagged with the distributor's name, so the one total-order-cost rule ranks across distributors and
+packagings at once, and the per-distributor breakdown is just that list regrouped. Pricing for a specific BOM line happens afterwards, in `record_to_offer`. That split is what
 lets the cache serve a re-run at a different quantity, and it keeps all the comparison logic in one
 supplier-agnostic place.
 
@@ -254,7 +267,16 @@ shapes, so no network access is needed.
 - **Matching is by manufacturer part number.** A part is only reported when the returned MPN is a
   credible match, and the detail panel says when the match was not exact — but verify anything
   surprising.
-- **Two suppliers.** The architecture takes more: a client needs `id`, `name`, `configured` and
-  `fetch_record(part)` returning a catalog record, then gets added to the list in `server.py`.
-  Everything downstream — comparison, roll-up, table columns, CSV export — is written against the
-  supplier list rather than against DigiKey and Mouser by name.
+- **TrustedParts reports no lead time.** Its API carries stock but no lead time field, so that
+  column reads as unknown for TrustedParts rather than guessing. Lines it stocks still compare
+  correctly, because stock on hand outranks any quoted lead time.
+- **TrustedParts lifecycle is a risk rating, and gated.** `LifecycleRisk` and `SupplyChainRisk` are
+  only populated if your account is approved for them, and they are *risk grades*, not statuses. A
+  grade like "Low" is shown as a risk field and deliberately does **not** drive the lifecycle
+  column — calling a part obsolete on the strength of a risk grade would assert something the API
+  never said. Text that genuinely names a status ("Obsolete") is promoted.
+- **Adding more suppliers.** A client needs `id`, `name`, `configured` and `fetch_record(part)`
+  returning a catalog record, then gets added to the list in `server.py` and `bom.py`. Set
+  `batch_size` and provide `fetch_records(parts)` instead to have it queried in batches. Everything
+  downstream — comparison, roll-up, table columns, exports — is written against the supplier list
+  rather than against any supplier by name.

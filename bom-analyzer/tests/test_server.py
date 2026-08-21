@@ -7,7 +7,8 @@ import urllib.request
 
 # Keep the test run away from the developer's real credentials and cache file.
 os.environ['CACHE_FILE'] = 'none'
-for name in ('DIGIKEY_CLIENT_ID', 'DIGIKEY_CLIENT_SECRET', 'MOUSER_API_KEY'):
+for name in ('DIGIKEY_CLIENT_ID', 'DIGIKEY_CLIENT_SECRET', 'MOUSER_API_KEY',
+             'TRUSTEDPARTS_API_KEY'):
     os.environ.pop(name, None)
 
 import server  # noqa: E402
@@ -58,9 +59,13 @@ class HealthTests(unittest.TestCase):
         result = call('/api/health')
         self.assertEqual(result['status'], 200)
         self.assertTrue(result['data']['ok'])
-        self.assertEqual([s['id'] for s in result['data']['suppliers']], ['digikey', 'mouser'])
+        self.assertEqual([s['id'] for s in result['data']['suppliers']],
+                         ['digikey', 'mouser', 'trustedparts'])
         # No credentials are set in this environment.
         self.assertTrue(all(s['configured'] is False for s in result['data']['suppliers']))
+        # The frontend needs to know which supplier aggregates other distributors.
+        aggregators = [s['id'] for s in result['data']['suppliers'] if s.get('aggregator')]
+        self.assertEqual(aggregators, ['trustedparts'])
 
 
 class ParseTests(unittest.TestCase):

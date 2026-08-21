@@ -490,3 +490,20 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* Aggregator distributor breakdown inside an expanded row. */
+.breaks.dist { margin-top: 10px; }
+.breaks.dist th.l, .breaks.dist td.l { text-align: left; }
+.breaks.dist tr.covers td { color: var(--text); }
+.breaks.dist tr:not(.covers) td { color: var(--text2); }
+.breaks.dist .rowmeta { margin-top: 6px; }
+
+/* With three suppliers the table scrolls wider than the viewport. Pinning the
+   expanded panel to the scroll container's left edge keeps the whole of it
+   readable without scrolling sideways to find the last supplier. */
+.detail {
+  position: sticky;
+  left: 0;
+  width: calc(100vw - 68px);
+  max-width: 100%;
+}

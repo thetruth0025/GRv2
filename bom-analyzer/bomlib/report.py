@@ -6,6 +6,7 @@ table, so the three can never drift apart.
 
 import csv
 import json
+import os
 import re
 
 from .normalize import format_lead_time
@@ -120,12 +121,77 @@ def build_rows(result, summary, styled=False):
     return rows
 
 
+DISTRIBUTOR_COLUMNS = [
+    'Row', 'Part Number', 'Quantity', 'Via', 'Distributor', 'Distributor P/N',
+    'Packaging', 'Stock', 'Availability', 'Min Order', 'Order Multiple',
+    'Order Qty', 'Unit Price', 'Extended Price', 'Currency', 'Covers Quantity',
+]
+DISTRIBUTOR_WIDTHS = [6, 26, 9, 14, 22, 22, 16, 11, 18, 10, 14, 10, 12, 14, 9, 15]
+
+
+def has_distributor_detail(result):
+    """True when any supplier returned a per-distributor breakdown."""
+    for row in result['rows']:
+        for offer in row['offers'].values():
+            if offer and offer.get('distributorOffers'):
+                return True
+    return False
+
+
+def build_distributor_rows(result, summary, styled=False):
+    """One row per distributor offer, for aggregators like TrustedParts.
+
+    A single row of the main sheet can hide a dozen distributors; this is where
+    they all become visible, filterable and sortable.
+    """
+    def cell(value, style=STYLE_DEFAULT):
+        return Cell(value, style) if styled else value
+
+    rows = [[cell(name, STYLE_HEADER) for name in DISTRIBUTOR_COLUMNS]]
+
+    for row in result['rows']:
+        for supplier_id, offer in row['offers'].items():
+            if not offer or not offer.get('distributorOffers'):
+                continue
+            for entry in offer['distributorOffers']:
+                covers = entry.get('stockSufficient')
+                rows.append([
+                    cell(row.get('row'), STYLE_INT),
+                    cell(row.get('mpn')),
+                    cell(row.get('quantity'), STYLE_INT),
+                    cell(offer.get('supplier')),
+                    cell(entry.get('distributor')),
+                    cell(entry.get('supplierPartNumber')),
+                    cell(entry.get('packaging')),
+                    cell(entry.get('stock'), STYLE_INT),
+                    cell(entry.get('availabilityText')),
+                    cell(entry.get('minimumOrderQuantity'), STYLE_INT),
+                    cell(entry.get('orderMultiple'), STYLE_INT),
+                    cell(entry.get('orderQuantity'), STYLE_INT),
+                    cell(entry.get('unitPrice'), STYLE_MONEY_FINE),
+                    cell(entry.get('extendedPrice'), STYLE_MONEY),
+                    cell(entry.get('currency')),
+                    cell('yes' if covers else ('no' if covers is False else ''),
+                         STYLE_DEFAULT if covers else STYLE_WARN),
+                ])
+    return rows
+
+
 def write_csv(path, result, summary):
     rows = build_rows(result, summary, styled=False)
     with open(path, 'w', encoding='utf-8-sig', newline='') as handle:
         writer = csv.writer(handle)
         for row in rows:
             writer.writerow([_csv_cell(value) for value in row])
+
+    # CSV has no second sheet, so the distributor breakdown goes beside it.
+    if has_distributor_detail(result):
+        base, extension = os.path.splitext(path)
+        companion = base + '-distributors' + (extension or '.csv')
+        with open(companion, 'w', encoding='utf-8-sig', newline='') as handle:
+            writer = csv.writer(handle)
+            for row in build_distributor_rows(result, summary):
+                writer.writerow([_csv_cell(value) for value in row])
     return path
 
 
@@ -148,14 +214,18 @@ def _is_number(text):
 
 
 def write_workbook(path, result, summary):
-    rows = build_rows(result, summary, styled=True)
-    return write_xlsx(
-        path, rows,
-        sheet_name='BOM Comparison',
-        widths=column_widths(result['suppliers']),
-        freeze_rows=1,
-        autofilter=True,
-    )
+    sheets = [{
+        'name': 'BOM Comparison',
+        'rows': build_rows(result, summary, styled=True),
+        'widths': column_widths(result['suppliers']),
+    }]
+    if has_distributor_detail(result):
+        sheets.append({
+            'name': 'Distributors',
+            'rows': build_distributor_rows(result, summary, styled=True),
+            'widths': DISTRIBUTOR_WIDTHS,
+        })
+    return write_xlsx(path, sheets, freeze_rows=1, autofilter=True)
 
 
 def write_json(path, result, summary):

@@ -707,6 +707,14 @@
 
     var lifecycleCell = '<td>' + lifecycleBadge(offer) + '</td>';
 
+    // An aggregator's column quotes one distributor, so say which one.
+    if (offer.aggregator && offer.distributor) {
+      var others = (offer.distributorCount || 1) - 1;
+      stockCell = stockCell.replace('</td>',
+        '<div class="rowmeta">' + esc(offer.distributor) +
+        (others > 0 ? ' <span class="muted">+' + others + ' more</span>' : '') + '</div></td>');
+    }
+
     return stockCell + leadCell + unitCell + extCell + lifecycleCell;
   }
 
@@ -765,6 +773,11 @@
         ['Lifecycle', offer.lifecycle + (offer.lifecycleRaw && offer.lifecycleRaw !== offer.lifecycle
           ? ' (' + offer.lifecycleRaw + ')' : '')],
         ['RoHS', offer.rohs],
+        ['Quoted via', offer.aggregator ? offer.distributor : null],
+        ['Distributors', offer.aggregator ? offer.distributorCount : null],
+        ['Lifecycle risk', offer.lifecycleRisk],
+        ['Supply chain risk', offer.supplyChainRisk],
+        ['US tariff', offer.affectedByTariff ? 'Affected' : null],
         ['Replacement', offer.suggestedReplacement],
         ['Description', offer.description],
       ].filter(function (pair) {
@@ -786,6 +799,31 @@
           }).join('') + '</table></div>';
       }
 
+      // Every distributor the aggregator found, which is the whole point of
+      // including it alongside the single-distributor suppliers.
+      var distributors = '';
+      if (offer.distributorOffers && offer.distributorOffers.length) {
+        distributors = '<div class="breaks dist"><table>' +
+          '<tr><th class="l">Distributor</th><th class="l">P/N</th><th>Stock</th>' +
+          '<th>MOQ</th><th>Unit</th><th>Extended</th></tr>' +
+          offer.distributorOffers.map(function (entry) {
+            var covers = entry.stockSufficient;
+            return '<tr class="' + (covers ? 'covers' : '') + '">' +
+              '<td class="l">' + esc(entry.distributor || '—') + '</td>' +
+              '<td class="l">' + esc(entry.supplierPartNumber || '—') + '</td>' +
+              '<td>' + (entry.stock === null || entry.stock === undefined
+                ? esc(entry.availabilityText || '—') : count(entry.stock)) +
+                (covers === false ? ' <span class="badge warn">short</span>' : '') + '</td>' +
+              '<td>' + count(entry.minimumOrderQuantity) + '</td>' +
+              '<td>' + esc(money(entry.unitPrice, entry.currency) || '—') + '</td>' +
+              '<td>' + esc(money(entry.extendedPrice, entry.currency) || '—') + '</td>' +
+              '</tr>';
+          }).join('') + '</table>' +
+          '<div class="rowmeta">' + offer.distributorOffers.length +
+          ' authorized distributor' + (offer.distributorOffers.length === 1 ? '' : 's') +
+          ' via ' + esc(offer.supplier) + '</div></div>';
+      }
+
       var links = [];
       var productUrl = safeUrl(offer.productUrl);
       var datasheetUrl = safeUrl(offer.datasheetUrl);
@@ -797,7 +835,7 @@
       }
 
       return '<div class="detail-col"><h4>' + esc(supplier.name) + lifecycleBadge(offer) + '</h4>' +
-        dl + breaks +
+        dl + breaks + distributors +
         (links.length ? '<div class="detail-links">' + links.join('') + '</div>' : '') +
         '</div>';
     }).join('');

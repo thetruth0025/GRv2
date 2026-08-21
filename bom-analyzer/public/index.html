@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0f1115" />
-<meta name="description" content="Upload a bill of materials and compare DigiKey and Mouser on price, lead time, stock, and lifecycle status side by side." />
+<meta name="description" content="Upload a bill of materials and compare DigiKey, Mouser and TrustedParts on price, lead time, stock, and lifecycle status side by side." />
 <link rel="manifest" href="manifest.json" />
 <link rel="icon" href="icon.svg" type="image/svg+xml" />
 <title>BOM Supplier Analyzer</title>
@@ -21,7 +21,7 @@
       <div>
         <div class="eyebrow">Procurement</div>
         <h1>BOM Supplier Analyzer</h1>
-        <p>Upload a bill of materials and get lead time, cost, stock and lifecycle status for every part &mdash; from DigiKey and Mouser side by side.</p>
+        <p>Upload a bill of materials and get lead time, cost, stock and lifecycle status for every part &mdash; from DigiKey, Mouser and TrustedParts side by side.</p>
       </div>
       <button type="button" id="settingsBtn" class="icon-btn" aria-label="Settings" aria-expanded="false" aria-controls="settingsPanel">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5m7.43-2.53a7.6 7.6 0 0 0 0-1.94l2.05-1.58a.5.5 0 0 0 .12-.64l-1.94-3.36a.5.5 0 0 0-.6-.22l-2.42.97a7.3 7.3 0 0 0-1.68-.97l-.36-2.57a.5.5 0 0 0-.5-.42h-3.88a.5.5 0 0 0-.5.42l-.36 2.57a7.3 7.3 0 0 0-1.68.97l-2.42-.97a.5.5 0 0 0-.6.22L2.4 8.81a.5.5 0 0 0 .12.64l2.05 1.58a7.6 7.6 0 0 0 0 1.94L2.52 14.6a.5.5 0 0 0-.12.64l1.94 3.36a.5.5 0 0 0 .6.22l2.42-.97a7.3 7.3 0 0 0 1.68.97l.36 2.57a.5.5 0 0 0 .5.42h3.88a.5.5 0 0 0 .5-.42l.36-2.57a7.3 7.3 0 0 0 1.68-.97l2.42.97a.5.5 0 0 0 .6-.22l1.94-3.36a.5.5 0 0 0-.12-.64Z"/></svg>
@@ -124,7 +124,7 @@
     <h2><span class="num">!</span> Backend not reachable</h2>
     <p class="sub">This app needs its Python backend running. Neither supplier API can be called straight from a browser: DigiKey requires an OAuth client secret and Mouser requires an API key, and neither sends the CORS headers a browser would need.</p>
     <ol class="steps">
-      <li>Get free API credentials: a client ID and secret from <a href="https://developer.digikey.com/" target="_blank" rel="noopener">developer.digikey.com</a>, an API key from <a href="https://www.mouser.com/api-hub/" target="_blank" rel="noopener">mouser.com/api-hub</a>. Either one alone is enough to start.</li>
+      <li>Get free API credentials: a client ID and secret from <a href="https://developer.digikey.com/" target="_blank" rel="noopener">developer.digikey.com</a>, an API key from <a href="https://www.mouser.com/api-hub/" target="_blank" rel="noopener">mouser.com/api-hub</a>, and one from <a href="https://www.trustedparts.com/" target="_blank" rel="noopener">trustedparts.com</a> under My Account &rarr; Additional Features. Any one alone is enough to start.</li>
       <li>In <code>bom-analyzer/</code>, copy <code>.env.example</code> to <code>.env</code> and fill in the credentials you have.</li>
       <li>Run <code>python3 server.py</code> (Python 3.8 or newer, standard library only — nothing to install).</li>
       <li>Open <code>http://localhost:8787</code>, or set the backend URL in Settings if you are running it elsewhere.</li>
@@ -132,7 +132,7 @@
   </section>
 
   <footer>
-    <p>Pricing, stock and lifecycle data comes live from the DigiKey and Mouser APIs. Always confirm on the supplier's own page before placing an order &mdash; stock moves fast.</p>
+    <p>Pricing, stock and lifecycle data comes live from the DigiKey, Mouser and TrustedParts APIs. TrustedParts aggregates authorized distributors &mdash; expand a row to see every distributor it found. Always confirm on the supplier's own page before placing an order &mdash; stock moves fast.</p>
   </footer>
 </div>
 

@@ -348,7 +348,74 @@ def record_to_offer(record, part):
         offer['factoryStock'] = factory_stock
     if record.get('suggestedReplacement'):
         offer['suggestedReplacement'] = record['suggestedReplacement']
+
+    # Pass through the extra facts an aggregator supplies that a single
+    # distributor does not.
+    for field in ('lifecycleRisk', 'supplyChainRisk', 'affectedByTariff'):
+        if record.get(field) is not None:
+            offer[field] = record[field]
+
+    # An aggregator's variations span several distributors, so the winning one
+    # names who to buy from and the rest stay available for the detail view.
+    if record.get('aggregator'):
+        offer['aggregator'] = True
+        offer['distributor'] = (variation or {}).get('distributor')
+        offer['distributorOffers'] = distributor_offers(record, part)
+        offer['distributorCount'] = len(offer['distributorOffers'])
     return offer
+
+
+def distributor_offers(record, part):
+    """Price every distributor an aggregator returned, best first.
+
+    Each distributor may list the part in several packagings; within one
+    distributor the same total-order-cost rule picks which to quote, so the
+    per-distributor rows are directly comparable with each other and with the
+    single-distributor suppliers.
+    """
+    grouped = {}
+    for variation in record.get('variations') or []:
+        if not variation:
+            continue
+        grouped.setdefault(variation.get('distributor') or 'Unknown', []).append(variation)
+
+    offers = []
+    for name, variations in grouped.items():
+        chosen = pick_variation(variations, part.get('quantity')) or {}
+        stock = chosen.get('stock')
+        entry = build_offer({
+            'supplier': name,
+            'supplierPartNumber': chosen.get('supplierPartNumber'),
+            'manufacturer': record.get('manufacturer'),
+            'manufacturerPartNumber': record.get('manufacturerPartNumber'),
+            'description': chosen.get('description') or record.get('description'),
+            'productUrl': chosen.get('productUrl') or record.get('productUrl'),
+            'datasheetUrl': chosen.get('datasheetUrl') or record.get('datasheetUrl'),
+            'packaging': chosen.get('packaging'),
+            'stock': stock,
+            'leadTime': chosen.get('leadTime'),
+            'lifecycle': record.get('lifecycle'),
+            'rohs': chosen.get('rohs') or record.get('rohs'),
+            'quantity': part.get('quantity'),
+            'minimumOrderQuantity': chosen.get('minimumOrderQuantity', 1),
+            'orderMultiple': chosen.get('orderMultiple', 1),
+            'priceBreaks': chosen.get('priceBreaks') or [],
+            'currency': chosen.get('currency') or record.get('currency'),
+            'matchCount': 1,
+            'exactMatch': record.get('exactMatch'),
+        })
+        entry['distributor'] = name
+        entry['availabilityText'] = chosen.get('availabilityText')
+        entry['packagingOptions'] = len(variations)
+        offers.append(entry)
+
+    # Cheapest that can actually cover the line first; unpriced last.
+    offers.sort(key=lambda o: (
+        0 if o.get('stockSufficient') else 1,
+        o['extendedPrice'] if o.get('extendedPrice') is not None else float('inf'),
+        o.get('distributor') or '',
+    ))
+    return offers
 
 
 def missing_offer(supplier, reason=None):

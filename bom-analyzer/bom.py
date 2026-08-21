@@ -25,6 +25,7 @@ from bomlib.cache import PartCache  # noqa: E402
 from bomlib.digikey import DigiKeyClient  # noqa: E402
 from bomlib.lookup import LookupService, summarize_bom  # noqa: E402
 from bomlib.mouser import MouserClient  # noqa: E402
+from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.report import (  # noqa: E402
     WRITERS,
     Palette,
@@ -69,7 +70,7 @@ def build_parser():
         help='Number of units being built; multiplies every BOM quantity by N (default: 1).',
     )
     parser.add_argument(
-        '-s', '--supplier', action='append', choices=['digikey', 'mouser'],
+        '-s', '--supplier', action='append', choices=['digikey', 'mouser', 'trustedparts'],
         help='Query only this supplier. Repeatable.',
     )
     parser.add_argument(
@@ -141,14 +142,15 @@ def main(argv=None):
     service, cache = build_service(args)
     if not service.clients:
         print('error: no supplier credentials found. Copy .env.example to .env and add your '
-              'API keys, or set DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET / MOUSER_API_KEY.',
+              'API keys, or set DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET / MOUSER_API_KEY / '
+              'TRUSTEDPARTS_API_KEY.',
               file=sys.stderr)
         return EXIT_ERROR
 
     if args.clear_cache and cache is not None:
         cache.clear()
 
-    names = ' and '.join(c.name for c in service.clients)
+    names = _join_names([c.name for c in service.clients])
     log('Analyzing %s from %s against %s…'
         % (_plural(len(lines), 'part'), source, names))
 
@@ -304,7 +306,18 @@ def build_service(args):
         currency=os.environ.get('MOUSER_CURRENCY'),
     )
 
-    clients = [digikey, mouser]
+    trustedparts = TrustedPartsClient(
+        api_key=os.environ.get('TRUSTEDPARTS_API_KEY'),
+        currency=os.environ.get('TRUSTEDPARTS_CURRENCY') or os.environ.get('DIGIKEY_CURRENCY'),
+        country=os.environ.get('TRUSTEDPARTS_COUNTRY'),
+        language=os.environ.get('TRUSTEDPARTS_LANGUAGE'),
+        user_agent=os.environ.get('TRUSTEDPARTS_USER_AGENT'),
+        distributors=[d.strip() for d in str(os.environ.get('TRUSTEDPARTS_DISTRIBUTORS') or '').split(',') if d.strip()],
+        in_stock_only=str(os.environ.get('TRUSTEDPARTS_IN_STOCK_ONLY', '')).strip().lower() in ('1', 'true', 'yes'),
+        use_cached_data=str(os.environ.get('TRUSTEDPARTS_USE_CACHED_DATA', '')).strip().lower() in ('1', 'true', 'yes'),
+    )
+
+    clients = [digikey, mouser, trustedparts]
     if args.supplier:
         wanted = set(args.supplier)
         clients = [c for c in clients if c.id in wanted]
@@ -471,6 +484,13 @@ def _make_logger(quiet):
         if not quiet:
             print(message)
     return log
+
+
+def _join_names(names):
+    """"A", "A and B", "A, B and C"."""
+    if len(names) <= 1:
+        return names[0] if names else ''
+    return '%s and %s' % (', '.join(names[:-1]), names[-1])
 
 
 def _plural(count, noun):

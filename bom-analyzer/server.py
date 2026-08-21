@@ -28,6 +28,7 @@ from bomlib.cache import PartCache  # noqa: E402
 from bomlib.digikey import DigiKeyClient  # noqa: E402
 from bomlib.lookup import LookupService, summarize_bom  # noqa: E402
 from bomlib.mouser import MouserClient  # noqa: E402
+from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.spreadsheet import extract_bom, line_from_row, parse_workbook  # noqa: E402
 
 PUBLIC_DIR = os.path.join(BASE_DIR, 'public')
@@ -72,6 +73,17 @@ mouser = MouserClient(
     currency=os.environ.get('MOUSER_CURRENCY'),
 )
 
+trustedparts = TrustedPartsClient(
+    api_key=os.environ.get('TRUSTEDPARTS_API_KEY'),
+    currency=os.environ.get('TRUSTEDPARTS_CURRENCY') or os.environ.get('DIGIKEY_CURRENCY'),
+    country=os.environ.get('TRUSTEDPARTS_COUNTRY'),
+    language=os.environ.get('TRUSTEDPARTS_LANGUAGE'),
+    user_agent=os.environ.get('TRUSTEDPARTS_USER_AGENT'),
+    distributors=[d.strip() for d in str(os.environ.get('TRUSTEDPARTS_DISTRIBUTORS') or '').split(',') if d.strip()],
+    in_stock_only=_bool_env('TRUSTEDPARTS_IN_STOCK_ONLY'),
+    use_cached_data=_bool_env('TRUSTEDPARTS_USE_CACHED_DATA'),
+)
+
 _cache_file = os.environ.get('CACHE_FILE')
 if _cache_file == 'none':
     _cache_path = None
@@ -84,7 +96,7 @@ cache = PartCache(
 )
 
 lookup_service = LookupService(
-    clients=[digikey, mouser],
+    clients=[digikey, mouser, trustedparts],
     cache=cache,
     concurrency=_int_env('LOOKUP_CONCURRENCY', 3),
 )
@@ -147,6 +159,8 @@ class Handler(BaseHTTPRequestHandler):
                     {'id': 'digikey', 'name': 'DigiKey', 'configured': digikey.configured,
                      'sandbox': digikey.sandbox},
                     {'id': 'mouser', 'name': 'Mouser', 'configured': mouser.configured},
+                    {'id': 'trustedparts', 'name': 'TrustedParts', 'configured': trustedparts.configured,
+                     'aggregator': True},
                 ],
                 'maxPartsPerRequest': MAX_PARTS_PER_REQUEST,
                 'cacheEntries': len(cache),
@@ -410,7 +424,7 @@ def build_server(host=HOST, port=PORT):
 
 def main():
     httpd = build_server()
-    configured = [c.name for c in (digikey, mouser) if c.configured]
+    configured = [c.name for c in (digikey, mouser, trustedparts) if c.configured]
     print('BOM Supplier Analyzer listening on http://localhost:%d' % httpd.server_address[1])
     if configured:
         print('Suppliers configured: %s%s' % (
