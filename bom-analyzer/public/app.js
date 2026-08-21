@@ -669,6 +669,8 @@
       return renderRow(row, suppliers);
     }).join('');
 
+    syncStickyOffset();
+
     Array.prototype.forEach.call(el.resultsBody.querySelectorAll('.expander'), function (button) {
       button.addEventListener('click', function () {
         var index = button.getAttribute('data-index');
@@ -677,6 +679,19 @@
         renderTable();
       });
     });
+  }
+
+  // The part column is pinned beside the expander column, so its offset has to
+  // match that column's real rendered width — assuming a value leaves a gap
+  // that scrolled content shows through.
+  function syncStickyOffset() {
+    var first = el.resultsBody.querySelector('td.sticky-a');
+    if (!first) return;
+    var width = Math.ceil(first.getBoundingClientRect().width);
+    if (width > 0) {
+      el.resultsTable.style.setProperty('--sticky-b-left', width + 'px');
+      el.resultsTable.style.setProperty('--sticky-a-width', width + 'px');
+    }
   }
 
   function renderRow(row, suppliers) {

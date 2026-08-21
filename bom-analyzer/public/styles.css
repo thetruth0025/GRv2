@@ -343,7 +343,11 @@ tbody tr.part-row.expanded > td { background: rgba(56, 189, 248, .05); }
 /* The comparison is wider than most screens, so the part being compared stays
    pinned while the supplier columns scroll under it. */
 table.results th.sticky-a, table.results td.sticky-a { position: sticky; left: 0; z-index: 2; }
-table.results th.sticky-b, table.results td.sticky-b { position: sticky; left: 36px; z-index: 2; }
+table.results th.sticky-b, table.results td.sticky-b {
+  position: sticky;
+  left: var(--sticky-b-left, 36px);
+  z-index: 2;
+}
 table.results tbody td.sticky-a, table.results tbody td.sticky-b { background: var(--surface); }
 table.results tbody tr.part-row.expanded td.sticky-a,
 table.results tbody tr.part-row.expanded td.sticky-b { background: #1b2129; }
@@ -352,7 +356,7 @@ table.results td.sticky-b, table.results th.sticky-b { border-right: 1px solid v
 
 /* Without a floor these columns collapse to their longest word and the rows
    grow several lines tall. */
-td.sticky-a, th.sticky-a { width: 36px; }
+td.sticky-a, th.sticky-a { width: var(--sticky-a-width, 36px); }
 .part-cell { min-width: 168px; }
 .verdict { min-width: 186px; display: block; }
 
@@ -522,4 +526,5 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
 .attr-link:hover { color: var(--text); }
 .attr-text { font-weight: 600; }
 .attr-logo { height: 20px; width: auto; display: block; }
+.attr-logo[hidden] { display: none; }
 .attr-name { font-family: 'Syne', sans-serif; font-weight: 700; color: var(--accent2); }
