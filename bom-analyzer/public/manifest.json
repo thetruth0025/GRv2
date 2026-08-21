@@ -1,0 +1,19 @@
+{
+  "name": "BOM Supplier Analyzer",
+  "short_name": "BOM Analyzer",
+  "description": "Upload a bill of materials and compare DigiKey and Mouser on price, lead time, stock, and lifecycle status side by side.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0f1115",
+  "theme_color": "#0f1115",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
