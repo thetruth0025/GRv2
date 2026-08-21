@@ -351,7 +351,7 @@ def record_to_offer(record, part):
 
     # Pass through the extra facts an aggregator supplies that a single
     # distributor does not.
-    for field in ('lifecycleRisk', 'supplyChainRisk', 'affectedByTariff'):
+    for field in ('lifecycleRisk', 'supplyChainRisk', 'affectedByTariff', 'attribution'):
         if record.get(field) is not None:
             offer[field] = record[field]
 

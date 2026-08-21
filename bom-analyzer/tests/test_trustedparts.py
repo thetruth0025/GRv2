@@ -325,12 +325,15 @@ class ExportTests(unittest.TestCase):
         result, summary = self._result()
         rows = build_distributor_rows(result, summary)
         self.assertEqual(rows[0][:5], ['Row', 'Part Number', 'Quantity', 'Via', 'Distributor'])
-        self.assertEqual(len(rows), 4)  # header + three distributors
-        names = sorted(r[4] for r in rows[1:])
+        # Header, three distributors, then the required attribution line.
+        self.assertEqual(len(rows), 5)
+        offers = rows[1:-1]
+        names = sorted(r[4] for r in offers)
         self.assertEqual(names, ['Arrow Electronics', 'Future Electronics', 'TTI Inc'])
-        for row in rows[1:]:
+        for row in offers:
             self.assertEqual(row[1], 'STM32F103C8T6')
             self.assertEqual(row[3], 'TrustedParts')
+        self.assertIn('Powered by TrustedParts.com', rows[-1][0])
 
     def test_a_bom_without_an_aggregator_gets_no_breakdown(self):
         class Single:
@@ -355,3 +358,79 @@ class ExportTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AttributionTests(unittest.TestCase):
+    """TrustedParts require visible "Powered by" attribution with a followable
+    link back to them, targeting the part's own page where there is one."""
+
+    def setUp(self):
+        self.client = TrustedPartsClient(api_key='key')
+
+    def test_a_relative_link_is_resolved_against_their_site(self):
+        from bomlib.trustedparts import absolute_url
+        self.assertEqual(absolute_url('/en/part/murata/GRM155R61A104KA01D'),
+                         'https://www.trustedparts.com/en/part/murata/GRM155R61A104KA01D')
+        self.assertEqual(absolute_url('en/part/x'), 'https://www.trustedparts.com/en/part/x')
+        self.assertEqual(absolute_url('https://elsewhere.test/p'), 'https://elsewhere.test/p')
+        self.assertIsNone(absolute_url(''))
+
+    def test_the_primary_link_and_per_part_links_are_separated(self):
+        from bomlib.trustedparts import collect_attribution_links
+        links = collect_attribution_links({'Links': [
+            {'Key': 'Primary', 'SearchToken': '374624B00032G', 'Manufacturer': 'Aavid',
+             'Url': '/en/part/aavid/374624B00032G'},
+            {'Key': '374624B00032G||Aavid', 'SearchToken': '374624B00032G', 'Manufacturer': 'Aavid',
+             'Url': '/en/part/aavid/374624B00032G'},
+            {'Key': 'GRM155R61A104KA01D||Murata Manufacturing', 'SearchToken': 'GRM155R61A104KA01D',
+             'Manufacturer': 'Murata Manufacturing', 'Url': '/en/part/murata/GRM155R61A104KA01D'},
+        ]})
+        self.assertEqual(links['primary'],
+                         'https://www.trustedparts.com/en/part/aavid/374624B00032G')
+        self.assertEqual(sorted(links['byToken']),
+                         ['374624B00032G', 'GRM155R61A104KA01D'])
+        self.assertEqual(links['byToken']['GRM155R61A104KA01D'],
+                         'https://www.trustedparts.com/en/part/murata/GRM155R61A104KA01D')
+
+    def test_a_response_without_a_links_section_still_works(self):
+        # The published OpenAPI schema does not describe Links, so its absence
+        # must not break the lookup.
+        record = self.client.to_records(RESPONSE, [PART])['STM32F103C8T6']
+        self.assertIsNotNone(record['attribution'])
+        self.assertEqual(record['attribution']['text'], 'Powered by')
+        self.assertEqual(record['attribution']['name'], 'TrustedParts.com')
+
+    def test_the_part_link_is_preferred_over_the_product_url(self):
+        import copy
+        payload = copy.deepcopy(RESPONSE)
+        payload['Links'] = [
+            {'Key': 'Primary', 'SearchToken': 'STM32F103C8T6', 'Url': '/en/part/stm/STM32F103C8T6'},
+            {'Key': 'STM32F103C8T6||ST', 'SearchToken': 'STM32F103C8T6',
+             'Url': '/en/part/stm/STM32F103C8T6'},
+        ]
+        record = self.client.to_records(payload, [PART])['STM32F103C8T6']
+        self.assertEqual(record['attribution']['url'],
+                         'https://www.trustedparts.com/en/part/stm/STM32F103C8T6')
+
+    def test_attribution_falls_back_to_their_home_page(self):
+        import copy
+        payload = copy.deepcopy(RESPONSE)
+        payload['PartResults'][0]['ProductUrl'] = None
+        record = self.client.to_records(payload, [PART])['STM32F103C8T6']
+        self.assertEqual(record['attribution']['url'], 'https://www.trustedparts.com')
+
+    def test_attribution_reaches_the_offer_the_ui_renders(self):
+        record = self.client.to_records(RESPONSE, [PART])['STM32F103C8T6']
+        offer = record_to_offer(record, PART)
+        self.assertEqual(offer['attribution']['text'], 'Powered by')
+        self.assertTrue(offer['attribution']['url'].startswith('https://www.trustedparts.com'))
+
+    def test_exports_carry_the_attribution_line(self):
+        from bomlib.report import attribution_notes
+        stub = BatchTests.BatchStub()
+        service = LookupService(clients=[stub], cache=None)
+        result = service.lookup_parts([{'row': 2, 'mpn': 'STM32F103C8T6', 'quantity': 10}])
+        notes = attribution_notes(result)
+        self.assertEqual(len(notes), 1)
+        self.assertIn('Powered by TrustedParts.com', notes[0])
+        self.assertIn('trustedparts.com', notes[0])

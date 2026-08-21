@@ -507,3 +507,19 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
   width: calc(100vw - 68px);
   max-width: 100%;
 }
+
+/* Supplier attribution. TrustedParts require "Powered by" plus their logo,
+   visible wherever their data is displayed, with a followable link. */
+.attribution { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 14px; }
+.attr-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  text-decoration: none;
+  color: var(--text2);
+  font-size: 0.78rem;
+}
+.attr-link:hover { color: var(--text); }
+.attr-text { font-weight: 600; }
+.attr-logo { height: 20px; width: auto; display: block; }
+.attr-name { font-family: 'Syne', sans-serif; font-weight: 700; color: var(--accent2); }

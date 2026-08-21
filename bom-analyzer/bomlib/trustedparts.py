@@ -27,6 +27,14 @@ from .normalize import normalize_lifecycle, parse_money, parse_quantity, Lifecyc
 
 SUPPLIER = 'TrustedParts'
 BASE = 'https://api.trustedparts.com'
+SITE = 'https://www.trustedparts.com'
+
+# TrustedParts require that a publicly available application displaying their
+# data shows "Powered by" followed by their logo, linked back to them, and that
+# the link is followable — no rel="nofollow", no temporary redirect.
+ATTRIBUTION_TEXT = 'Powered by'
+ATTRIBUTION_NAME = 'TrustedParts.com'
+ATTRIBUTION_HOME = SITE
 
 # The API accepts up to 50 search queries per request.
 MAX_QUERIES_PER_REQUEST = 50
@@ -114,6 +122,7 @@ class TrustedPartsClient:
         if not isinstance(results, list):
             return {}
 
+        links = collect_attribution_links(data)
         by_key = {}
         for result in results:
             if not isinstance(result, dict):
@@ -132,7 +141,7 @@ class TrustedPartsClient:
             best = pick_best_result(candidates, part.get('manufacturer'))
             if best is None:
                 continue
-            record = build_record(best, part, self.currency)
+            record = build_record(best, part, self.currency, links)
             if record:
                 records[part.get('mpn')] = record
         return records
@@ -148,6 +157,55 @@ class TrustedPartsClient:
 
 def normalize_key(text):
     return re.sub(r'[^A-Z0-9]', '', str(text or '').upper())
+
+
+def absolute_url(url):
+    """Attribution links come back as site-relative paths."""
+    text = str(url or '').strip()
+    if not text:
+        return None
+    if text.startswith('http://') or text.startswith('https://'):
+        return text
+    return SITE + ('' if text.startswith('/') else '/') + text
+
+
+def collect_attribution_links(payload):
+    """Pull the attribution Links section out of a response.
+
+    The published OpenAPI schema does not describe this section, but the
+    attribution documentation does, so it is read defensively: from the
+    response root or from a part result, tolerating both the documented
+    {Key, SearchToken, Manufacturer, Url} shape and the {Type, Url} shape the
+    schema uses elsewhere. A response without it simply yields no links.
+    """
+    primary = None
+    by_token = {}
+
+    def absorb(links):
+        nonlocal primary
+        if not isinstance(links, list):
+            return
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            url = absolute_url(link.get('Url'))
+            if not url:
+                continue
+            key = str(link.get('Key') or '').strip()
+            if key.lower() == 'primary':
+                primary = primary or url
+                continue
+            token = normalize_key(link.get('SearchToken'))
+            if token:
+                by_token.setdefault(token, url)
+
+    if isinstance(payload, dict):
+        absorb(payload.get('Links'))
+        for result in payload.get('PartResults') or []:
+            if isinstance(result, dict):
+                absorb(result.get('Links'))
+
+    return {'primary': primary, 'byToken': by_token}
 
 
 def pick_best_result(results, manufacturer=None):
@@ -244,7 +302,7 @@ def packaging_of(entry):
     return None, None
 
 
-def build_record(result, part, currency):
+def build_record(result, part, currency, links=None):
     """Flatten PartResults → Distributors → DistributorResults into variations.
 
     Each variation carries the distributor that offers it, so the shared
@@ -288,14 +346,32 @@ def build_record(result, part, currency):
     known_stock = [v['stock'] for v in variations if isinstance(v['stock'], (int, float))]
     lifecycle_risk = str(result.get('LifecycleRisk') or '').strip() or None
 
+    # Attribution target for this line: the part's own TrustedParts page when
+    # the response names one, else the product page, else their home page.
+    links = links or {'primary': None, 'byToken': {}}
+    part_url = (
+        links['byToken'].get(normalize_key(result.get('PartNumber')))
+        or links['byToken'].get(normalize_key(part.get('mpn')))
+        or absolute_url(result.get('ProductUrl'))
+        or links.get('primary')
+        or ATTRIBUTION_HOME
+    )
+
     return {
         'supplier': SUPPLIER,
         'aggregator': True,
         'manufacturer': result.get('Manufacturer') or None,
         'manufacturerPartNumber': result.get('PartNumber') or None,
         'description': next((v['description'] for v in variations if v['description']), None),
-        # The TrustedParts product page is the attribution link back to them.
-        'productUrl': result.get('ProductUrl') or None,
+        # The TrustedParts page for this part, which is also the attribution
+        # link back to them for this row.
+        'productUrl': part_url,
+        'attribution': {
+            'text': ATTRIBUTION_TEXT,
+            'name': ATTRIBUTION_NAME,
+            'url': part_url,
+            'home': ATTRIBUTION_HOME,
+        },
         'datasheetUrl': next((v['datasheetUrl'] for v in variations if v['datasheetUrl']), None),
         # The API reports no lead time, so none is claimed.
         'leadTime': None,

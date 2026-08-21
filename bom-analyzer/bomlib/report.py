@@ -138,6 +138,27 @@ def has_distributor_detail(result):
     return False
 
 
+def attribution_notes(result):
+    """Attribution lines required by any supplier that asks for them."""
+    notes = []
+    seen = set()
+    for row in result['rows']:
+        for offer in row['offers'].values():
+            attribution = offer and offer.get('attribution')
+            if not attribution:
+                continue
+            key = attribution.get('name')
+            if key in seen:
+                continue
+            seen.add(key)
+            notes.append('%s %s — %s' % (
+                attribution.get('text') or 'Powered by',
+                attribution.get('name') or '',
+                attribution.get('home') or attribution.get('url') or '',
+            ))
+    return notes
+
+
 def build_distributor_rows(result, summary, styled=False):
     """One row per distributor offer, for aggregators like TrustedParts.
 
@@ -174,6 +195,10 @@ def build_distributor_rows(result, summary, styled=False):
                     cell('yes' if covers else ('no' if covers is False else ''),
                          STYLE_DEFAULT if covers else STYLE_WARN),
                 ])
+
+    # Required attribution, in the first column of a trailing row.
+    for note in attribution_notes(result):
+        rows.append([cell(note, STYLE_MUTED)] + [cell('')] * (len(DISTRIBUTOR_COLUMNS) - 1))
     return rows
 
 

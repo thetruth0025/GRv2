@@ -48,6 +48,24 @@ better way to buy 500.
 the current filter. When an aggregator is in play the `.xlsx` gains a second **Distributors** sheet
 carrying one row per distributor offer, and CSV gets a `-distributors` companion file.
 
+### Attribution
+
+TrustedParts require that a **publicly available** application displaying their API data shows the
+words *"Powered by"* followed by their logo, linked back to trustedparts.com, and that the link is
+followable — no `rel="nofollow"`, no temporary redirect. The app implements this:
+
+- A visible attribution block sits with the results, and each expanded row carries a per-part link.
+- Links use `rel="noopener"` only, deliberately **not** `nofollow`.
+- The target follows their guidance: a single-part run links to that part's TrustedParts page (from
+  the `Links` section of the response), a multi-part run links to their home page.
+
+**One thing you must supply:** their logo. It is their trademark, so it is not bundled here —
+see [`public/TRUSTEDPARTS-LOGO.md`](public/TRUSTEDPARTS-LOGO.md). Until you add
+`public/trustedparts-logo.svg` the attribution renders as the linked words "Powered by
+TrustedParts.com", which is visible attribution but not the logo their guidance asks for. Add the
+file before deploying publicly. Running on localhost for your own use is not covered by the
+requirement.
+
 ---
 
 ## Why there is a backend
@@ -213,7 +231,7 @@ Settings panel, and set `ALLOWED_ORIGINS` on the server to the origin serving th
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 138 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 145 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py samples/sample-bom.csv        # the CLI
 ```
@@ -275,6 +293,12 @@ shapes, so no network access is needed.
   grade like "Low" is shown as a risk field and deliberately does **not** drive the lifecycle
   column — calling a part obsolete on the strength of a risk grade would assert something the API
   never said. Text that genuinely names a status ("Obsolete") is promoted.
+- **The attribution `Links` section is undocumented.** TrustedParts' attribution guide describes a
+  `Links` array of `{Key, SearchToken, Manufacturer, Url}` with one entry keyed `Primary`, but their
+  published OpenAPI schema does not include it. It is read defensively — from the response root or a
+  part result, tolerating that shape and the `{Type, Url}` shape the schema uses elsewhere — and its
+  absence simply falls back to the part's `ProductUrl`, then their home page. If the live API turns
+  out to place it somewhere else, that is the code to adjust.
 - **Adding more suppliers.** A client needs `id`, `name`, `configured` and `fetch_record(part)`
   returning a catalog record, then gets added to the list in `server.py` and `bom.py`. Set
   `batch_size` and provide `fetch_records(parts)` instead to have it queried in batches. Everything

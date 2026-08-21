@@ -28,6 +28,7 @@ from bomlib.cache import PartCache  # noqa: E402
 from bomlib.digikey import DigiKeyClient  # noqa: E402
 from bomlib.lookup import LookupService, summarize_bom  # noqa: E402
 from bomlib.mouser import MouserClient  # noqa: E402
+from bomlib import trustedparts as tp_module  # noqa: E402
 from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.spreadsheet import extract_bom, line_from_row, parse_workbook  # noqa: E402
 
@@ -160,7 +161,15 @@ class Handler(BaseHTTPRequestHandler):
                      'sandbox': digikey.sandbox},
                     {'id': 'mouser', 'name': 'Mouser', 'configured': mouser.configured},
                     {'id': 'trustedparts', 'name': 'TrustedParts', 'configured': trustedparts.configured,
-                     'aggregator': True},
+                     'aggregator': True,
+                     # TrustedParts require visible "Powered by" attribution
+                     # with a followable link wherever their data is shown.
+                     'attribution': {
+                         'text': tp_module.ATTRIBUTION_TEXT,
+                         'name': tp_module.ATTRIBUTION_NAME,
+                         'url': tp_module.ATTRIBUTION_HOME,
+                         'logo': 'trustedparts-logo.svg',
+                     }},
                 ],
                 'maxPartsPerRequest': MAX_PARTS_PER_REQUEST,
                 'cacheEntries': len(cache),

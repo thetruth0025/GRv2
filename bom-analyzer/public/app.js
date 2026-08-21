@@ -51,7 +51,7 @@
     'mappingCard', 'mappingSummary', 'mappingGrid', 'previewTable', 'analyzeBtn', 'resetBtn',
     'progressWrap', 'progressBar', 'progressText', 'resultsCard', 'statGrid', 'searchInput',
     'filterChips', 'exportBtn', 'resultsTable', 'resultsHead', 'resultsBody', 'emptyState',
-    'setupCard', 'toast',
+    'setupCard', 'toast', 'attribution',
   ].forEach(function (id) {
     el[id] = document.getElementById(id);
   });
@@ -155,6 +155,7 @@
       count(health.cacheEntries) + ' cached lookups</span>'
     );
     el.statusBar.innerHTML = pills.join('');
+    renderAttribution();
   }
 
   function checkHealth() {
@@ -456,6 +457,7 @@
     renderStats();
     renderFilters();
     renderTable();
+    renderAttribution();
     checkHealth();
     el.resultsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
@@ -522,6 +524,56 @@
     }
 
     el.statGrid.innerHTML = tiles.join('');
+  }
+
+  // Suppliers can require visible attribution. TrustedParts ask for the words
+  // "Powered by" followed by their logo, linked back to them, and the link
+  // must stay followable — so no rel="nofollow" here, deliberately.
+  function renderAttribution() {
+    var suppliers = (state.health && state.health.suppliers) || [];
+    var blocks = suppliers.filter(function (s) {
+      return s.attribution && s.configured;
+    }).map(function (supplier) {
+      var a = supplier.attribution;
+      // Prefer the per-part link the API returned for this run; otherwise the
+      // home page, which their guidance allows for multi-part displays.
+      var url = safeUrl(preferredAttributionUrl(supplier.id) || a.url) || a.url;
+      // The logo is theirs to supply, so the name renders by default and the
+      // image replaces it only once it actually loads. No inline handlers:
+      // they are fragile to escape and blocked under a strict CSP.
+      var logo = '<span class="attr-name">' + esc(a.name) + '</span>' +
+        (a.logo ? '<img class="attr-logo" src="' + esc(a.logo) + '" alt="' + esc(a.name) +
+          '" hidden>' : '');
+      return '<a class="attr-link" href="' + esc(url) + '" target="_blank" rel="noopener">' +
+        '<span class="attr-text">' + esc(a.text) + '</span>' + logo + '</a>';
+    });
+
+    el.attribution.innerHTML = blocks.join('');
+    el.attribution.hidden = blocks.length === 0;
+
+    // Swap the name for the logo only on a successful load, so a missing file
+    // leaves working text attribution rather than a broken image.
+    Array.prototype.forEach.call(el.attribution.querySelectorAll('.attr-logo'), function (img) {
+      img.addEventListener('load', function () {
+        img.hidden = false;
+        var name = img.parentNode.querySelector('.attr-name');
+        if (name) name.hidden = true;
+      });
+    });
+  }
+
+  // When every TrustedParts row points at the same part page (a single-part
+  // run) that page is the better target than the home page.
+  function preferredAttributionUrl(supplierId) {
+    if (!state.results) return null;
+    var urls = [];
+    state.results.rows.forEach(function (row) {
+      var offer = row.offers[supplierId];
+      if (offer && offer.attribution && offer.attribution.url) urls.push(offer.attribution.url);
+    });
+    if (urls.length === 1) return urls[0];
+    var unique = urls.filter(function (u, i) { return urls.indexOf(u) === i; });
+    return unique.length === 1 ? unique[0] : null;
   }
 
   function tile(label, value, note, tone) {
@@ -832,6 +884,15 @@
       }
       if (datasheetUrl) {
         links.push('<a href="' + esc(datasheetUrl) + '" target="_blank" rel="noopener noreferrer">Datasheet ↗</a>');
+      }
+      // The per-part attribution target their guidance asks for. Followable,
+      // so no nofollow.
+      if (offer.attribution) {
+        var attrUrl = safeUrl(offer.attribution.url);
+        if (attrUrl) {
+          links.push('<a href="' + esc(attrUrl) + '" target="_blank" rel="noopener">' +
+            esc(offer.attribution.text) + ' ' + esc(offer.attribution.name) + ' ↗</a>');
+        }
       }
 
       return '<div class="detail-col"><h4>' + esc(supplier.name) + lifecycleBadge(offer) + '</h4>' +
