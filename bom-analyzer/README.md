@@ -10,7 +10,8 @@ given line, which one can ship today, and which parts are heading for end of lif
 
 ## What it does
 
-**Reads the BOM you already have.** CSV, TSV or Excel (`.xlsx`). Column headings are detected
+**Reads the BOM you already have.** CSV, TSV or Excel (`.xlsx`) — the `.xlsx` reader is `zipfile`
+plus `xml.etree`, so no spreadsheet library is needed. Column headings are detected
 automatically — `Qty`, `MPN`, `Mfr. Part #`, `RefDes` and the other spellings EDA tools emit all
 map to the right field, and a title block above the header row does not confuse it. If a guess is
 wrong you can remap any column from a dropdown without re-uploading.
@@ -40,7 +41,7 @@ filter.
 
 ## Why there is a backend
 
-The frontend is a static page, but it talks to a small Node server rather than to the suppliers
+The frontend is a static page, but it talks to a small Python server rather than to the suppliers
 directly. Two reasons, both hard blockers:
 
 - **Credentials.** DigiKey uses OAuth 2.0 client credentials and Mouser uses an API key. Either one
@@ -48,7 +49,8 @@ directly. Two reasons, both hard blockers:
 - **CORS.** Neither API sends the headers a browser needs to read a cross-origin response, so a
   direct call from page JavaScript fails regardless of credentials.
 
-The server is ~400 lines, has **no dependencies**, and needs nothing but Node 18 or newer.
+The server is **pure standard library** — no `pip install`, no virtualenv, nothing to vendor. It
+needs nothing but Python 3.8 or newer, which macOS and every Linux distribution already ship.
 
 ---
 
@@ -77,7 +79,7 @@ cp .env.example .env
 ### 3. Run
 
 ```bash
-npm start
+python3 server.py
 ```
 
 Then open <http://localhost:8787>. The status pills under the title confirm which suppliers are
@@ -110,7 +112,7 @@ All settings live in `.env`; `.env.example` documents each one. The ones worth k
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `CACHE_TTL_HOURS` | `6` | How long a supplier answer is reused before being re-fetched |
-| `LOOKUP_CONCURRENCY` | `3` | Parallel supplier requests — raising it is faster but invites rate limiting |
+| `LOOKUP_CONCURRENCY` | `3` | Parallel supplier requests (worker threads) — raising it is faster but invites rate limiting |
 | `MAX_PARTS_PER_REQUEST` | `500` | Largest BOM accepted in one run |
 | `ALLOWED_ORIGINS` | `*` | Restrict which origins may call the API if you host the frontend separately |
 | `CACHE_FILE` | `./.cache/parts.json` | On-disk cache location, or `none` to keep it in memory |
@@ -133,25 +135,29 @@ Settings panel, and set `ALLOWED_ORIGINS` on the server to the origin serving th
 ## Development
 
 ```bash
-npm test     # 66 tests, no network access required
-npm start    # http://localhost:8787
+python3 -m unittest discover -s tests -t .   # 67 tests, no network access required
+python3 server.py                            # http://localhost:8787
 ```
 
 ```
-server.js              HTTP server, static hosting, API routes, SSE streaming
-lib/spreadsheet.js     CSV/TSV parsing, .xlsx reading, header detection, column mapping
-lib/digikey.js         OAuth 2.0 + Product Information V4 → catalog record
-lib/mouser.js          Search API v1 → catalog record
-lib/normalize.js       Lead time, lifecycle and price-break normalization; cross-supplier comparison
-lib/lookup.js          Deduplication, caching, concurrency, BOM roll-up
-lib/cache.js           TTL cache with disk persistence
-lib/http.js            fetch with timeout, retry and backoff
-public/                The frontend (no build step)
+server.py                 HTTP server, static hosting, API routes, SSE streaming
+bomlib/spreadsheet.py     CSV/TSV parsing, .xlsx reading, header detection, column mapping
+bomlib/digikey.py         OAuth 2.0 + Product Information V4 → catalog record
+bomlib/mouser.py          Search API v1 → catalog record
+bomlib/normalize.py       Lead time, lifecycle and price-break normalization; cross-supplier comparison
+bomlib/lookup.py          Deduplication, caching, concurrency, BOM roll-up
+bomlib/cache.py           TTL cache with disk persistence
+bomlib/http_client.py     urllib with timeout, retry and backoff
+public/                   The frontend (plain HTML/CSS/JS, no build step)
 ```
+
+The server is `ThreadingHTTPServer`; supplier lookups run on a `ThreadPoolExecutor` bounded by
+`LOOKUP_CONCURRENCY`. Since the work is entirely network-bound, threads sidestep the GIL and the
+async machinery alike.
 
 Supplier responses are converted into a common **catalog record** — the quantity-independent facts
 about a product, including every packaging option with its own stock, minimum, multiple and price
-ladder. Pricing for a specific BOM line happens afterwards, in `recordToOffer`. That split is what
+ladder. Pricing for a specific BOM line happens afterwards, in `record_to_offer`. That split is what
 lets the cache serve a re-run at a different quantity, and it keeps all the comparison logic in one
 supplier-agnostic place.
 
@@ -173,6 +179,6 @@ response shapes, so no network access is needed.
   credible match, and the detail panel says when the match was not exact — but verify anything
   surprising.
 - **Two suppliers.** The architecture takes more: a client needs `id`, `name`, `configured` and
-  `fetchRecord(part)` returning a catalog record, then gets added to the list in `server.js`.
+  `fetch_record(part)` returning a catalog record, then gets added to the list in `server.py`.
   Everything downstream — comparison, roll-up, table columns, CSV export — is written against the
   supplier list rather than against DigiKey and Mouser by name.

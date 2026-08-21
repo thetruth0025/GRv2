@@ -35,7 +35,7 @@
   <!-- ── SETTINGS ─────────────────────────────────────────────────────── -->
   <section id="settingsPanel" class="card settings" hidden>
     <h2><span class="num">&#9881;</span> Settings</h2>
-    <p class="sub">The backend holds your API credentials and proxies the supplier calls. Point this at wherever you are running <code>server.js</code>.</p>
+    <p class="sub">The backend holds your API credentials and proxies the supplier calls. Point this at wherever you are running <code>server.py</code>.</p>
     <label class="field">Backend URL
       <input type="text" id="apiBase" placeholder="http://localhost:8787" autocomplete="off" spellcheck="false" />
     </label>
@@ -122,11 +122,11 @@
   <!-- ── SETUP HELP ───────────────────────────────────────────────────── -->
   <section id="setupCard" class="card setup" hidden>
     <h2><span class="num">!</span> Backend not reachable</h2>
-    <p class="sub">This app needs its Node backend running. Neither supplier API can be called straight from a browser: DigiKey requires an OAuth client secret and Mouser requires an API key, and neither sends the CORS headers a browser would need.</p>
+    <p class="sub">This app needs its Python backend running. Neither supplier API can be called straight from a browser: DigiKey requires an OAuth client secret and Mouser requires an API key, and neither sends the CORS headers a browser would need.</p>
     <ol class="steps">
       <li>Get free API credentials: a client ID and secret from <a href="https://developer.digikey.com/" target="_blank" rel="noopener">developer.digikey.com</a>, an API key from <a href="https://www.mouser.com/api-hub/" target="_blank" rel="noopener">mouser.com/api-hub</a>. Either one alone is enough to start.</li>
       <li>In <code>bom-analyzer/</code>, copy <code>.env.example</code> to <code>.env</code> and fill in the credentials you have.</li>
-      <li>Run <code>npm start</code> (Node 18 or newer, no dependencies to install).</li>
+      <li>Run <code>python3 server.py</code> (Python 3.8 or newer, standard library only — nothing to install).</li>
       <li>Open <code>http://localhost:8787</code>, or set the backend URL in Settings if you are running it elsewhere.</li>
     </ol>
   </section>
