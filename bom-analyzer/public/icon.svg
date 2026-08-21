@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="#0f1115"/>
+  <!-- Document -->
+  <rect x="22" y="24" width="50" height="66" rx="5" fill="#1f232c" stroke="url(#g)" stroke-width="3"/>
+  <g stroke="url(#g)" stroke-width="3.5" stroke-linecap="round" opacity="0.85">
+    <line x1="32" y1="40" x2="62" y2="40"/>
+    <line x1="32" y1="52" x2="62" y2="52"/>
+    <line x1="32" y1="64" x2="52" y2="64"/>
+    <line x1="32" y1="76" x2="46" y2="76"/>
+  </g>
+  <!-- Comparison bars -->
+  <rect x="82" y="66" width="10" height="38" rx="3" fill="url(#g)"/>
+  <rect x="98" y="48" width="10" height="56" rx="3" fill="#2dd4bf" opacity="0.55"/>
+  <circle cx="87" cy="38" r="13" fill="none" stroke="url(#g)" stroke-width="3.5"/>
+  <path d="M81 38l4.5 4.5L94 34" fill="none" stroke="url(#g)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

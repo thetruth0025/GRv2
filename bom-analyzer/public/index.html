@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0f1115" />
+<meta name="description" content="Upload a bill of materials and compare DigiKey, Mouser and TrustedParts on price, lead time, stock, and lifecycle status side by side." />
+<link rel="manifest" href="manifest.json" />
+<link rel="icon" href="icon.svg" type="image/svg+xml" />
+<title>BOM Supplier Analyzer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="head-row">
+      <div>
+        <div class="eyebrow">Procurement</div>
+        <h1>BOM Supplier Analyzer</h1>
+        <p>Upload a bill of materials and get lead time, cost, stock and lifecycle status for every part &mdash; from DigiKey, Mouser and TrustedParts side by side.</p>
+      </div>
+      <button type="button" id="settingsBtn" class="icon-btn" aria-label="Settings" aria-expanded="false" aria-controls="settingsPanel">
+        <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5m7.43-2.53a7.6 7.6 0 0 0 0-1.94l2.05-1.58a.5.5 0 0 0 .12-.64l-1.94-3.36a.5.5 0 0 0-.6-.22l-2.42.97a7.3 7.3 0 0 0-1.68-.97l-.36-2.57a.5.5 0 0 0-.5-.42h-3.88a.5.5 0 0 0-.5.42l-.36 2.57a7.3 7.3 0 0 0-1.68.97l-2.42-.97a.5.5 0 0 0-.6.22L2.4 8.81a.5.5 0 0 0 .12.64l2.05 1.58a7.6 7.6 0 0 0 0 1.94L2.52 14.6a.5.5 0 0 0-.12.64l1.94 3.36a.5.5 0 0 0 .6.22l2.42-.97a7.3 7.3 0 0 0 1.68.97l.36 2.57a.5.5 0 0 0 .5.42h3.88a.5.5 0 0 0 .5-.42l.36-2.57a7.3 7.3 0 0 0 1.68-.97l2.42.97a.5.5 0 0 0 .6-.22l1.94-3.36a.5.5 0 0 0-.12-.64Z"/></svg>
+      </button>
+    </div>
+    <div id="statusBar" class="status-bar" role="status" aria-live="polite">
+      <span class="status-pill checking"><span class="dot"></span> Checking backend&hellip;</span>
+    </div>
+  </header>
+
+  <!-- ── SETTINGS ─────────────────────────────────────────────────────── -->
+  <section id="settingsPanel" class="card settings" hidden>
+    <h2><span class="num">&#9881;</span> Settings</h2>
+    <p class="sub">The backend holds your API credentials and proxies the supplier calls. Point this at wherever you are running <code>server.py</code>.</p>
+    <label class="field">Backend URL
+      <input type="text" id="apiBase" placeholder="http://localhost:8787" autocomplete="off" spellcheck="false" />
+    </label>
+    <label class="field">Currency shown
+      <input type="text" id="currencyLabel" value="USD" readonly />
+    </label>
+    <div class="btn-row">
+      <button type="button" id="recheckBtn" class="btn ghost">Re-check connection</button>
+      <button type="button" id="clearCacheBtn" class="btn ghost">Clear server cache</button>
+    </div>
+    <div class="hint">Supplier responses are cached on the server for a few hours so repeat runs stay inside the free-tier API quotas.</div>
+  </section>
+
+  <!-- ── 1. UPLOAD ────────────────────────────────────────────────────── -->
+  <section class="card">
+    <h2><span class="num">1</span> Load your BOM</h2>
+    <p class="sub">Drop in a CSV, TSV or Excel (.xlsx) export. Column headings are detected automatically &mdash; you can correct them in the next step.</p>
+
+    <div id="dropZone" class="drop" tabindex="0" role="button" aria-label="Choose a BOM file or drop one here">
+      <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path fill="currentColor" d="M12 3 8 7h3v7h2V7h3zM5 17v2h14v-2z"/></svg>
+      <div class="drop-title">Drop a BOM here or click to browse</div>
+      <div class="drop-sub">.csv &middot; .tsv &middot; .txt &middot; .xlsx</div>
+      <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
+    </div>
+
+    <details class="paste-block">
+      <summary>Or paste part numbers</summary>
+      <p class="sub">One per line. Add a quantity after a comma or tab, e.g. <code>GRM188R71H104KA93D, 100</code></p>
+      <textarea id="pasteInput" rows="6" spellcheck="false" placeholder="RC0603FR-0710KL, 250&#10;GRM188R71H104KA93D, 100&#10;STM32F103C8T6, 10"></textarea>
+      <button type="button" id="pasteBtn" class="btn ghost">Use pasted list</button>
+    </details>
+
+    <div class="btn-row">
+      <button type="button" id="sampleBtn" class="btn ghost">Load sample BOM</button>
+    </div>
+  </section>
+
+  <!-- ── 2. MAPPING ───────────────────────────────────────────────────── -->
+  <section id="mappingCard" class="card" hidden>
+    <h2><span class="num">2</span> Check the columns</h2>
+    <p class="sub" id="mappingSummary"></p>
+    <div class="grid" id="mappingGrid"></div>
+    <div class="preview-wrap">
+      <table class="preview" id="previewTable"></table>
+    </div>
+    <div class="btn-row">
+      <button type="button" id="analyzeBtn" class="btn primary">Analyze BOM</button>
+      <button type="button" id="resetBtn" class="btn ghost">Start over</button>
+    </div>
+    <div id="progressWrap" class="progress-wrap" hidden>
+      <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+      <div class="progress-text" id="progressText"></div>
+    </div>
+  </section>
+
+  <!-- ── 3. RESULTS ───────────────────────────────────────────────────── -->
+  <section id="resultsCard" class="card" hidden>
+    <h2><span class="num">3</span> Supplier comparison</h2>
+    <div class="stat-grid" id="statGrid"></div>
+
+    <div class="toolbar">
+      <input type="search" id="searchInput" class="search" placeholder="Filter by part number, description or reference" aria-label="Filter results" />
+      <div class="chips" id="filterChips" role="group" aria-label="Result filters"></div>
+      <button type="button" id="exportBtn" class="btn ghost small">Export CSV</button>
+    </div>
+
+    <div class="table-wrap">
+      <table class="results" id="resultsTable">
+        <thead id="resultsHead"></thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
+    </div>
+    <div id="emptyState" class="empty" hidden>No rows match that filter.</div>
+
+    <div id="attribution" class="attribution" hidden></div>
+
+    <div class="legend">
+      <span><i class="sw ok"></i> Active</span>
+      <span><i class="sw warn"></i> NRND / Last time buy</span>
+      <span><i class="sw bad"></i> EOL / Obsolete</span>
+      <span><i class="sw unknown"></i> Unknown</span>
+      <span><i class="sw best"></i> Best of the suppliers</span>
+    </div>
+  </section>
+
+  <!-- ── SETUP HELP ───────────────────────────────────────────────────── -->
+  <section id="setupCard" class="card setup" hidden>
+    <h2><span class="num">!</span> Backend not reachable</h2>
+    <p class="sub">This app needs its Python backend running. Neither supplier API can be called straight from a browser: DigiKey requires an OAuth client secret and Mouser requires an API key, and neither sends the CORS headers a browser would need.</p>
+    <ol class="steps">
+      <li>Get free API credentials: a client ID and secret from <a href="https://developer.digikey.com/" target="_blank" rel="noopener">developer.digikey.com</a>, an API key from <a href="https://www.mouser.com/api-hub/" target="_blank" rel="noopener">mouser.com/api-hub</a>, and one from <a href="https://www.trustedparts.com/" target="_blank" rel="noopener">trustedparts.com</a> under My Account &rarr; Additional Features. Any one alone is enough to start.</li>
+      <li>In <code>bom-analyzer/</code>, copy <code>.env.example</code> to <code>.env</code> and fill in the credentials you have.</li>
+      <li>Run <code>python3 server.py</code> (Python 3.8 or newer, standard library only — nothing to install).</li>
+      <li>Open <code>http://localhost:8787</code>, or set the backend URL in Settings if you are running it elsewhere.</li>
+    </ol>
+  </section>
+
+  <footer>
+    <p>Pricing, stock and lifecycle data comes live from the DigiKey, Mouser and TrustedParts APIs. TrustedParts aggregates authorized distributors &mdash; expand a row to see every distributor it found. Always confirm on the supplier's own page before placing an order &mdash; stock moves fast.</p>
+  </footer>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
