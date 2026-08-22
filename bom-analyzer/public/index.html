@@ -54,11 +54,11 @@
     <h2><span class="num">1</span> Load your BOM</h2>
     <p class="sub">Drop in a CSV, TSV or Excel (.xlsx) export. Column headings are detected automatically &mdash; you can correct them in the next step.</p>
 
-    <div id="dropZone" class="drop" tabindex="0" role="button" aria-label="Choose a BOM file or drop one here">
+    <div id="dropZone" class="drop" tabindex="0" role="button" aria-label="Choose BOM files or drop them here">
       <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path fill="currentColor" d="M12 3 8 7h3v7h2V7h3zM5 17v2h14v-2z"/></svg>
-      <div class="drop-title">Drop a BOM here or click to browse</div>
-      <div class="drop-sub">.csv &middot; .tsv &middot; .txt &middot; .xlsx</div>
-      <input type="file" id="fileInput" accept=".csv,.tsv,.txt,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
+      <div class="drop-title">Drop BOMs here or click to browse</div>
+      <div class="drop-sub">.csv &middot; .tsv &middot; .txt &middot; .xlsx &mdash; several at once is fine</div>
+      <input type="file" id="fileInput" multiple accept=".csv,.tsv,.txt,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
     </div>
 
     <details class="paste-block">
@@ -71,6 +71,18 @@
     <div class="btn-row">
       <button type="button" id="sampleBtn" class="btn ghost">Load sample BOM</button>
     </div>
+  </section>
+
+  <!-- ── BOM SELECTOR ─────────────────────────────────────────────────── -->
+  <section id="bomBar" class="card boms" hidden>
+    <div class="boms-head">
+      <h2><span class="num">&#9776;</span> Loaded BOMs <span id="bomCount" class="bom-count"></span></h2>
+      <div class="btn-row compact">
+        <button type="button" id="analyzeAllBtn" class="btn ghost small">Analyze all pending</button>
+        <button type="button" id="closeAllBtn" class="btn ghost small">Close all</button>
+      </div>
+    </div>
+    <div id="bomTabs" class="bom-tabs" role="tablist" aria-label="Loaded BOMs"></div>
   </section>
 
   <!-- ── 2. MAPPING ───────────────────────────────────────────────────── -->

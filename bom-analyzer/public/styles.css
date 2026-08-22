@@ -528,3 +528,78 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
 .attr-logo { height: 20px; width: auto; display: block; }
 .attr-logo[hidden] { display: none; }
 .attr-name { font-family: 'Syne', sans-serif; font-weight: 700; color: var(--accent2); }
+
+/* ── BOM SELECTOR ── */
+.card.boms { padding: 14px 18px; }
+.boms-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.boms-head h2 { margin-bottom: 0; }
+.btn-row.compact { margin-top: 0; }
+.bom-count { color: var(--text3); font-family: 'DM Sans', sans-serif; font-weight: 600; font-size: 0.78rem; }
+
+.bom-tabs {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+  -webkit-overflow-scrolling: touch;
+}
+.bom-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px 8px 12px;
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--text2);
+  text-align: left;
+  flex-shrink: 0;
+  max-width: 260px;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.bom-tab:hover { color: var(--text); border-color: var(--text3); }
+.bom-tab.active { border-color: var(--accent); background: rgba(45, 212, 191, .07); color: var(--text); }
+.bom-tab .tab-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.bom-tab .tab-name {
+  font-weight: 700;
+  font-size: 0.84rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bom-tab .tab-meta { font-size: 0.7rem; color: var(--text3); white-space: nowrap; }
+.bom-tab.active .tab-meta { color: var(--text2); }
+.bom-tab .tab-meta.warn { color: var(--yellow); }
+.bom-tab .tab-meta.bad { color: var(--red); }
+.bom-tab .tab-meta.ok { color: var(--green); }
+.bom-tab .tab-close {
+  background: none;
+  border: none;
+  color: var(--text3);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+.bom-tab .tab-close:hover { color: var(--red); background: rgba(248, 113, 113, .12); }
+.bom-tab .spinner {
+  width: 10px; height: 10px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.card-scope {
+  font-family: 'DM Sans', sans-serif;
+  font-weight: 600;
+  font-size: 0.8rem;
+  color: var(--text3);
+  padding-left: 2px;
+}

@@ -30,19 +30,78 @@
     { key: 'missing', label: 'Not found' },
   ];
 
+  // Several BOMs can be loaded at once. Everything that belongs to one BOM —
+  // its parsed rows, column mapping, results, and even which filter and search
+  // you left it on — lives on that BOM, so switching tabs restores exactly the
+  // view you had rather than resetting it.
   var state = {
     apiBase: '',
     health: null,
-    parse: null,
-    mapping: {},
-    lines: [],
-    fromPaste: false,
-    results: null,
-    filter: 'all',
-    search: '',
-    expanded: {},
-    running: false,
+    boms: [],
+    activeId: null,
   };
+
+  var nextBomId = 1;
+
+  function newBom(name, fields) {
+    var bom = {
+      id: 'bom-' + nextBomId++,
+      name: name || 'Untitled',
+      parse: null,
+      mapping: {},
+      lines: [],
+      fromPaste: false,
+      results: null,
+      filter: 'all',
+      search: '',
+      expanded: {},
+      running: false,
+      progress: null,
+      error: null,
+    };
+    Object.keys(fields || {}).forEach(function (key) { bom[key] = fields[key]; });
+    return bom;
+  }
+
+  // Returns the active BOM, or a throwaway blank one so render functions can
+  // read fields without guarding every access.
+  var placeholderBom = newBom('');
+  function bom() {
+    for (var i = 0; i < state.boms.length; i++) {
+      if (state.boms[i].id === state.activeId) return state.boms[i];
+    }
+    return placeholderBom;
+  }
+
+  function addBom(name, fields) {
+    var entry = newBom(name, fields);
+    state.boms.push(entry);
+    state.activeId = entry.id;
+    return entry;
+  }
+
+  function removeBom(id) {
+    var index = -1;
+    state.boms.forEach(function (b, i) { if (b.id === id) index = i; });
+    if (index === -1) return;
+    state.boms.splice(index, 1);
+    if (state.activeId === id) {
+      var next = state.boms[index] || state.boms[index - 1];
+      state.activeId = next ? next.id : null;
+    }
+    renderAll();
+  }
+
+  // A name the tabs can show: the filename without its extension, made unique
+  // when the same file is loaded twice.
+  function uniqueName(base) {
+    var name = String(base || 'BOM').replace(/\.[^.]+$/, '') || 'BOM';
+    var taken = state.boms.map(function (b) { return b.name; });
+    if (taken.indexOf(name) === -1) return name;
+    for (var n = 2; ; n++) {
+      if (taken.indexOf(name + ' (' + n + ')') === -1) return name + ' (' + n + ')';
+    }
+  }
 
   var el = {};
   [
@@ -52,6 +111,7 @@
     'progressWrap', 'progressBar', 'progressText', 'resultsCard', 'statGrid', 'searchInput',
     'filterChips', 'exportBtn', 'resultsTable', 'resultsHead', 'resultsBody', 'emptyState',
     'setupCard', 'toast', 'attribution',
+    'bomBar', 'bomTabs', 'bomCount', 'analyzeAllBtn', 'closeAllBtn',
   ].forEach(function (id) {
     el[id] = document.getElementById(id);
   });
@@ -82,7 +142,7 @@
 
   function money(value, currency) {
     if (value === null || value === undefined || !isFinite(value)) return null;
-    var code = currency || (state.results && state.results.summary.currency) || 'USD';
+    var code = currency || (bom().results && bom().results.summary.currency) || 'USD';
     try {
       return new Intl.NumberFormat(undefined, {
         style: 'currency',
@@ -181,28 +241,40 @@
 
   // ── Loading a BOM ────────────────────────────────────────────────────────
 
+  function handleFiles(files) {
+    var list = Array.prototype.slice.call(files || []);
+    if (list.length === 0) return;
+    toast('Reading ' + (list.length === 1 ? list[0].name : list.length + ' files') + '…');
+    // Sequentially, so the tabs appear in the order they were chosen.
+    return list.reduce(function (chain, file) {
+      return chain.then(function () { return handleFile(file); });
+    }, Promise.resolve()).then(function () {
+      renderAll();
+      var loaded = state.boms.length;
+      toast('Loaded ' + loaded + ' BOM' + (loaded === 1 ? '' : 's'));
+    });
+  }
+
   function handleFile(file) {
-    if (!file) return;
-    toast('Reading ' + file.name + '…');
-    fetch(api('/api/parse'), {
+    if (!file) return Promise.resolve();
+    return fetch(api('/api/parse'), {
       method: 'POST',
       headers: { 'X-File-Name': file.name, 'Content-Type': 'application/octet-stream' },
       body: file,
     })
       .then(readJsonOrThrow)
       .then(function (data) {
-        state.parse = data;
-        state.mapping = data.mapping || {};
-        state.lines = data.lines || [];
-        state.fromPaste = false;
-        state.results = null;
-        el.resultsCard.hidden = true;
-        renderMapping();
-        toast('Loaded ' + state.lines.length + ' part' + (state.lines.length === 1 ? '' : 's') +
-          ' from ' + file.name);
+        addBom(uniqueName(file.name), {
+          parse: data,
+          mapping: data.mapping || {},
+          lines: data.lines || [],
+          source: file.name,
+        });
       })
       .catch(function (err) {
-        toast(err.message || 'Could not read that file', true);
+        // One bad file must not abandon the rest of the batch.
+        addBom(uniqueName(file.name), { error: err.message || 'Could not read that file' });
+        toast(file.name + ': ' + (err.message || 'could not be read'), true);
       });
   }
 
@@ -248,18 +320,132 @@
 
   // ── Column mapping ───────────────────────────────────────────────────────
 
+  // ── BOM tabs ─────────────────────────────────────────────────────────────
+
+  function bomStatus(entry) {
+    if (entry.error) return { text: 'could not be read', cls: 'bad' };
+    if (entry.running) return { text: entry.progress || 'analyzing…', cls: '', busy: true };
+    if (entry.results) {
+      var summary = entry.results.summary;
+      var risks = (summary.riskLines || []).length;
+      return {
+        text: summary.lines + ' lines · ' + (money(summary.bestMixTotal, summary.currency) || '—') +
+          (risks ? ' · ' + risks + ' to review' : ''),
+        cls: risks ? 'warn' : 'ok',
+      };
+    }
+    return { text: entry.lines.length + ' parts · not analyzed', cls: '' };
+  }
+
+  function renderBomTabs() {
+    var many = state.boms.length > 0;
+    el.bomBar.hidden = !many;
+    if (!many) return;
+
+    el.bomCount.textContent = state.boms.length === 1 ? '' : '(' + state.boms.length + ')';
+    el.bomTabs.innerHTML = state.boms.map(function (entry) {
+      var status = bomStatus(entry);
+      return '<div class="bom-tab' + (entry.id === state.activeId ? ' active' : '') +
+        '" role="tab" tabindex="0" aria-selected="' + (entry.id === state.activeId) +
+        '" data-id="' + esc(entry.id) + '">' +
+        (status.busy ? '<span class="spinner"></span>' : '') +
+        '<span class="tab-body">' +
+        '<span class="tab-name">' + esc(entry.name) + '</span>' +
+        '<span class="tab-meta ' + status.cls + '">' + esc(status.text) + '</span>' +
+        '</span>' +
+        '<button type="button" class="tab-close" data-close="' + esc(entry.id) +
+        '" aria-label="Close ' + esc(entry.name) + '">×</button>' +
+        '</div>';
+    }).join('');
+
+    Array.prototype.forEach.call(el.bomTabs.querySelectorAll('.bom-tab'), function (tab) {
+      var id = tab.getAttribute('data-id');
+      tab.addEventListener('click', function (event) {
+        if (event.target.closest('.tab-close')) return;
+        selectBom(id);
+      });
+      tab.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectBom(id); }
+      });
+    });
+    Array.prototype.forEach.call(el.bomTabs.querySelectorAll('.tab-close'), function (button) {
+      button.addEventListener('click', function (event) {
+        event.stopPropagation();
+        removeBom(button.getAttribute('data-close'));
+      });
+    });
+
+    var pending = state.boms.filter(function (b) {
+      return !b.results && !b.running && !b.error && b.lines.length;
+    }).length;
+    el.analyzeAllBtn.hidden = pending < 2;
+    el.analyzeAllBtn.textContent = 'Analyze all pending (' + pending + ')';
+  }
+
+  function selectBom(id) {
+    if (state.activeId === id) return;
+    state.activeId = id;
+    renderAll();
+  }
+
+  // One entry point that repaints every panel from the active BOM, so
+  // switching tabs cannot leave a stale fragment of another BOM on screen.
+  function renderAll() {
+    renderBomTabs();
+    var entry = bom();
+
+    if (!state.boms.length) {
+      el.mappingCard.hidden = true;
+      el.resultsCard.hidden = true;
+      el.progressWrap.hidden = true;
+      return;
+    }
+
+    if (entry.error) {
+      el.mappingCard.hidden = true;
+      el.resultsCard.hidden = true;
+      el.progressWrap.hidden = true;
+      return;
+    }
+
+    renderMapping();
+    el.progressWrap.hidden = !(entry.running || entry.progress);
+    if (entry.progress) setProgress(entry.percent || 0, entry.progress);
+
+    if (entry.results) {
+      el.resultsCard.hidden = false;
+      el.searchInput.value = entry.search || '';
+      renderStats();
+      renderFilters();
+      renderTable();
+      renderAttribution();
+      var resultsHeading = el.resultsCard.querySelector('h2');
+      if (resultsHeading) {
+        resultsHeading.innerHTML = '<span class="num">3</span> Supplier comparison' +
+          (state.boms.length > 1 ? ' <span class="card-scope">' + esc(bom().name) + '</span>' : '');
+      }
+    } else {
+      el.resultsCard.hidden = true;
+    }
+  }
+
   function renderMapping() {
     el.mappingCard.hidden = false;
+    var heading = el.mappingCard.querySelector('h2');
+    if (heading) {
+      heading.innerHTML = '<span class="num">2</span> Check the columns' +
+        (state.boms.length > 1 ? ' <span class="card-scope">' + esc(bom().name) + '</span>' : '');
+    }
 
-    if (state.fromPaste) {
+    if (bom().fromPaste) {
       el.mappingGrid.innerHTML = '';
       el.mappingSummary.textContent =
-        state.lines.length + ' part number' + (state.lines.length === 1 ? '' : 's') +
+        bom().lines.length + ' part number' + (bom().lines.length === 1 ? '' : 's') +
         ' from the pasted list. Quantities default to 1 where none was given.';
     } else {
-      var headers = (state.parse && state.parse.headers) || [];
+      var headers = (bom().parse && bom().parse.headers) || [];
       el.mappingGrid.innerHTML = MAP_FIELDS.map(function (field) {
-        var selected = state.mapping[field.key];
+        var selected = bom().mapping[field.key];
         var options = ['<option value="">— none —</option>'].concat(
           headers.map(function (header, index) {
             var label = header || 'Column ' + columnLetter(index);
@@ -275,17 +461,20 @@
         select.addEventListener('change', onMappingChange);
       });
 
-      var skipped = (state.parse && state.parse.skipped) || 0;
+      var skipped = (bom().parse && bom().parse.skipped) || 0;
       el.mappingSummary.innerHTML =
-        'Detected the header on row ' + (((state.parse && state.parse.headerRow) || 0) + 1) +
-        '. <strong>' + state.lines.length + '</strong> part' + (state.lines.length === 1 ? '' : 's') +
+        'Detected the header on row ' + (((bom().parse && bom().parse.headerRow) || 0) + 1) +
+        '. <strong>' + bom().lines.length + '</strong> part' + (bom().lines.length === 1 ? '' : 's') +
         ' ready' + (skipped ? ', ' + skipped + ' row' + (skipped === 1 ? '' : 's') +
         ' skipped with no part number' : '') + '.';
     }
 
     renderPreview();
-    el.analyzeBtn.disabled = state.lines.length === 0 || state.running;
-    el.mappingCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    el.analyzeBtn.disabled = bom().lines.length === 0 || bom().running;
+    el.analyzeBtn.textContent = state.boms.length > 1
+      ? 'Analyze ' + bom().name
+      : 'Analyze BOM';
+    el.resetBtn.textContent = state.boms.length > 1 ? 'Close this BOM' : 'Start over';
   }
 
   function columnLetter(index) {
@@ -301,22 +490,23 @@
   function onMappingChange(event) {
     var field = event.target.getAttribute('data-field');
     var value = event.target.value;
-    if (value === '') delete state.mapping[field];
-    else state.mapping[field] = parseInt(value, 10);
+    if (value === '') delete bom().mapping[field];
+    else bom().mapping[field] = parseInt(value, 10);
 
     fetch(api('/api/remap'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        rows: (state.parse && state.parse.rows) || [],
-        mapping: state.mapping,
-        rowOffset: (state.parse && state.parse.rowOffset) || 0,
+        rows: (bom().parse && bom().parse.rows) || [],
+        mapping: bom().mapping,
+        rowOffset: (bom().parse && bom().parse.rowOffset) || 0,
       }),
     })
       .then(readJsonOrThrow)
       .then(function (data) {
-        state.lines = data.lines || [];
+        bom().lines = data.lines || [];
         renderMapping();
+        renderBomTabs();
       })
       .catch(function (err) {
         toast(err.message || 'Could not apply that mapping', true);
@@ -324,7 +514,7 @@
   }
 
   function renderPreview() {
-    var sample = state.lines.slice(0, 5);
+    var sample = bom().lines.slice(0, 5);
     if (sample.length === 0) {
       el.previewTable.innerHTML =
         '<tr><td class="muted">No rows with a part number yet — pick the part number column above.</td></tr>';
@@ -339,61 +529,89 @@
         return '<td>' + (value === null || value === undefined || value === '' ? '—' : esc(value)) + '</td>';
       }).join('') + '</tr>';
     }).join('');
-    var more = state.lines.length > sample.length
-      ? '<tr><td colspan="6" class="muted">…and ' + (state.lines.length - sample.length) + ' more</td></tr>'
+    var more = bom().lines.length > sample.length
+      ? '<tr><td colspan="6" class="muted">…and ' + (bom().lines.length - sample.length) + ' more</td></tr>'
       : '';
     el.previewTable.innerHTML = head + body + more;
   }
 
   // ── Running the analysis ─────────────────────────────────────────────────
 
-  function analyze() {
-    if (state.running || state.lines.length === 0) return;
+  function analyze(entry) {
+    entry = entry || bom();
+    if (!entry || entry.running || entry.lines.length === 0) return Promise.resolve();
     if (!state.health) {
       toast('Backend is not reachable — check Settings', true);
-      return;
+      return Promise.resolve();
     }
     if (!state.health.suppliers.some(function (s) { return s.configured; })) {
       toast('No supplier API credentials are configured on the server', true);
-      return;
+      return Promise.resolve();
     }
 
     var max = state.health.maxPartsPerRequest || 500;
-    var parts = state.lines.slice(0, max);
-    if (state.lines.length > max) {
-      toast('Analyzing the first ' + max + ' of ' + state.lines.length + ' parts (server limit)', true);
+    var parts = entry.lines.slice(0, max);
+    if (entry.lines.length > max) {
+      toast(entry.name + ': analyzing the first ' + max + ' of ' + entry.lines.length +
+        ' parts (server limit)', true);
     }
 
-    state.running = true;
+    entry.running = true;
+    entry.error = null;
+    entry.progress = 'Contacting suppliers…';
+    entry.percent = 0;
+    renderAll();
     el.analyzeBtn.disabled = true;
-    el.progressWrap.hidden = false;
-    setProgress(0, 'Contacting suppliers…');
 
-    streamLookup(parts, function (event, data) {
+    return streamLookup(parts, function (event, data) {
       if (event === 'start') {
         var expected = data.parts * data.suppliers.length;
-        setProgress(0, 'Looking up ' + data.parts + ' parts across ' +
+        entry.percent = 0;
+        entry.progress = 'Looking up ' + data.parts + ' parts across ' +
           data.suppliers.map(function (s) { return s.name; }).join(' and ') +
-          ' (' + expected + ' queries)…');
+          ' (' + expected + ' queries)…';
       } else if (event === 'progress') {
-        var percent = data.total ? Math.round((data.completed / data.total) * 100) : 0;
-        setProgress(percent, data.completed + ' of ' + data.total + ' queries — ' +
+        entry.percent = data.total ? Math.round((data.completed / data.total) * 100) : 0;
+        entry.progress = data.completed + ' of ' + data.total + ' queries — ' +
           data.apiCalls + ' live, ' + data.cacheHits + ' cached' +
-          (data.errors ? ', ' + data.errors + ' failed' : ''));
+          (data.errors ? ', ' + data.errors + ' failed' : '');
       } else if (event === 'done') {
-        finishAnalysis(data);
+        finishAnalysis(entry, data);
+        return;
       } else if (event === 'error') {
         throw new Error(data.error || 'Supplier lookup failed');
       }
+      // Only repaint the tabs mid-run; a full repaint would fight the table.
+      if (entry.id === state.activeId) {
+        setProgress(entry.percent, entry.progress);
+      }
+      renderBomTabs();
     })
       .catch(function (err) {
-        toast(err.message || 'Supplier lookup failed', true);
-        setProgress(0, 'Stopped: ' + (err.message || 'lookup failed'));
+        entry.error = err.message || 'Supplier lookup failed';
+        entry.progress = 'Stopped: ' + entry.error;
+        toast(entry.name + ': ' + entry.error, true);
       })
       .then(function () {
-        state.running = false;
-        el.analyzeBtn.disabled = state.lines.length === 0;
+        entry.running = false;
+        el.analyzeBtn.disabled = bom().lines.length === 0;
+        renderAll();
       });
+  }
+
+  // Runs the un-analyzed BOMs one after another rather than in parallel, so
+  // the supplier APIs see the same request rate as a single run.
+  function analyzeAll() {
+    var pending = state.boms.filter(function (b) {
+      return !b.results && !b.running && !b.error && b.lines.length;
+    });
+    if (pending.length === 0) return;
+    toast('Analyzing ' + pending.length + ' BOMs…');
+    pending.reduce(function (chain, entry) {
+      return chain.then(function () { return analyze(entry); });
+    }, Promise.resolve()).then(function () {
+      toast('Finished analyzing ' + pending.length + ' BOMs');
+    });
   }
 
   function setProgress(percent, text) {
@@ -444,29 +662,29 @@
     onEvent(event, JSON.parse(data));
   }
 
-  function finishAnalysis(data) {
-    state.results = data;
-    state.expanded = {};
-    state.filter = 'all';
-    state.search = '';
-    el.searchInput.value = '';
-    setProgress(100, 'Done — ' + data.stats.apiCalls + ' live queries, ' +
+  function finishAnalysis(entry, data) {
+    entry.results = data;
+    entry.expanded = {};
+    entry.filter = 'all';
+    entry.search = '';
+    entry.percent = 100;
+    entry.progress = 'Done — ' + data.stats.apiCalls + ' live queries, ' +
       data.stats.cacheHits + ' served from cache' +
-      (data.stats.errors ? ', ' + data.stats.errors + ' failed' : '') + '.');
-    el.resultsCard.hidden = false;
-    renderStats();
-    renderFilters();
-    renderTable();
-    renderAttribution();
+      (data.stats.errors ? ', ' + data.stats.errors + ' failed' : '') + '.';
     checkHealth();
-    el.resultsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (entry.id === state.activeId) {
+      renderAll();
+      el.resultsCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else {
+      renderBomTabs();
+    }
   }
 
   // ── Results: summary tiles ───────────────────────────────────────────────
 
   function renderStats() {
-    var summary = state.results.summary;
-    var suppliers = state.results.suppliers;
+    var summary = bom().results.summary;
+    var suppliers = bom().results.suppliers;
     var tiles = [];
 
     tiles.push(tile('Lines analyzed', String(summary.lines), count(summary.totalQuantity) + ' units total', ''));
@@ -497,7 +715,7 @@
       ));
     }
 
-    var stockRisk = state.results.rows.filter(function (row) {
+    var stockRisk = bom().results.rows.filter(function (row) {
       return row.comparison.inStockSuppliers.length === 0;
     }).length;
     tiles.push(tile(
@@ -507,7 +725,7 @@
       stockRisk ? 'bad' : 'good'
     ));
 
-    var lifecycleRisk = state.results.rows.filter(function (row) {
+    var lifecycleRisk = bom().results.rows.filter(function (row) {
       var severity = row.comparison.lifecycleSeverity;
       return severity === 'bad' || severity === 'warn';
     }).length;
@@ -565,9 +783,9 @@
   // When every TrustedParts row points at the same part page (a single-part
   // run) that page is the better target than the home page.
   function preferredAttributionUrl(supplierId) {
-    if (!state.results) return null;
+    if (!bom().results) return null;
     var urls = [];
-    state.results.rows.forEach(function (row) {
+    bom().results.rows.forEach(function (row) {
       var offer = row.offers[supplierId];
       if (offer && offer.attribution && offer.attribution.url) urls.push(offer.attribution.url);
     });
@@ -595,7 +813,7 @@
       case 'stock':
         return row.comparison.inStockSuppliers.length === 0;
       case 'missing':
-        return !state.results.suppliers.some(function (s) {
+        return !bom().results.suppliers.some(function (s) {
           return row.offers[s.id] && row.offers[s.id].found;
         });
       default:
@@ -605,15 +823,15 @@
 
   function renderFilters() {
     el.filterChips.innerHTML = FILTERS.map(function (filter) {
-      var n = state.results.rows.filter(function (row) { return matchesFilter(row, filter.key); }).length;
-      return '<button type="button" class="chip' + (state.filter === filter.key ? ' active' : '') +
+      var n = bom().results.rows.filter(function (row) { return matchesFilter(row, filter.key); }).length;
+      return '<button type="button" class="chip' + (bom().filter === filter.key ? ' active' : '') +
         '" data-filter="' + filter.key + '">' + esc(filter.label) +
         '<span class="count">' + n + '</span></button>';
     }).join('');
 
     Array.prototype.forEach.call(el.filterChips.querySelectorAll('.chip'), function (chip) {
       chip.addEventListener('click', function () {
-        state.filter = chip.getAttribute('data-filter');
+        bom().filter = chip.getAttribute('data-filter');
         renderFilters();
         renderTable();
       });
@@ -621,12 +839,12 @@
   }
 
   function visibleRows() {
-    var query = state.search.trim().toLowerCase();
-    return state.results.rows.filter(function (row) {
-      if (!matchesFilter(row, state.filter)) return false;
+    var query = bom().search.trim().toLowerCase();
+    return bom().results.rows.filter(function (row) {
+      if (!matchesFilter(row, bom().filter)) return false;
       if (!query) return true;
       var haystack = [row.mpn, row.description, row.reference, row.manufacturer];
-      state.results.suppliers.forEach(function (supplier) {
+      bom().results.suppliers.forEach(function (supplier) {
         var offer = row.offers[supplier.id];
         if (offer && offer.found) haystack.push(offer.supplierPartNumber, offer.description, offer.manufacturer);
       });
@@ -639,7 +857,7 @@
   // ── Results: table ───────────────────────────────────────────────────────
 
   function renderTable() {
-    var suppliers = state.results.suppliers;
+    var suppliers = bom().results.suppliers;
 
     var groupRow = '<tr class="supplier-row">' +
       '<th class="spacer sticky-a"></th><th class="spacer sticky-b"></th><th class="spacer"></th>' +
@@ -674,8 +892,8 @@
     Array.prototype.forEach.call(el.resultsBody.querySelectorAll('.expander'), function (button) {
       button.addEventListener('click', function () {
         var index = button.getAttribute('data-index');
-        if (state.expanded[index]) delete state.expanded[index];
-        else state.expanded[index] = true;
+        if (bom().expanded[index]) delete bom().expanded[index];
+        else bom().expanded[index] = true;
         renderTable();
       });
     });
@@ -695,7 +913,7 @@
   }
 
   function renderRow(row, suppliers) {
-    var isOpen = !!state.expanded[row.index];
+    var isOpen = !!bom().expanded[row.index];
     var comparison = row.comparison;
 
     var meta = [];
@@ -922,8 +1140,8 @@
   // ── CSV export ───────────────────────────────────────────────────────────
 
   function exportCsv() {
-    if (!state.results) return;
-    var suppliers = state.results.suppliers;
+    if (!bom().results) return;
+    var suppliers = bom().results.suppliers;
     var header = ['Row', 'Part Number', 'Quantity', 'Reference', 'Manufacturer', 'Description'];
     suppliers.forEach(function (supplier) {
       header.push(
@@ -981,7 +1199,9 @@
     var url = URL.createObjectURL(blob);
     var link = document.createElement('a');
     link.href = url;
-    link.download = 'bom-supplier-comparison-' + new Date().toISOString().slice(0, 10) + '.csv';
+    var slug = (bom().name || 'bom').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+    link.download = (slug || 'bom') + '-supplier-comparison-' +
+      new Date().toISOString().slice(0, 10) + '.csv';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -1015,7 +1235,7 @@
   function loadSample() {
     var blob = new Blob([SAMPLE_BOM], { type: 'text/csv' });
     var file = new File([blob], 'sample-bom.csv', { type: 'text/csv' });
-    handleFile(file);
+    handleFiles([file]);
   }
 
   // ── Wiring ───────────────────────────────────────────────────────────────
@@ -1077,10 +1297,10 @@
   });
   el.dropZone.addEventListener('drop', function (event) {
     var files = event.dataTransfer && event.dataTransfer.files;
-    if (files && files.length) handleFile(files[0]);
+    if (files && files.length) handleFiles(files);
   });
   el.fileInput.addEventListener('change', function () {
-    if (el.fileInput.files && el.fileInput.files.length) handleFile(el.fileInput.files[0]);
+    if (el.fileInput.files && el.fileInput.files.length) handleFiles(el.fileInput.files);
     el.fileInput.value = '';
   });
 
@@ -1090,29 +1310,32 @@
       toast('Nothing to read — paste one part number per line', true);
       return;
     }
-    state.parse = null;
-    state.mapping = {};
-    state.lines = lines;
-    state.fromPaste = true;
-    state.results = null;
-    el.resultsCard.hidden = true;
-    renderMapping();
-    toast('Loaded ' + lines.length + ' part' + (lines.length === 1 ? '' : 's'));
+    addBom(uniqueName('Pasted list'), { lines: lines, fromPaste: true });
+    renderAll();
+    toast('Loaded ' + lines.length + ' part' + (lines.length === 1 ? '' : 's') + ' as a new BOM');
   });
 
   el.sampleBtn.addEventListener('click', loadSample);
-  el.analyzeBtn.addEventListener('click', analyze);
+  el.analyzeBtn.addEventListener('click', function () { analyze(); });
+  el.analyzeAllBtn.addEventListener('click', analyzeAll);
+  el.closeAllBtn.addEventListener('click', function () {
+    if (state.boms.some(function (b) { return b.running; })) {
+      toast('Wait for the running analysis to finish first', true);
+      return;
+    }
+    state.boms = [];
+    state.activeId = null;
+    renderAll();
+  });
   el.exportBtn.addEventListener('click', exportCsv);
 
+  // "Start over" closes the BOM being viewed, leaving the others alone.
   el.resetBtn.addEventListener('click', function () {
-    state.parse = null;
-    state.mapping = {};
-    state.lines = [];
-    state.results = null;
-    state.fromPaste = false;
-    el.mappingCard.hidden = true;
-    el.resultsCard.hidden = true;
-    el.progressWrap.hidden = true;
+    if (bom().running) {
+      toast('That BOM is still analyzing', true);
+      return;
+    }
+    if (state.activeId) removeBom(state.activeId);
     el.pasteInput.value = '';
   });
 
@@ -1120,7 +1343,7 @@
   el.searchInput.addEventListener('input', function () {
     if (searchTimer) clearTimeout(searchTimer);
     searchTimer = setTimeout(function () {
-      state.search = el.searchInput.value;
+      bom().search = el.searchInput.value;
       renderTable();
     }, 160);
   });
