@@ -10,6 +10,10 @@ TrustedParts is an aggregator rather than a distributor: it searches many author
 at once. Its column quotes whichever distributor is cheapest for your quantity, and expanding a row
 lists **every** distributor it found, with stock, minimum order and price for each.
 
+**Several BOMs at once.** Load as many as you like — each gets its own tab, its own results, and
+its own filter and search state, so switching between them restores exactly the view you left.
+Nothing is shared or merged between them.
+
 Two front ends over the same engine:
 
 - **`python3 server.py`** — a browser app at <http://localhost:8787> for interactive work.
@@ -185,10 +189,19 @@ your file and which flag to reach for:
 
 ## Using the web app
 
-1. **Load your BOM** — drop a file on the upload area, or paste a list of part numbers with
-   optional quantities (`GRM188R71H104KA93D, 100`).
+1. **Load your BOMs** — drop one or more files on the upload area (multi-select works), or paste a
+   list of part numbers with optional quantities (`GRM188R71H104KA93D, 100`). Each file becomes its
+   own tab; a file that cannot be read gets a tab saying so rather than aborting the batch.
 2. **Check the columns** — confirm the detected mapping against the preview and fix anything wrong.
-3. **Analyze** — progress streams back per query. Repeat runs come from cache and are near instant.
+   The mapping belongs to the BOM you are viewing.
+3. **Analyze** — either the BOM on screen, or **Analyze all pending** to work through the loaded
+   BOMs one after another. Progress streams back per query, and each tab shows its own line count,
+   cheapest-mix total and how many lines need review. Repeat runs come from cache and are near
+   instant.
+
+Switching tabs swaps the whole view — summary tiles, table, filters, search box and expanded rows —
+to that BOM. Results, exports and totals are always scoped to the BOM you are looking at; the CSV
+export is named after it. Closing a tab discards only that BOM.
 
 In the results table, the number in the **Stock** column is what that supplier holds in the
 packaging option you would buy; `short` means it is below your quantity. **Lead time** shows
