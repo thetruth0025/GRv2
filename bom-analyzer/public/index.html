@@ -55,13 +55,21 @@
     <p class="sub">Search part numbers straight away, or load a bill of materials to compare a whole board.</p>
 
     <div class="quick">
-      <label class="sr-only" for="quickInput">Part numbers to look up</label>
-      <div class="quick-row">
-        <svg class="quick-icon" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14"/></svg>
-        <textarea id="quickInput" rows="1" placeholder="STM32F103C8T6, LM358DR, RC0603FR-0710KL" autocomplete="off" spellcheck="false" enterkeyhint="search"></textarea>
-        <button type="button" id="quickBtn" class="btn primary">Search</button>
+      <div class="lookup-grid" role="group" aria-label="Parts to look up">
+        <div class="lookup-head" aria-hidden="true">
+          <span>Part number</span>
+          <span>Description</span>
+          <span class="num">Qty needed</span>
+          <span></span>
+        </div>
+        <div id="lookupRows"></div>
       </div>
-      <div class="hint">Separate several with commas. Add a quantity with <code>x</code> &mdash; <code>STM32F103C8T6 x25</code> &mdash; otherwise 1 is assumed. <strong>Enter</strong> searches; paste a whole column and each line is read as <code>part, quantity</code>.</div>
+      <div class="btn-row">
+        <button type="button" id="quickBtn" class="btn primary">Search</button>
+        <button type="button" id="addRowBtn" class="btn ghost small">+ Add part</button>
+        <button type="button" id="clearRowsBtn" class="btn ghost small">Clear</button>
+      </div>
+      <div class="hint">Only the part number is needed &mdash; quantity defaults to 1, and the description is yours to carry through to the results and exports (suppliers are matched on the part number alone). <strong>Enter</strong> searches from any field. Paste a column of part numbers into the first box and it fills the rows for you.</div>
     </div>
 
     <div class="or-rule"><span>or</span></div>

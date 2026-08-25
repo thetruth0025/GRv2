@@ -10,9 +10,9 @@ TrustedParts is an aggregator rather than a distributor: it searches many author
 at once. Its column quotes whichever distributor is cheapest for your quantity, and expanding a row
 lists **every** distributor it found, with stock, minimum order and price for each.
 
-**A search box, not just an uploader.** Type a part number and press Enter to compare it across all
-three suppliers — no file, no column mapping. Several at once, with optional quantities, and a
-column pasted straight out of a spreadsheet all work.
+**A lookup form, not just an uploader.** Fill in a part number, an optional description and a
+quantity, and press Enter to compare it across all three suppliers — no file, no column mapping. As
+many rows as you like, and a column pasted straight out of a spreadsheet fills them for you.
 
 **Several BOMs at once.** Load as many as you like — each gets its own tab, its own results, and
 its own filter and search state, so switching between them restores exactly the view you left.
@@ -231,24 +231,31 @@ your file and which flag to reach for:
 
 ## Using the web app
 
-### Searching for a part
+### Looking a part up
 
-Type a part number into the search box and press **Enter**. That is the whole flow — no file, no
-column mapping. The results land in the same comparison table, with the same filters, report and
-exports as a BOM.
+Fill in a row and press **Enter**. That is the whole flow — no file, no column mapping. The results
+land in the same comparison table, with the same filters, report and exports as a BOM.
 
-* Several at once: `STM32F103C8T6, LM358DR, RC0603FR-0710KL`
-* A quantity: `STM32F103C8T6 x25` — otherwise 1 is assumed, which is enough to compare unit price,
-  stock and lifecycle status
-* A column pasted from a spreadsheet: one part per line, `part, quantity` — **Shift+Enter** adds a
-  line by hand
+Each row has three fields:
 
-Searches share one tab, replacing it each time, and the box keeps its text — so adding another part
-to the comparison is a comma and Enter away. Loaded BOMs are untouched by this.
+| Field | |
+| --- | --- |
+| **Part number** | The only one that is required, and the only one the suppliers see |
+| **Description** | Yours to carry through to the results, the report and the exports. It does not affect matching — the suppliers are searched on the part number alone |
+| **Qty needed** | Drives the price break, the extended price and whether stock covers you. Defaults to 1, which is enough to compare unit price, stock and lifecycle status |
 
-**A search is answered as asked.** Neither the in-house prefixes nor another BOM's claim applies to
+Rows are added as you fill them, and **+ Add part** and the **×** on each row cover the rest.
+Pasting a column into a part-number box spreads it across the rows: a tab-separated copy out of a
+spreadsheet lands in the right fields, and which value is which is worked out from what it looks
+like — the number is the quantity, the first thing that is not a number is the part, and the rest is
+the description. What landed is then sitting in the grid where you can see and correct it.
+
+Searches share one tab, replacing it each time, and the rows stay filled in — so adding another part
+to the comparison is a row and Enter away. Loaded BOMs are untouched by this.
+
+**A lookup is answered as asked.** Neither the in-house prefixes nor another BOM's claim applies to
 a part number you typed yourself: screening is there to stop automatic waste, not to answer a direct
-question with nothing. Searching `ASY0-1234` looks up `ASY0-1234`.
+question with nothing. Looking up `ASY0-1234` looks up `ASY0-1234`.
 
 ### Analyzing a BOM
 
@@ -398,8 +405,8 @@ shapes, so no network access is needed.
   the line at the combined quantity — buying the total in one order would usually be cheaper still.
 - **Screening is by prefix, not by meaning.** `ASY0`, `CBL0`, `DES0` and `PCB0` are assumed to be
   in-house numbering. If a real manufacturer part number starts with one of those, set
-  `IGNORE_PART_PREFIXES` to something narrower, clear it to let everything through, or just search
-  for the part directly — a hand-entered lookup is never screened.
+  `IGNORE_PART_PREFIXES` to something narrower, clear it to let everything through, or just look the
+  part up directly — a hand-entered lookup is never screened.
 - **TrustedParts reports no lead time.** Its API carries stock but no lead time field, so that
   column reads as unknown for TrustedParts rather than guessing. Lines it stocks still compare
   correctly, because stock on hand outranks any quoted lead time.

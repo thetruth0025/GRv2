@@ -109,7 +109,8 @@
   var el = {};
   [
     'statusBar', 'settingsBtn', 'settingsPanel', 'apiBase', 'currencyLabel', 'recheckBtn',
-    'clearCacheBtn', 'dropZone', 'fileInput', 'quickInput', 'quickBtn', 'sampleBtn',
+    'clearCacheBtn', 'dropZone', 'fileInput', 'lookupRows', 'quickBtn', 'addRowBtn',
+    'clearRowsBtn', 'sampleBtn',
     'mappingCard', 'mappingSummary', 'mappingGrid', 'previewTable', 'analyzeBtn', 'resetBtn',
     'progressWrap', 'progressBar', 'progressText', 'resultsCard', 'statGrid', 'searchInput',
     'filterChips', 'exportBtn', 'resultsTable', 'resultsHead', 'resultsBody', 'emptyState',
@@ -297,51 +298,41 @@
     });
   }
 
-  // Hand-typed part numbers are parsed in the browser: there is no header row
-  // and no packaging for the server to interpret.
-  //
-  // Two shapes have to coexist. A pasted BOM column is one part per line with
-  // the quantity after a comma — "RC0603FR-0710KL, 250". Typing into a search
-  // box is several parts on one line — "STM32F103C8T6, LM358DR". Whether the
-  // second field is a number tells them apart, which is why that check comes
-  // before anything is treated as a separator.
-  function parseManualInput(text) {
-    var lines = [];
+  // Pasting a column is the one place a part still has to be picked out of a
+  // line of text. Which field is which is decided by what the values look like
+  // rather than by position: the number is the quantity, the first thing that
+  // is not a number is the part, and whatever is left is the description. A
+  // spreadsheet copy arrives tab-separated and is split on tabs alone, so a
+  // description containing commas survives intact.
+  function parsePastedRows(text) {
+    var rows = [];
     String(text || '').split(/\r?\n/).forEach(function (raw) {
-      var trimmed = raw.trim();
-      if (!trimmed || trimmed.charAt(0) === '#') return;
+      var line = raw.trim();
+      if (!line || line.charAt(0) === '#') return;
 
-      var fields = trimmed.split(/[\t,;]/)
+      var fields = line.split(line.indexOf('\t') !== -1 ? /\t/ : /[,;]/)
         .map(function (piece) { return piece.trim(); })
         .filter(function (piece) { return piece; });
       if (!fields.length) return;
 
-      if (fields.length > 1 && isQuantity(fields[1])) {
-        // "MPN, qty" and "MPN, qty, manufacturer" — the documented paste format.
-        push(fields[0], parseQuantity(fields[1]), fields[2] || null);
-      } else {
-        fields.forEach(function (field) { push(field, null, null); });
+      // Never the first field: a part number made only of digits is still a
+      // part number, not a quantity.
+      var quantity = null;
+      for (var i = fields.length - 1; i >= 1; i--) {
+        if (isQuantity(fields[i])) {
+          quantity = parseQuantity(fields[i]);
+          fields.splice(i, 1);
+          break;
+        }
       }
-    });
 
-    function push(field, quantity, manufacturer) {
-      // "STM32F103C8T6 x25". The space before the x matters: without it,
-      // MAX232 would be read as part "MA" in a quantity of 232.
-      var marked = /^(\S.*?)\s+[x\u00d7@]\s*(\d[\d,]*)$/i.exec(field);
-      var mpn = marked ? marked[1].trim() : field;
-      if (!mpn) return;
-      var qty = marked ? parseQuantity(marked[2]) : quantity;
-      lines.push({
-        row: lines.length + 1,
-        mpn: mpn,
-        quantity: qty && qty > 0 ? qty : 1,
-        reference: null,
-        manufacturer: manufacturer,
-        description: null,
+      rows.push({
+        mpn: fields.shift() || '',
+        description: fields.join(', '),
+        quantity: quantity,
       });
-    }
-
-    return lines;
+    });
+    return rows;
   }
 
   function isQuantity(value) {
@@ -354,15 +345,101 @@
     return isFinite(parsed) && parsed > 0 ? parsed : null;
   }
 
-  // ── Quick search ─────────────────────────────────────────────────────────
+  // ── Look up parts ────────────────────────────────────────────────────────
 
-  // Searching reuses one tab rather than opening a new one each time: a search
-  // is a question you refine, not a document you collect. The box keeps its
-  // text afterwards, so adding another part is a comma and Enter away.
+  var STARTING_ROWS = 3;
+
+  function lookupRowElements() {
+    return Array.prototype.slice.call(el.lookupRows.querySelectorAll('.lookup-row'));
+  }
+
+  function addLookupRow(values, focus) {
+    var row = document.createElement('div');
+    row.className = 'lookup-row';
+    row.innerHTML =
+      // Each placeholder names its own field: the header row is the first thing
+      // a narrow screen drops, and a bare "1" under nothing means nothing.
+      '<input type="text" class="mpn" aria-label="Part number" placeholder="e.g. STM32F103C8T6" ' +
+      'autocomplete="off" spellcheck="false" />' +
+      '<input type="text" class="desc" aria-label="Description" placeholder="What it is (optional)" ' +
+      'autocomplete="off" />' +
+      '<input type="text" class="qty" aria-label="Quantity needed" placeholder="Qty (1)" ' +
+      'inputmode="numeric" autocomplete="off" />' +
+      '<button type="button" class="row-drop" aria-label="Remove this part">&times;</button>';
+
+    if (values) {
+      row.querySelector('.mpn').value = values.mpn || '';
+      row.querySelector('.desc').value = values.description || '';
+      row.querySelector('.qty').value = values.quantity ? String(values.quantity) : '';
+    }
+
+    el.lookupRows.appendChild(row);
+    syncRowControls();
+    if (focus) row.querySelector('.mpn').focus();
+    return row;
+  }
+
+  // The last row is the one that grows the list, so it is never the one you
+  // can delete down to nothing.
+  function syncRowControls() {
+    var rows = lookupRowElements();
+    rows.forEach(function (row) {
+      row.querySelector('.row-drop').disabled = rows.length === 1;
+    });
+  }
+
+  function clearLookupRows() {
+    el.lookupRows.innerHTML = '';
+    for (var i = 0; i < STARTING_ROWS; i++) addLookupRow();
+  }
+
+  // A row with no part number is an empty row, whatever else was typed into it.
+  function readLookupRows() {
+    var lines = [];
+    lookupRowElements().forEach(function (row) {
+      var mpn = row.querySelector('.mpn').value.trim();
+      if (!mpn) return;
+      var description = row.querySelector('.desc').value.trim();
+      var quantity = parseQuantity(row.querySelector('.qty').value);
+      lines.push({
+        row: lines.length + 1,
+        mpn: mpn,
+        quantity: quantity && quantity > 0 ? quantity : 1,
+        reference: null,
+        manufacturer: null,
+        description: description || null,
+      });
+    });
+    return lines;
+  }
+
+  function fillLookupRows(values, startRow) {
+    var rows = lookupRowElements();
+    var index = startRow ? rows.indexOf(startRow) : 0;
+    if (index < 0) index = 0;
+
+    values.forEach(function (entry, offset) {
+      var target = lookupRowElements()[index + offset] || addLookupRow();
+      target.querySelector('.mpn').value = entry.mpn || '';
+      if (entry.description) target.querySelector('.desc').value = entry.description;
+      if (entry.quantity) target.querySelector('.qty').value = String(entry.quantity);
+    });
+
+    // Keep one spare row at the end so the list can always be extended.
+    var last = lookupRowElements()[lookupRowElements().length - 1];
+    if (last && last.querySelector('.mpn').value.trim()) addLookupRow();
+    syncRowControls();
+  }
+
+  // Searching reuses one tab rather than opening a new one each time: a lookup
+  // is a question you refine, not a document you collect. The rows stay filled
+  // in afterwards, so adding another part and searching again is two clicks.
   function quickSearch() {
-    var lines = parseManualInput(el.quickInput.value);
+    var lines = readLookupRows();
     if (!lines.length) {
-      toast('Type a part number to look up', true);
+      toast('Enter at least one part number', true);
+      var first = lookupRowElements()[0];
+      if (first) first.querySelector('.mpn').focus();
       return;
     }
 
@@ -393,15 +470,7 @@
     }
 
     renderAll();
-    growQuickInput();
     analyze(entry);
-  }
-
-  // One row until the content needs more, capped by the CSS max-height so a
-  // 200-line paste does not push the rest of the page off the screen.
-  function growQuickInput() {
-    el.quickInput.style.height = 'auto';
-    el.quickInput.style.height = el.quickInput.scrollHeight + 'px';
   }
 
   function searchName(lines) {
@@ -1881,18 +1950,48 @@
   });
 
   el.quickBtn.addEventListener('click', quickSearch);
-
-  // Enter searches, because this reads as a search box however it is built.
-  // Shift+Enter is the way to add a line by hand; pasting a column brings its
-  // own newlines and needs no key at all.
-  el.quickInput.addEventListener('keydown', function (event) {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      quickSearch();
-    }
+  el.addRowBtn.addEventListener('click', function () { addLookupRow(null, true); });
+  el.clearRowsBtn.addEventListener('click', function () {
+    clearLookupRows();
+    lookupRowElements()[0].querySelector('.mpn').focus();
   });
-  el.quickInput.addEventListener('input', growQuickInput);
-  el.quickInput.addEventListener('change', growQuickInput);
+
+  // One listener on the container rather than three per row, so rows can be
+  // added and removed without any bookkeeping.
+  el.lookupRows.addEventListener('click', function (event) {
+    var button = event.target.closest('.row-drop');
+    if (!button || button.disabled) return;
+    button.closest('.lookup-row').remove();
+    if (!lookupRowElements().length) addLookupRow();
+    syncRowControls();
+  });
+
+  el.lookupRows.addEventListener('keydown', function (event) {
+    // Enter on the remove button belongs to the button, not to the search.
+    if (event.key !== 'Enter' || event.target.tagName === 'BUTTON') return;
+    event.preventDefault();
+    quickSearch();
+  });
+
+  // Typing into the last row's part number opens the next one, so the list
+  // grows as it is filled instead of needing a button between every part.
+  el.lookupRows.addEventListener('input', function (event) {
+    if (!event.target.classList.contains('mpn')) return;
+    var rows = lookupRowElements();
+    var row = event.target.closest('.lookup-row');
+    if (row === rows[rows.length - 1] && event.target.value.trim()) addLookupRow();
+  });
+
+  el.lookupRows.addEventListener('paste', function (event) {
+    var text = event.clipboardData && event.clipboardData.getData('text');
+    // A single value is an ordinary paste into one field; only a list needs
+    // spreading across the rows.
+    if (!text || !/[\t\r\n]/.test(text)) return;
+    var values = parsePastedRows(text);
+    if (!values.length) return;
+    event.preventDefault();
+    fillLookupRows(values, event.target.closest('.lookup-row'));
+  });
 
   el.sampleBtn.addEventListener('click', loadSample);
   el.analyzeBtn.addEventListener('click', function () { analyze(); });
@@ -1934,6 +2033,8 @@
       renderTable();
     }, 160);
   });
+
+  clearLookupRows();
 
   state.apiBase = defaultApiBase();
   el.apiBase.value = state.apiBase;
