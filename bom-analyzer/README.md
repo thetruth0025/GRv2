@@ -12,7 +12,9 @@ lists **every** distributor it found, with stock, minimum order and price for ea
 
 **Several BOMs at once.** Load as many as you like — each gets its own tab, its own results, and
 its own filter and search state, so switching between them restores exactly the view you left.
-Nothing is shared or merged between them.
+Results stay separate per BOM, but a part number is only ever looked up once: whichever BOM you
+analyze first keeps it, and the rest report it as already covered instead of spending a second API
+call on the same answer.
 
 Two front ends over the same engine:
 
@@ -48,9 +50,25 @@ DigiKey lists several packaging options, the one that can actually ship your qua
 lowest total cost is chosen — a reel with a lower unit price but a 5,000-piece minimum is not a
 better way to buy 500.
 
+**Looks each part up once, across every BOM.** Load five boards that share a decoupling capacitor
+and it is quoted once, on whichever BOM you analyze first; the others report it as already covered
+rather than paying for the lookup again. The same part on two lines of one BOM becomes a single
+line with the quantities added and the reference designators joined, because that is one purchase.
+
+**Ignores your own part numbers.** Assemblies, cables, drawings and bare boards are not distributor
+stock, so part numbers starting with `ASY0`, `CBL0`, `DES0` or `PCB0` never reach a supplier. The
+list is configurable, nothing is silently dropped, and every skipped line stays visible with the
+reason it was skipped.
+
+**Produces a report you can hand to somebody.** The **Summary report** button opens a one-page
+view: the headline numbers, what each supplier's cart would cost, the lines that need a decision,
+and a concise per-part table. It prints to PDF, or exports to a styled Excel workbook — one BOM or
+all of them at once.
+
 **Exports the comparison.** One row per BOM line with every field for every supplier, respecting
-the current filter. When an aggregator is in play the `.xlsx` gains a second **Distributors** sheet
-carrying one row per distributor offer, and CSV gets a `-distributors` companion file.
+the current filter. The `.xlsx` opens on a **Report** sheet, followed by a concise **Parts** sheet,
+the full **Comparison**, a **Distributors** sheet when an aggregator is in play, and a **Skipped**
+sheet listing whatever was screened out. CSV gets the same tables as companion files.
 
 ### Attribution
 
@@ -151,9 +169,13 @@ Needs attention
   • STM32F103C8T6       Not Recommended for New Designs; Single source — only DigiKey carries it
 ```
 
-The written `.xlsx` has a frozen header, autofilter, one column group per supplier and every
-number stored as a number, so it sorts and totals correctly in Excel. `.csv` and `.json` come out
-of the same column layout — `-f json` gives you the whole analysis for scripting.
+The written `.xlsx` opens on a **Report** sheet — title, headline numbers, what each supplier's
+cart costs and the lines that need a decision — followed by a concise **Parts** sheet, the full
+**Comparison** with one column group per supplier, a **Distributors** sheet when an aggregator is
+in play, and a **Skipped** sheet listing anything screened out. Every sheet after the report has a
+frozen header and autofilter, and every number is stored as a number, so it sorts and totals
+correctly in Excel. `.csv` writes the same tables as companion files beside it; `-f json` gives you
+the whole analysis, screened-out lines included, for scripting.
 
 **Options worth knowing:**
 
@@ -163,6 +185,10 @@ of the same column layout — `-f json` gives you the whole analysis for scripti
 | `-b N` | Building N units — multiplies every BOM quantity by N before pricing |
 | `-s digikey` / `-s mouser` / `-s trustedparts` | Query one supplier only (repeatable) |
 | `--limit N` | Analyze just the first N parts, e.g. to sanity-check a big BOM |
+| `--ignore-prefix PREFIX` | Skip part numbers starting with PREFIX (repeatable); replaces the `ASY0`/`CBL0`/`DES0`/`PCB0` default |
+| `--no-ignore-prefixes` | Look up in-house part numbers too |
+| `--no-merge-duplicates` | Keep repeated part numbers as separate lines instead of adding their quantities |
+| `--show-skipped` | List every skipped line and why |
 | `--list-columns` | Show the detected headers and mapping, then exit |
 | `--mpn-column COL` | Force a column by header name or 0-based index (one flag per field) |
 | `--fail-on risk` | Exit non-zero when any line is flagged — for CI and scripts |
@@ -209,6 +235,30 @@ packaging option you would buy; `short` means it is below your quantity. **Lead 
 Click the arrow on any row to see supplier part numbers, packaging, minimum order quantities, the
 full price break ladder with your break highlighted, and links to the product page and datasheet.
 
+The header rows stay put while the parts scroll under them, the part number stays pinned to the
+left, and **Verdict** stays pinned to the right, so the column the comparison builds up to is
+never the one you have to go looking for. Drag the bottom edge of the table to make it taller or
+shorter.
+
+Above the table, a line reports anything that was not looked up — in-house part numbers, lines
+merged into another line, and parts an earlier BOM already claimed. Open it to see each one and why.
+
+### The summary report
+
+**Summary report** opens a one-page view of the BOM you are looking at:
+
+* the headline numbers — lines, best-mix total, stock risk, lifecycle risk, not found, skipped;
+* what each supplier's whole cart would cost, and what splitting the order line by line saves;
+* every line that needs a decision, with the reason;
+* a concise per-part table: quantity, which supplier to buy from, unit and extended price, lead
+  time and lifecycle status — plus, when several BOMs are open, what the others need of the same
+  part;
+* everything that was skipped.
+
+**Export Excel** downloads it as a styled workbook. With more than one BOM analyzed, **Excel · all
+BOMs** puts every one of them in a single workbook with the tabs prefixed by BOM name.
+**Print / PDF** prints the report on its own, on white, without the rest of the app.
+
 ---
 
 ## Configuration
@@ -222,17 +272,20 @@ All settings live in `.env`; `.env.example` documents each one. The ones worth k
 | `TRUSTEDPARTS_DISTRIBUTORS` | *(all)* | Comma-separated distributor names to restrict TrustedParts to |
 | `TRUSTEDPARTS_IN_STOCK_ONLY` | `false` | Return only distributors holding stock |
 | `TRUSTEDPARTS_USE_CACHED_DATA` | `false` | Use TrustedParts' cached data instead of real-time distributor feeds |
-| `MAX_PARTS_PER_REQUEST` | `500` | Largest BOM accepted in one run |
+| `IGNORE_PART_PREFIXES` | `ASY0,CBL0,DES0,PCB0` | Part-number prefixes treated as in-house and never sent to a supplier. Empty value looks up everything |
+| `MAX_PARTS_PER_REQUEST` | `500` | Largest BOM accepted in one run, counted **after** screening |
 | `ALLOWED_ORIGINS` | `*` | Restrict which origins may call the API if you host the frontend separately |
 | `CACHE_FILE` | `./.cache/parts.json` | On-disk cache location, or `none` to keep it in memory |
 
 ### Quotas
 
 Free tiers are limited (both suppliers cap a free key in the low thousands of calls per day). The
-app minimises calls in three ways: duplicate part numbers across BOM lines collapse into one query,
-answers are cached on disk for `CACHE_TTL_HOURS`, and the cache stores a quantity-independent
-catalog record — so re-running the same BOM at a different quantity reprices without any new API
-calls. Failed lookups are never cached, so a rate limit does not poison the next run.
+app minimises calls in five ways: in-house part numbers never leave the building, repeated part
+numbers within a BOM collapse into one line, a part already quoted for another loaded BOM is not
+quoted again, answers are cached on disk for `CACHE_TTL_HOURS`, and the cache stores a
+quantity-independent catalog record — so re-running the same BOM at a different quantity reprices
+without any new API calls. Failed lookups are never cached, so a rate limit does not poison the
+next run.
 
 ### Hosting the frontend separately
 
@@ -244,7 +297,7 @@ Settings panel, and set `ALLOWED_ORIGINS` on the server to the origin serving th
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 145 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 196 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py samples/sample-bom.csv        # the CLI
 ```
@@ -257,10 +310,11 @@ bomlib/digikey.py         OAuth 2.0 + Product Information V4 → catalog record
 bomlib/mouser.py          Search API v1 → catalog record
 bomlib/trustedparts.py    Inventory API v2 (aggregator, batched) → catalog record
 bomlib/normalize.py       Lead time, lifecycle and price-break normalization; cross-supplier comparison
+bomlib/prepare.py         Screening: in-house prefixes, duplicate lines, parts another BOM owns
 bomlib/lookup.py          Deduplication, caching, concurrency, BOM roll-up
 bomlib/cache.py           TTL cache with disk persistence
 bomlib/http_client.py     urllib with timeout, retry and backoff
-bomlib/report.py          One column layout shared by the CSV, .xlsx and terminal output
+bomlib/report.py          The report and comparison layouts shared by CSV, .xlsx and terminal output
 bomlib/xlsx_writer.py     Minimal styled .xlsx writer (zipfile + hand-built XML)
 public/                   The web frontend (plain HTML/CSS/JS, no build step)
 ```
@@ -284,7 +338,9 @@ The tests cover the parts that are easy to get quietly wrong: price break select
 minimum-order and packaging-multiple arithmetic, the lead time and lifecycle vocabularies of both
 suppliers, packaging choice, header detection against four different BOM dialects, `.xlsx`
 container reading, `.xlsx` writing, the CSV formula-injection guard, the CLI's column overrides
-and exit codes, and the comparison verdicts. Supplier clients are tested against recorded response
+and exit codes, the comparison verdicts, and screening — that a prefix only counts at the start of
+a part number, that `ASY1` is not `ASY0`, that merging adds quantities without mutating the caller's
+lines, and that a BOM of nothing but in-house numbers costs zero API calls. Supplier clients are tested against recorded response
 shapes, so no network access is needed.
 
 ---
@@ -298,6 +354,13 @@ shapes, so no network access is needed.
 - **Matching is by manufacturer part number.** A part is only reported when the returned MPN is a
   credible match, and the detail panel says when the match was not exact — but verify anything
   surprising.
+- **Which BOM owns a shared part depends on the order you analyze them.** A part quoted for one BOM
+  is not quoted again for the others, so its price and lead time reflect the quantity of whichever
+  BOM you ran first. The report names the other BOMs and what they need, but it does not reprice
+  the line at the combined quantity — buying the total in one order would usually be cheaper still.
+- **Screening is by prefix, not by meaning.** `ASY0`, `CBL0`, `DES0` and `PCB0` are assumed to be
+  in-house numbering. If a real manufacturer part number starts with one of those, set
+  `IGNORE_PART_PREFIXES` to something narrower, or clear it and let everything through.
 - **TrustedParts reports no lead time.** Its API carries stock but no lead time field, so that
   column reads as unknown for TrustedParts rather than guessing. Lines it stocks still compare
   correctly, because stock on hand outranks any quoted lead time.

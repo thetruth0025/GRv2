@@ -8,10 +8,12 @@ other an API key, and neither sends the CORS headers a browser requires.
 Standard library only. Run with: python3 server.py
 """
 
+import io
 import json
 import mimetypes
 import os
 import posixpath
+import re
 import sys
 import threading
 import urllib.parse
@@ -30,6 +32,8 @@ from bomlib.lookup import LookupService, summarize_bom  # noqa: E402
 from bomlib.mouser import MouserClient  # noqa: E402
 from bomlib import trustedparts as tp_module  # noqa: E402
 from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
+from bomlib.prepare import normalize_mpn, parse_prefixes, prepare_lines  # noqa: E402
+from bomlib.report import write_report_workbook  # noqa: E402
 from bomlib.spreadsheet import extract_bom, line_from_row, parse_workbook  # noqa: E402
 
 PUBLIC_DIR = os.path.join(BASE_DIR, 'public')
@@ -57,7 +61,15 @@ PORT = _int_env('PORT', 8787)
 HOST = os.environ.get('HOST') or '0.0.0.0'
 MAX_UPLOAD_BYTES = _int_env('MAX_UPLOAD_BYTES', 12 * 1024 * 1024)
 MAX_JSON_BYTES = 4 * 1024 * 1024
+# A finished analysis of several BOMs is far bigger than a lookup request:
+# it carries every price break and distributor offer back for the report.
+MAX_REPORT_BYTES = _int_env('MAX_REPORT_BYTES', 48 * 1024 * 1024)
+MAX_REPORT_BOOKS = 40
 MAX_PARTS_PER_REQUEST = _int_env('MAX_PARTS_PER_REQUEST', 500)
+# The raw list is screened before this limit applies, so a BOM padded with
+# in-house part numbers is not rejected for parts nobody would look up.
+MAX_RAW_PARTS_PER_REQUEST = _int_env('MAX_RAW_PARTS_PER_REQUEST', 5000)
+IGNORE_PREFIXES = parse_prefixes(os.environ.get('IGNORE_PART_PREFIXES'))
 ALLOWED_ORIGINS = [o.strip() for o in str(os.environ.get('ALLOWED_ORIGINS') or '*').split(',') if o.strip()]
 
 digikey = DigiKeyClient(
@@ -103,6 +115,30 @@ lookup_service = LookupService(
 )
 
 
+def _download_name(label):
+    """A filename safe to put in a Content-Disposition header."""
+    slug = re.sub(r'[^A-Za-z0-9._-]+', '-', str(label or 'bom')).strip('-') or 'bom'
+    return '%s-report.xlsx' % slug[:60]
+
+
+def _requested_claims(payload):
+    """Part numbers an earlier BOM already claimed, mapped to its name.
+
+    Which BOMs are open and in what order is the browser's state, not the
+    server's, so the caller supplies it. Anything malformed is ignored rather
+    than rejected: a bad claim map should not fail an otherwise valid lookup.
+    """
+    raw = payload.get('claimed')
+    if not isinstance(raw, dict):
+        return {}
+    claims = {}
+    for key, value in list(raw.items())[:MAX_RAW_PARTS_PER_REQUEST]:
+        mpn = normalize_mpn(key)
+        if mpn:
+            claims[mpn] = str(value or 'another BOM')[:120]
+    return claims
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     server_version = 'BOMAnalyzer/1.0'
@@ -141,6 +177,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_remap()
         if path == '/api/lookup':
             return self._handle_lookup()
+        if path == '/api/report':
+            return self._handle_report()
         return self._send_json(404, {'error': 'Unknown endpoint ' + path})
 
     def do_DELETE(self):
@@ -172,6 +210,7 @@ class Handler(BaseHTTPRequestHandler):
                      }},
                 ],
                 'maxPartsPerRequest': MAX_PARTS_PER_REQUEST,
+                'ignorePrefixes': IGNORE_PREFIXES,
                 'cacheEntries': len(cache),
                 'currency': os.environ.get('DIGIKEY_CURRENCY') or os.environ.get('MOUSER_CURRENCY') or 'USD',
             })
@@ -234,9 +273,9 @@ class Handler(BaseHTTPRequestHandler):
         raw_parts = payload.get('parts') if isinstance(payload.get('parts'), list) else []
         if not raw_parts:
             return self._send_json(400, {'error': 'No parts supplied'})
-        if len(raw_parts) > MAX_PARTS_PER_REQUEST:
+        if len(raw_parts) > MAX_RAW_PARTS_PER_REQUEST:
             return self._send_json(400, {
-                'error': 'Send at most %d parts per request' % MAX_PARTS_PER_REQUEST
+                'error': 'Send at most %d rows per request' % MAX_RAW_PARTS_PER_REQUEST
             })
 
         parts = []
@@ -261,10 +300,37 @@ class Handler(BaseHTTPRequestHandler):
         if not parts:
             return self._send_json(400, {'error': 'No usable part numbers supplied'})
 
+        # In-house part numbers and repeats are dropped here rather than in the
+        # browser, so no caller can spend an API call on them by accident.
+        screened = prepare_lines(
+            parts,
+            ignore_prefixes=IGNORE_PREFIXES,
+            claimed=_requested_claims(payload),
+        )
+        parts = screened['lines']
+        excluded = screened['excluded']
+        if not parts:
+            return self._send_json(200, {
+                'rows': [],
+                'suppliers': lookup_service.suppliers,
+                'stats': {'apiCalls': 0, 'cacheHits': 0, 'errors': 0, 'lookups': 0, 'completed': 0},
+                'summary': summarize_bom([], lookup_service.suppliers),
+                'excluded': excluded,
+                'claimed': screened['claimed'],
+            })
+
+        # The cap applies to what will actually be looked up: a BOM padded with
+        # assembly and cable lines should not be turned away for rows that were
+        # never going to reach a supplier.
+        if len(parts) > MAX_PARTS_PER_REQUEST:
+            return self._send_json(400, {
+                'error': 'Send at most %d parts per request' % MAX_PARTS_PER_REQUEST
+            })
+
         # A large BOM takes a while, so the client can ask for server-sent
         # events and watch progress instead of staring at a spinner.
         if payload.get('stream'):
-            return self._stream_lookup(parts)
+            return self._stream_lookup(parts, excluded, screened['claimed'])
 
         try:
             result = lookup_service.lookup_parts(parts)
@@ -276,9 +342,73 @@ class Handler(BaseHTTPRequestHandler):
             'suppliers': result['suppliers'],
             'stats': result['stats'],
             'summary': summarize_bom(result['rows'], result['suppliers']),
+            'excluded': excluded,
+            'claimed': screened['claimed'],
         })
 
-    def _stream_lookup(self, parts):
+    def _handle_report(self):
+        """Build the downloadable workbook from an analysis the client already has.
+
+        The rows come back from the browser rather than being recomputed here:
+        the report has to match the numbers on screen exactly, and re-running
+        the lookup would spend API calls to answer a question already answered.
+        """
+        payload = self._read_json(MAX_REPORT_BYTES)
+        if payload is None:
+            return None
+
+        raw_books = payload.get('books')
+        if not isinstance(raw_books, list) or not raw_books:
+            return self._send_json(400, {'error': 'No analyzed BOMs supplied'})
+        if len(raw_books) > MAX_REPORT_BOOKS:
+            return self._send_json(400, {
+                'error': 'Report at most %d BOMs at once' % MAX_REPORT_BOOKS
+            })
+
+        books = []
+        for entry in raw_books:
+            if not isinstance(entry, dict):
+                continue
+            rows = entry.get('rows') if isinstance(entry.get('rows'), list) else []
+            suppliers = entry.get('suppliers') if isinstance(entry.get('suppliers'), list) else []
+            summary = entry.get('summary') if isinstance(entry.get('summary'), dict) else {}
+            if not rows:
+                continue
+            books.append({
+                'result': {'rows': rows, 'suppliers': suppliers, 'stats': entry.get('stats') or {}},
+                'summary': summary,
+                'meta': {'name': str(entry.get('name') or 'Bill of materials')[:120],
+                         'generated': str(entry.get('generated') or '')[:40] or None},
+                'excluded': entry.get('excluded') if isinstance(entry.get('excluded'), list) else [],
+            })
+
+        if not books:
+            return self._send_json(400, {'error': 'None of those BOMs have results yet'})
+
+        buffer = io.BytesIO()
+        try:
+            write_report_workbook(buffer, books)
+        except Exception as err:
+            return self._send_json(500, {'error': 'Could not build the workbook: %s' % err})
+
+        body = buffer.getvalue()
+        name = _download_name(books[0]['meta']['name'] if len(books) == 1 else 'all-boms')
+        self.send_response(200)
+        self.send_header(
+            'Content-Type',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        self.send_header('Content-Disposition', 'attachment; filename="%s"' % name)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        for key, value in getattr(self, '_cors', []):
+            self.send_header(key, value)
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+        return None
+
+    def _stream_lookup(self, parts, excluded=None, claimed=None):
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream; charset=utf-8')
         self.send_header('Cache-Control', 'no-cache, no-transform')
@@ -303,7 +433,11 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError, ValueError):
                 broken.set()
 
-        send('start', {'parts': len(parts), 'suppliers': lookup_service.suppliers})
+        send('start', {
+            'parts': len(parts),
+            'suppliers': lookup_service.suppliers,
+            'excluded': len(excluded or []),
+        })
 
         # Progress fires once per supplier lookup, which is faster than the
         # client can usefully repaint; throttle to a readable rate.
@@ -323,6 +457,8 @@ class Handler(BaseHTTPRequestHandler):
                 'suppliers': result['suppliers'],
                 'stats': result['stats'],
                 'summary': summarize_bom(result['rows'], result['suppliers']),
+                'excluded': excluded or [],
+                'claimed': claimed or [],
             })
         except Exception as err:
             send('error', {'error': str(err) or 'Supplier lookup failed'})
@@ -402,8 +538,8 @@ class Handler(BaseHTTPRequestHandler):
             return b''
         return self.rfile.read(length)
 
-    def _read_json(self):
-        body = self._read_body(MAX_JSON_BYTES)
+    def _read_json(self, limit=MAX_JSON_BYTES):
+        body = self._read_body(limit)
         if body is None:
             self._send_json(413, {'error': 'Request body is too large'})
             return None

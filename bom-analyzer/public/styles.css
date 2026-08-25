@@ -30,7 +30,10 @@ body {
   padding-bottom: calc(40px + var(--safe-bottom));
 }
 
-#app { max-width: 1400px; margin: 0 auto; padding: 0 16px; }
+/* The comparison is the widest thing on the page and the Verdict column sits
+   at its far right, so the shell takes whatever the display offers rather than
+   forcing a horizontal scroll on a monitor that had the room all along. */
+#app { max-width: min(2100px, calc(100vw - 24px)); margin: 0 auto; padding: 0 16px; }
 
 code {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -300,11 +303,19 @@ table.preview td { color: var(--text2); font-family: 'JetBrains Mono', ui-monosp
 .chip .count { opacity: .7; margin-left: 4px; }
 
 /* ── RESULTS TABLE ── */
+/* Scrolls in both directions so the header rows and the pinned columns stay
+   put while the parts move under them. The height is a floor-and-ceiling
+   rather than a fixed value: short BOMs stay short, long ones stop growing
+   once the table would run off the screen. */
 .table-wrap {
-  overflow-x: auto;
+  overflow: auto;
+  max-height: var(--table-height, min(72vh, 900px));
+  min-height: 180px;
+  resize: vertical;
   border: 1px solid var(--border);
   border-radius: 10px;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 table.results { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 0.8rem; min-width: 900px; }
 table.results th, table.results td {
@@ -335,7 +346,9 @@ table.results thead tr.supplier-row th {
   color: var(--text);
 }
 table.results thead tr.supplier-row th.spacer { background: var(--surface2); }
-table.results thead tr.field-row th { top: 33px; }
+/* Measured at render time: guessing this leaves either a gap or an overlap
+   whenever the supplier row wraps or the font metrics differ. */
+table.results thead tr.field-row th { top: var(--head-row1-height, 33px); }
 th.group-start, td.group-start { border-left: 1px solid var(--border); }
 tbody tr.part-row:hover > td { background: rgba(255, 255, 255, .022); }
 tbody tr.part-row.expanded > td { background: rgba(56, 189, 248, .05); }
@@ -348,6 +361,19 @@ table.results th.sticky-b, table.results td.sticky-b {
   left: var(--sticky-b-left, 36px);
   z-index: 2;
 }
+/* Verdict is the column the whole comparison builds up to, so it is pinned to
+   the right edge instead of sitting past it where it has to be scrolled to. */
+table.results th.sticky-z, table.results td.sticky-z {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+  border-left: 1px solid var(--border);
+  box-shadow: -10px 0 12px -10px rgba(0, 0, 0, .75);
+}
+table.results thead th.sticky-z { z-index: 5; background: var(--surface2); }
+table.results tbody td.sticky-z { background: var(--surface); }
+table.results tbody tr.part-row.expanded td.sticky-z { background: #1b2129; }
+
 table.results tbody td.sticky-a, table.results tbody td.sticky-b { background: var(--surface); }
 table.results tbody tr.part-row.expanded td.sticky-a,
 table.results tbody tr.part-row.expanded td.sticky-b { background: #1b2129; }
@@ -485,6 +511,16 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
 }
 .toast.bad { border-color: rgba(248, 113, 113, .5); }
 
+/* Three pinned columns leave a phone almost nothing to scroll, so the right
+   pin is dropped and Verdict goes back to being the last column you reach. */
+@media (max-width: 700px) {
+  table.results th.sticky-z, table.results td.sticky-z {
+    position: static;
+    box-shadow: none;
+  }
+  .table-wrap { max-height: none; resize: none; }
+}
+
 @media (max-width: 640px) {
   header h1 { font-size: 1.35rem; }
   .card { padding: 15px; }
@@ -602,4 +638,175 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
   font-size: 0.8rem;
   color: var(--text3);
   padding-left: 2px;
+}
+
+/* ── SKIPPED LINES NOTICE ── */
+/* In-house part numbers and repeats never reach a supplier, but silently
+   dropping rows from somebody's BOM would be worse than the API calls saved —
+   so what was skipped, and why, stays one click away. */
+.skipped-note {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface2);
+  font-size: 0.79rem;
+}
+.skipped-note > summary {
+  cursor: pointer;
+  padding: 9px 12px;
+  color: var(--text2);
+  font-weight: 600;
+  list-style: none;
+}
+.skipped-note > summary::-webkit-details-marker { display: none; }
+.skipped-note > summary::before { content: '▸ '; color: var(--text3); }
+.skipped-note[open] > summary::before { content: '▾ '; }
+.skipped-note > summary:hover { color: var(--text); }
+.skipped-table { width: 100%; border-collapse: collapse; font-size: 0.76rem; }
+.skipped-table th, .skipped-table td {
+  text-align: left;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--text2);
+  vertical-align: top;
+}
+.skipped-table th { color: var(--text3); font-weight: 700; text-transform: uppercase; font-size: 0.66rem; letter-spacing: .06em; }
+.skipped-table td.mpn-cell { font-family: 'JetBrains Mono', ui-monospace, monospace; color: var(--text); overflow-wrap: anywhere; }
+.reason-tag {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 0.66rem;
+  font-weight: 700;
+  border: 1px solid var(--border);
+  color: var(--text2);
+}
+.reason-tag.ignored { border-color: rgba(167, 139, 250, .45); color: var(--violet); }
+.reason-tag.merged { border-color: rgba(56, 189, 248, .45); color: var(--accent2); }
+.reason-tag.duplicate { border-color: rgba(251, 191, 36, .45); color: var(--yellow); }
+
+/* ── REPORT OVERLAY ── */
+.report-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(6, 8, 12, .72);
+  backdrop-filter: blur(3px);
+  overflow: auto;
+  padding: calc(24px + var(--safe-top)) 16px calc(32px + var(--safe-bottom));
+}
+.report-sheet {
+  max-width: 1180px;
+  margin: 0 auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .6);
+  overflow: hidden;
+}
+.report-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(135deg, rgba(45, 212, 191, .09), rgba(56, 189, 248, .05));
+}
+.report-head h2 {
+  font-family: 'Syne', sans-serif;
+  font-size: 1.35rem;
+  font-weight: 800;
+  letter-spacing: -.01em;
+}
+.report-head .sub { margin-top: 4px; color: var(--text2); font-size: 0.8rem; }
+.report-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.report-body { padding: 18px 22px 24px; }
+
+.report-section { margin-top: 24px; }
+.report-section:first-child { margin-top: 0; }
+.report-section > h3 {
+  font-family: 'Syne', sans-serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--text);
+  padding-bottom: 7px;
+  margin-bottom: 11px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.report-section > h3 .aside { font-family: 'DM Sans', sans-serif; font-size: 0.76rem; font-weight: 500; color: var(--text3); }
+
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+.kpi {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 13px;
+  background: var(--surface2);
+}
+.kpi .k-label { font-size: 0.68rem; text-transform: uppercase; letter-spacing: .07em; color: var(--text3); font-weight: 700; }
+.kpi .k-value {
+  font-family: 'Syne', sans-serif;
+  font-size: 1.32rem;
+  font-weight: 800;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+.kpi .k-note { font-size: 0.71rem; color: var(--text3); margin-top: 3px; }
+.kpi.good .k-value { color: var(--green); }
+.kpi.warn .k-value { color: var(--yellow); }
+.kpi.bad .k-value { color: var(--red); }
+.kpi.accent { border-color: rgba(45, 212, 191, .4); }
+.kpi.accent .k-value { color: var(--accent); }
+
+.report-table { width: 100%; border-collapse: collapse; font-size: 0.79rem; }
+.report-table th, .report-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.report-table thead th {
+  color: var(--text3);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.report-table td.num, .report-table th.num { text-align: right; font-family: 'JetBrains Mono', ui-monospace, monospace; white-space: nowrap; }
+.report-table tbody tr:hover td { background: rgba(255, 255, 255, .022); }
+.report-table .mpn-cell { font-family: 'JetBrains Mono', ui-monospace, monospace; color: var(--text); overflow-wrap: anywhere; min-width: 132px; }
+.report-table .desc { color: var(--text2); font-size: 0.74rem; }
+.report-table tr.winner td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.report-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.report-empty { color: var(--green); font-size: 0.82rem; padding: 4px 0; }
+.report-foot { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--text3); font-size: 0.73rem; line-height: 1.6; }
+
+/* Printing turns the overlay into the page: the app behind it is chrome, and
+   the dark palette would empty a toner cartridge. */
+@media print {
+  body { background: #fff; padding: 0; }
+  #app, .toast { display: none !important; }
+  .report-overlay {
+    position: static;
+    inset: auto;
+    background: #fff;
+    padding: 0;
+    overflow: visible;
+    backdrop-filter: none;
+  }
+  .report-sheet { max-width: none; border: 0; box-shadow: none; background: #fff; }
+  .report-head { background: #fff; border-bottom: 2px solid #333; }
+  .report-actions, .icon-btn { display: none !important; }
+  .report-sheet, .report-sheet * { color: #111 !important; }
+  .kpi { background: #f4f6f8 !important; border-color: #ccd3da !important; }
+  .kpi .k-label, .kpi .k-note, .report-table thead th { color: #55606d !important; }
+  .report-table th, .report-table td, .report-section > h3 { border-color: #ccd3da !important; }
+  .report-section { break-inside: avoid; }
+  .report-table tr { break-inside: avoid; }
 }

@@ -5,21 +5,32 @@ table, so the three can never drift apart.
 """
 
 import csv
+import datetime
 import json
 import os
 import re
 
 from .normalize import format_lead_time
+from .prepare import DUPLICATE, IGNORED, MERGED
 from .xlsx_writer import (
     Cell,
     STYLE_BAD,
+    STYLE_BOLD,
     STYLE_DEFAULT,
+    STYLE_GOOD,
     STYLE_HEADER,
     STYLE_INT,
+    STYLE_INT_BOLD,
+    STYLE_LABEL,
     STYLE_MONEY,
+    STYLE_MONEY_BOLD,
     STYLE_MONEY_FINE,
     STYLE_MUTED,
+    STYLE_SECTION,
+    STYLE_SUBTITLE,
+    STYLE_TITLE,
     STYLE_WARN,
+    column_letter,
     write_xlsx,
 )
 
@@ -38,7 +49,7 @@ TAIL_COLUMNS = [
 ]
 TAIL_WIDTHS = [17, 20, 14, 14, 18, 52]
 
-SEVERITY_STYLE = {'bad': STYLE_BAD, 'warn': STYLE_WARN, 'ok': STYLE_DEFAULT, 'unknown': STYLE_MUTED}
+SEVERITY_STYLE = {'bad': STYLE_BAD, 'warn': STYLE_WARN, 'ok': STYLE_GOOD, 'unknown': STYLE_MUTED}
 
 
 def build_header(suppliers, currency='USD'):
@@ -209,14 +220,21 @@ def write_csv(path, result, summary):
         for row in rows:
             writer.writerow([_csv_cell(value) for value in row])
 
-    # CSV has no second sheet, so the distributor breakdown goes beside it.
-    if has_distributor_detail(result):
-        base, extension = os.path.splitext(path)
-        companion = base + '-distributors' + (extension or '.csv')
-        with open(companion, 'w', encoding='utf-8-sig', newline='') as handle:
+    base, extension = os.path.splitext(path)
+
+    def companion(suffix, companion_rows):
+        target = base + suffix + (extension or '.csv')
+        with open(target, 'w', encoding='utf-8-sig', newline='') as handle:
             writer = csv.writer(handle)
-            for row in build_distributor_rows(result, summary):
+            for row in companion_rows:
                 writer.writerow([_csv_cell(value) for value in row])
+
+    # CSV has no second sheet, so the extra tables go beside it as files.
+    companion('-summary', build_parts_rows(result, summary))
+    if has_distributor_detail(result):
+        companion('-distributors', build_distributor_rows(result, summary))
+    if result.get('excluded'):
+        companion('-skipped', build_excluded_rows(result['excluded']))
     return path
 
 
@@ -238,19 +256,38 @@ def _is_number(text):
         return False
 
 
-def write_workbook(path, result, summary):
-    sheets = [{
-        'name': 'BOM Comparison',
-        'rows': build_rows(result, summary, styled=True),
-        'widths': column_widths(result['suppliers']),
-    }]
-    if has_distributor_detail(result):
-        sheets.append({
-            'name': 'Distributors',
-            'rows': build_distributor_rows(result, summary, styled=True),
-            'widths': DISTRIBUTOR_WIDTHS,
-        })
+def write_workbook(path, result, summary, meta=None):
+    sheets = build_workbook_sheets(result, summary, meta)
     return write_xlsx(path, sheets, freeze_rows=1, autofilter=True)
+
+
+def write_report_workbook(target, books):
+    """One workbook covering one or more analyzed BOMs.
+
+    `books` is a list of {'result', 'summary', 'meta', 'excluded'}. With a
+    single BOM the sheets keep their plain names; with several, each set is
+    prefixed with the BOM's name so the tabs stay readable.
+    """
+    books = list(books or [])
+    sheets = []
+    for index, book in enumerate(books):
+        prefix = ''
+        if len(books) > 1:
+            meta = book.get('meta') or {}
+            # Four sheet names share the prefix, and Excel truncates at 31
+            # characters, so the BOM name gets the room that leaves.
+            prefix = _sheet_prefix(meta.get('name') or 'BOM %d' % (index + 1))
+        sheets.extend(build_workbook_sheets(
+            book['result'], book['summary'], book.get('meta'), book.get('excluded'), prefix,
+        ))
+    return write_xlsx(target, sheets, freeze_rows=1, autofilter=True)
+
+
+def _sheet_prefix(name):
+    # "Full comparison" is the longest sheet name at 15 characters; 31 minus
+    # that and a space leaves 15 for the BOM.
+    cleaned = re.sub(r'[\[\]:*?/\\]', '-', str(name or '')).strip()
+    return cleaned[:15].strip()
 
 
 def write_json(path, result, summary):
@@ -260,6 +297,7 @@ def write_json(path, result, summary):
             'stats': result['stats'],
             'summary': summary,
             'rows': result['rows'],
+            'excluded': result.get('excluded') or [],
         }, handle, indent=2)
     return path
 
@@ -344,3 +382,313 @@ def lead_label(offer):
 
 def format_days(days):
     return '—' if days is None else (format_lead_time(days) or str(days))
+
+
+# ── Concise report ──────────────────────────────────────────────────────────
+#
+# The full comparison sheet is the audit trail: every supplier, every column.
+# This is the sheet somebody actually reads — the headline numbers, who to buy
+# from, and what needs a decision, in that order.
+
+REPORT_WIDTH = 8
+
+PARTS_COLUMNS = [
+    'Row', 'Part Number', 'Qty', 'Manufacturer', 'Description',
+    'Buy From', 'Unit Price', 'Extended', 'Lead Time', 'Lifecycle', 'Notes',
+]
+PARTS_WIDTHS = [6, 26, 8, 18, 36, 15, 12, 13, 15, 16, 46]
+
+EXCLUDED_COLUMNS = ['Row', 'Part Number', 'Qty', 'Reference', 'Description', 'Why it was skipped']
+EXCLUDED_WIDTHS = [6, 26, 8, 18, 36, 44]
+
+EXCLUSION_LABEL = {
+    IGNORED: 'In-house part number',
+    MERGED: 'Duplicate line, quantities added',
+    DUPLICATE: 'Already covered by another BOM',
+}
+
+
+def _pad(row, width=REPORT_WIDTH):
+    return row + [Cell('')] * max(0, width - len(row))
+
+
+def _section(title, width=REPORT_WIDTH):
+    return _pad([Cell(title, STYLE_SECTION)], width)
+
+
+def risk_rows(result):
+    """The lines a buyer has to make a decision about."""
+    risky = []
+    for row in result['rows']:
+        comparison = row['comparison']
+        found = any(o and o.get('found') for o in row['offers'].values())
+        severity = comparison.get('lifecycleSeverity')
+        if found and severity not in ('bad', 'warn') and comparison.get('inStockSuppliers'):
+            continue
+        risky.append(row)
+    return risky
+
+
+def report_stats(result, summary, excluded=None):
+    """The handful of numbers the top of the report leads with."""
+    rows = result['rows']
+    stock_risk = sum(1 for r in rows if not r['comparison'].get('inStockSuppliers'))
+    lifecycle_risk = sum(
+        1 for r in rows if r['comparison'].get('lifecycleSeverity') in ('bad', 'warn')
+    )
+    return {
+        'lines': summary.get('lines') or len(rows),
+        'totalQuantity': summary.get('totalQuantity') or 0,
+        'bestMixTotal': summary.get('bestMixTotal'),
+        'stockRisk': stock_risk,
+        'lifecycleRisk': lifecycle_risk,
+        'notFound': summary.get('notFoundLines') or 0,
+        'skipped': len(excluded or []),
+    }
+
+
+def build_report_rows(result, summary, meta=None, excluded=None):
+    """The headline sheet: title block, KPI strip, supplier carts, decisions."""
+    meta = meta or {}
+    currency = summary.get('currency') or 'USD'
+    suppliers = result['suppliers']
+    stats = report_stats(result, summary, excluded)
+    generated = meta.get('generated') or datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+
+    rows = [
+        _pad([Cell('BOM Supplier Report', STYLE_TITLE)]),
+        _pad([Cell('%s · %s · prices in %s' % (
+            meta.get('name') or 'Bill of materials', generated, currency), STYLE_SUBTITLE)]),
+        _pad([]),
+        _section('Overview'),
+        _pad([Cell(label, STYLE_LABEL) for label in [
+            'Lines', 'Units', 'Best-mix total', 'Stock risk',
+            'Lifecycle risk', 'Not found', 'Skipped', 'Suppliers',
+        ]]),
+        _pad([
+            Cell(stats['lines'], STYLE_INT_BOLD),
+            Cell(stats['totalQuantity'], STYLE_INT_BOLD),
+            Cell(stats['bestMixTotal'], STYLE_MONEY_BOLD),
+            Cell(stats['stockRisk'], STYLE_BAD if stats['stockRisk'] else STYLE_GOOD),
+            Cell(stats['lifecycleRisk'], STYLE_WARN if stats['lifecycleRisk'] else STYLE_GOOD),
+            Cell(stats['notFound'], STYLE_BAD if stats['notFound'] else STYLE_GOOD),
+            Cell(stats['skipped'], STYLE_MUTED),
+            Cell(len(suppliers), STYLE_INT),
+        ]),
+        _pad([]),
+        _section('What each supplier would cost'),
+        _pad([Cell(label, STYLE_HEADER) for label in [
+            'Supplier', 'Lines quoted', 'Not carried', 'Short on stock', 'Cart total', '', '', '',
+        ]]),
+    ]
+
+    totals = summary.get('supplierTotals') or {}
+    cheapest = summary.get('cheapestSingleSource')
+    for supplier in suppliers:
+        entry = totals.get(supplier['id'])
+        if not entry:
+            continue
+        name = supplier['name'] + (' ← cheapest single source' if supplier['id'] == cheapest else '')
+        rows.append(_pad([
+            Cell(name, STYLE_BOLD if supplier['id'] == cheapest else STYLE_DEFAULT),
+            Cell(entry.get('linesPriced'), STYLE_INT),
+            Cell(entry.get('linesMissing'), STYLE_INT),
+            Cell(entry.get('linesShort'), STYLE_INT),
+            Cell(entry.get('total'), STYLE_MONEY),
+        ]))
+
+    if len(suppliers) > 1:
+        savings = summary.get('mixSavings')
+        rows.append(_pad([
+            Cell('Cheapest line by line', STYLE_BOLD),
+            Cell(summary.get('bestMixLines'), STYLE_INT),
+            Cell(''), Cell(''),
+            Cell(summary.get('bestMixTotal'), STYLE_MONEY_BOLD),
+            Cell('saves %s vs. single-sourcing' % _plain_money(savings, currency)
+                 if isinstance(savings, (int, float)) and savings > 0 else '', STYLE_MUTED),
+        ]))
+
+    risky = risk_rows(result)
+    rows.append(_pad([]))
+    rows.append(_section('Needs a decision (%d)' % len(risky)))
+    if risky:
+        rows.append(_pad([Cell(label, STYLE_HEADER) for label in [
+            'Row', 'Part Number', 'Qty', 'Lifecycle', 'Issue', '', '', '',
+        ]]))
+        for row in risky:
+            comparison = row['comparison']
+            rows.append(_pad([
+                Cell(row.get('row'), STYLE_INT),
+                Cell(row.get('mpn')),
+                Cell(row.get('quantity'), STYLE_INT),
+                Cell(comparison.get('lifecycle'),
+                     SEVERITY_STYLE.get(comparison.get('lifecycleSeverity'), STYLE_DEFAULT)),
+                Cell('; '.join(f['text'] for f in comparison.get('flags') or [])),
+            ]))
+    else:
+        rows.append(_pad([Cell('Every line is in stock, priced and in production.', STYLE_GOOD)]))
+
+    counts = {}
+    for entry in excluded or []:
+        counts[entry.get('reason')] = counts.get(entry.get('reason'), 0) + 1
+    if counts:
+        rows.append(_pad([]))
+        rows.append(_section('Lines not looked up'))
+        for reason, label in EXCLUSION_LABEL.items():
+            if counts.get(reason):
+                rows.append(_pad([
+                    Cell(label), Cell(counts[reason], STYLE_INT),
+                    Cell('listed in full on the Skipped sheet', STYLE_MUTED),
+                ]))
+
+    notes = attribution_notes(result)
+    if notes:
+        rows.append(_pad([]))
+        for note in notes:
+            rows.append(_pad([Cell(note, STYLE_MUTED)]))
+
+    return rows
+
+
+def _plain_money(value, currency='USD'):
+    return money(value, currency) if value is not None else '—'
+
+
+def _also_in(row):
+    """What other BOMs need of this part: [(name, quantity), ...].
+
+    Only the browser knows which other BOMs are open, so it attaches this when
+    it asks for a report. Absent, the column simply does not appear.
+    """
+    entries = row.get('alsoIn')
+    if not isinstance(entries, list):
+        return []
+    usable = []
+    for entry in entries:
+        if isinstance(entry, dict) and entry.get('name'):
+            usable.append((str(entry['name'])[:120], entry.get('quantity')))
+    return usable
+
+
+def build_parts_rows(result, summary, styled=False):
+    """One line per part, only the columns a buyer acts on."""
+    def cell(value, style=STYLE_DEFAULT):
+        return Cell(value, style) if styled else value
+
+    shared = any(_also_in(row) for row in result['rows'])
+    columns = list(PARTS_COLUMNS)
+    if shared:
+        columns.insert(3, 'Also In')
+
+    rows = [[cell(name, STYLE_HEADER) for name in columns]]
+
+    for row in result['rows']:
+        comparison = row['comparison']
+        # The recommended supplier is the one to price: it already balances
+        # "soonest" against "cheapest among the soonest".
+        chosen = None
+        for offer in row['offers'].values():
+            if offer and offer.get('found') and offer.get('supplier') == comparison.get('recommendedSupplier'):
+                chosen = offer
+                break
+
+        lead = '—'
+        if chosen:
+            lead = 'In stock' if chosen.get('stockSufficient') is True else (chosen.get('leadTimeText') or '—')
+
+        notes = [f['text'] for f in comparison.get('flags') or []]
+        if chosen and chosen.get('aggregator') and chosen.get('distributor'):
+            notes.insert(0, 'via %s' % chosen['distributor'])
+        if row.get('mergedRows'):
+            notes.append('includes rows %s' % ', '.join(str(r) for r in row['mergedRows']))
+
+        record = [
+            cell(row.get('row'), STYLE_INT),
+            cell(row.get('mpn')),
+            cell(row.get('quantity'), STYLE_INT),
+        ]
+        if shared:
+            record.append(cell(', '.join(
+                ('%s (%s)' % (name, qty)) if isinstance(qty, (int, float)) else name
+                for name, qty in _also_in(row)
+            ) or None, STYLE_MUTED))
+        record.extend([
+            cell(row.get('manufacturer')),
+            cell(row.get('description')),
+            cell(comparison.get('recommendedSupplier') or '—'),
+            cell(chosen.get('unitPrice') if chosen else None, STYLE_MONEY_FINE),
+            cell(chosen.get('extendedPrice') if chosen else None, STYLE_MONEY),
+            cell(lead),
+            cell(comparison.get('lifecycle'),
+                 SEVERITY_STYLE.get(comparison.get('lifecycleSeverity'), STYLE_DEFAULT)),
+            cell('; '.join(notes)),
+        ])
+        rows.append(record)
+    return rows
+
+
+def build_excluded_rows(excluded, styled=False):
+    def cell(value, style=STYLE_DEFAULT):
+        return Cell(value, style) if styled else value
+
+    rows = [[cell(name, STYLE_HEADER) for name in EXCLUDED_COLUMNS]]
+    for entry in excluded or []:
+        rows.append([
+            cell(entry.get('row'), STYLE_INT),
+            cell(entry.get('mpn')),
+            cell(entry.get('quantity'), STYLE_INT),
+            cell(entry.get('reference')),
+            cell(entry.get('description')),
+            cell(entry.get('detail') or EXCLUSION_LABEL.get(entry.get('reason'), ''), STYLE_MUTED),
+        ])
+    return rows
+
+
+def build_workbook_sheets(result, summary, meta=None, excluded=None, prefix=''):
+    """Every sheet of the deliverable, headline first.
+
+    `prefix` names the sheets when several BOMs share one workbook. Excel caps
+    a sheet name at 31 characters, which the writer enforces.
+    """
+    excluded = excluded if excluded is not None else (result.get('excluded') or [])
+
+    def name(base):
+        return ('%s %s' % (prefix, base)).strip() if prefix else base
+
+    report_rows = build_report_rows(result, summary, meta, excluded)
+    parts_rows = build_parts_rows(result, summary, styled=True)
+    sheets = [{
+        'name': name('Report'),
+        'rows': report_rows,
+        'widths': [22, 15, 15, 15, 15, 15, 15, 15],
+        # A title block is not a header row: freezing or filtering it would
+        # only get in the way.
+        'freeze': 0,
+        'autofilter': False,
+        'merges': ['A1:%s1' % column_letter(REPORT_WIDTH - 1),
+                   'A2:%s2' % column_letter(REPORT_WIDTH - 1)],
+        'heights': {0: 26, 1: 18},
+    }, {
+        'name': name('Parts'),
+        'rows': parts_rows,
+        'widths': PARTS_WIDTHS if len(parts_rows[0]) == len(PARTS_COLUMNS)
+                  else PARTS_WIDTHS[:3] + [24] + PARTS_WIDTHS[3:],
+    }, {
+        'name': name('Full comparison'),
+        'rows': build_rows(result, summary, styled=True),
+        'widths': column_widths(result['suppliers']),
+    }]
+
+    if has_distributor_detail(result):
+        sheets.append({
+            'name': name('Distributors'),
+            'rows': build_distributor_rows(result, summary, styled=True),
+            'widths': DISTRIBUTOR_WIDTHS,
+        })
+    if excluded:
+        sheets.append({
+            'name': name('Skipped'),
+            'rows': build_excluded_rows(excluded, styled=True),
+            'widths': EXCLUDED_WIDTHS,
+        })
+    return sheets

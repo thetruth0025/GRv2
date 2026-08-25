@@ -89,7 +89,13 @@ def _shared_strings(archive):
     return strings
 
 
-def _first_sheet_path(archive):
+def _first_sheet_path(archive, sheet=0):
+    """Path to a worksheet inside the package, by position or by tab name.
+
+    Defaults to the first sheet, which is what reading someone's uploaded BOM
+    wants; the name form is what lets a caller reach a later tab of a workbook
+    this project wrote.
+    """
     names = set(archive.namelist())
     try:
         workbook = ET.fromstring(archive.read('xl/workbook.xml'))
@@ -98,9 +104,15 @@ def _first_sheet_path(archive):
         workbook = rels = None
 
     if workbook is not None and rels is not None:
-        sheet = next((n for n in workbook.iter() if _tag(n) == 'sheet'), None)
-        if sheet is not None:
-            rel_id = sheet.get('{%s}id' % REL_NS)
+        entries = [n for n in workbook.iter() if _tag(n) == 'sheet']
+        if isinstance(sheet, int):
+            chosen = entries[sheet] if -len(entries) <= sheet < len(entries) else None
+        else:
+            chosen = next((n for n in entries if n.get('name') == sheet), None)
+            if chosen is None:
+                raise ValueError('No sheet named %r in this workbook' % sheet)
+        if chosen is not None:
+            rel_id = chosen.get('{%s}id' % REL_NS)
             if rel_id:
                 for relationship in rels:
                     if relationship.get('Id') == rel_id:
@@ -126,9 +138,9 @@ def _column_index(ref):
     return index - 1
 
 
-def parse_xlsx(data):
+def parse_xlsx(data, sheet=0):
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        sheet_path = _first_sheet_path(archive)
+        sheet_path = _first_sheet_path(archive, sheet)
         if not sheet_path:
             raise ValueError('No worksheet found inside the .xlsx file')
         shared = _shared_strings(archive)

@@ -36,6 +36,12 @@ from bomlib.report import (  # noqa: E402
     render_table,
     truncate,
 )
+from bomlib.prepare import (
+    DEFAULT_IGNORE_PREFIXES,
+    describe_exclusions,
+    parse_prefixes,
+    prepare_lines,
+)
 from bomlib.spreadsheet import (  # noqa: E402
     FIELD_ORDER,
     extract_bom,
@@ -75,6 +81,26 @@ def build_parser():
     )
     parser.add_argument(
         '--limit', type=int, metavar='N', help='Analyze only the first N parts.',
+    )
+
+    screening = parser.add_argument_group(
+        'screening', 'Drop lines that are not worth a supplier lookup. On by default.')
+    screening.add_argument(
+        '--ignore-prefix', action='append', metavar='PREFIX', dest='ignore_prefixes',
+        help='Skip part numbers starting with PREFIX (case-insensitive). Repeatable. '
+             'Replaces the default list: %s.' % ', '.join(DEFAULT_IGNORE_PREFIXES),
+    )
+    screening.add_argument(
+        '--no-ignore-prefixes', action='store_true',
+        help='Look up in-house part numbers too.',
+    )
+    screening.add_argument(
+        '--no-merge-duplicates', action='store_true',
+        help='Keep repeated part numbers as separate lines instead of adding their quantities.',
+    )
+    screening.add_argument(
+        '--show-skipped', action='store_true',
+        help='List every skipped line and why it was skipped.',
     )
 
     columns = parser.add_argument_group('column mapping', 'Override the automatic header detection. '
@@ -133,6 +159,27 @@ def main(argv=None):
         print('error: --limit must be 1 or more', file=sys.stderr)
         return EXIT_ERROR
 
+    # Screened before --limit so the limit counts parts that will really be
+    # looked up, not assembly and cable lines that never reach a supplier.
+    screened = prepare_lines(
+        lines,
+        ignore_prefixes=[] if args.no_ignore_prefixes else parse_prefixes(args.ignore_prefixes),
+        merge_duplicates=not args.no_merge_duplicates,
+    )
+    lines = screened['lines']
+    excluded = screened['excluded']
+    note = describe_exclusions(excluded)
+    if note:
+        log(paint(note, 'dim'))
+    if args.show_skipped and excluded:
+        for entry in excluded:
+            log('  %-6s %-28s %s' % (
+                entry.get('row') or '', truncate(entry.get('mpn'), 28), entry.get('detail') or ''))
+    if not lines:
+        print('error: every line in %s was skipped. Use --no-ignore-prefixes to look them up anyway.'
+              % source, file=sys.stderr)
+        return EXIT_ERROR
+
     if args.limit:
         lines = lines[:args.limit]
     if args.build_quantity != 1:
@@ -166,6 +213,7 @@ def main(argv=None):
             cache.flush()
     progress.finish()
 
+    result['excluded'] = excluded
     summary = summarize_bom(result['rows'], result['suppliers'])
 
     if not args.quiet:

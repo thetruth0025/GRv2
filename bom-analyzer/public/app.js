@@ -52,6 +52,8 @@
       lines: [],
       fromPaste: false,
       results: null,
+      excluded: [],
+      claimed: [],
       filter: 'all',
       search: '',
       expanded: {},
@@ -112,6 +114,7 @@
     'filterChips', 'exportBtn', 'resultsTable', 'resultsHead', 'resultsBody', 'emptyState',
     'setupCard', 'toast', 'attribution',
     'bomBar', 'bomTabs', 'bomCount', 'analyzeAllBtn', 'closeAllBtn',
+    'reportBtn', 'skippedNote', 'reportOverlay',
   ].forEach(function (id) {
     el[id] = document.getElementById(id);
   });
@@ -328,9 +331,11 @@
     if (entry.results) {
       var summary = entry.results.summary;
       var risks = (summary.riskLines || []).length;
+      var skipped = (entry.excluded || []).length;
       return {
         text: summary.lines + ' lines · ' + (money(summary.bestMixTotal, summary.currency) || '—') +
-          (risks ? ' · ' + risks + ' to review' : ''),
+          (risks ? ' · ' + risks + ' to review' : '') +
+          (skipped ? ' · ' + skipped + ' skipped' : ''),
         cls: risks ? 'warn' : 'ok',
       };
     }
@@ -416,6 +421,7 @@
       el.resultsCard.hidden = false;
       el.searchInput.value = entry.search || '';
       renderStats();
+      renderSkipped();
       renderFilters();
       renderTable();
       renderAttribution();
@@ -467,6 +473,11 @@
         '. <strong>' + bom().lines.length + '</strong> part' + (bom().lines.length === 1 ? '' : 's') +
         ' ready' + (skipped ? ', ' + skipped + ' row' + (skipped === 1 ? '' : 's') +
         ' skipped with no part number' : '') + '.';
+    }
+
+    var preview = previewScreening(bom());
+    if (preview) {
+      el.mappingSummary.innerHTML += ' <span class="muted">' + esc(preview) + '</span>';
     }
 
     renderPreview();
@@ -563,7 +574,7 @@
     renderAll();
     el.analyzeBtn.disabled = true;
 
-    return streamLookup(parts, function (event, data) {
+    return streamLookup(parts, claimedParts(entry), function (event, data) {
       if (event === 'start') {
         var expected = data.parts * data.suppliers.length;
         entry.percent = 0;
@@ -619,11 +630,11 @@
     el.progressText.textContent = text || '';
   }
 
-  function streamLookup(parts, onEvent) {
+  function streamLookup(parts, claimed, onEvent) {
     return fetch(api('/api/lookup'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify({ parts: parts, stream: true }),
+      body: JSON.stringify({ parts: parts, stream: true, claimed: claimed }),
     }).then(function (res) {
       if (!res.ok) return readJsonOrThrow(res);
       if (!res.body || !res.body.getReader) {
@@ -664,13 +675,19 @@
 
   function finishAnalysis(entry, data) {
     entry.results = data;
+    entry.excluded = data.excluded || [];
+    // The part numbers this BOM now owns. Whichever BOM is analyzed first
+    // keeps a shared part, so the others skip it instead of paying for the
+    // same lookup again.
+    entry.claimed = data.claimed || [];
     entry.expanded = {};
     entry.filter = 'all';
     entry.search = '';
     entry.percent = 100;
     entry.progress = 'Done — ' + data.stats.apiCalls + ' live queries, ' +
       data.stats.cacheHits + ' served from cache' +
-      (data.stats.errors ? ', ' + data.stats.errors + ' failed' : '') + '.';
+      (data.stats.errors ? ', ' + data.stats.errors + ' failed' : '') +
+      (entry.excluded.length ? ', ' + entry.excluded.length + ' lines skipped' : '') + '.';
     checkHealth();
     if (entry.id === state.activeId) {
       renderAll();
@@ -865,7 +882,7 @@
         return '<th colspan="' + SUPPLIER_COLUMNS.length + '" class="group-start">' +
           esc(supplier.name) + '</th>';
       }).join('') +
-      '<th class="spacer group-start"></th></tr>';
+      '<th class="spacer group-start sticky-z"></th></tr>';
 
     var fieldRow = '<tr class="field-row"><th class="sticky-a"></th>' +
       '<th class="sticky-b">Part</th><th class="num">Qty</th>' +
@@ -875,7 +892,7 @@
           return '<th class="' + cls.trim() + '">' + esc(col.label) + '</th>';
         }).join('');
       }).join('') +
-      '<th class="group-start">Verdict</th></tr>';
+      '<th class="group-start sticky-z">Verdict</th></tr>';
 
     el.resultsHead.innerHTML = groupRow + fieldRow;
 
@@ -899,16 +916,25 @@
     });
   }
 
-  // The part column is pinned beside the expander column, so its offset has to
-  // match that column's real rendered width — assuming a value leaves a gap
-  // that scrolled content shows through.
+  // Both pins are measured rather than assumed. The part column sits beside
+  // the expander column and the second header row sits below the first, so a
+  // guessed offset leaves either a gap that scrolled content shows through or
+  // an overlap that hides a row of headings.
   function syncStickyOffset() {
     var first = el.resultsBody.querySelector('td.sticky-a');
-    if (!first) return;
-    var width = Math.ceil(first.getBoundingClientRect().width);
-    if (width > 0) {
-      el.resultsTable.style.setProperty('--sticky-b-left', width + 'px');
-      el.resultsTable.style.setProperty('--sticky-a-width', width + 'px');
+    if (first) {
+      var width = Math.ceil(first.getBoundingClientRect().width);
+      if (width > 0) {
+        el.resultsTable.style.setProperty('--sticky-b-left', width + 'px');
+        el.resultsTable.style.setProperty('--sticky-a-width', width + 'px');
+      }
+    }
+    var supplierRow = el.resultsHead.querySelector('tr.supplier-row');
+    if (supplierRow) {
+      var height = Math.round(supplierRow.getBoundingClientRect().height);
+      if (height > 0) {
+        el.resultsTable.style.setProperty('--head-row1-height', height + 'px');
+      }
     }
   }
 
@@ -934,7 +960,7 @@
       (meta.length ? '<div class="rowmeta">' + meta.join(' · ') + '</div>' : '') + '</div></td>' +
       '<td class="num">' + count(row.quantity) + '</td>' +
       cells +
-      '<td class="group-start"><div class="verdict">' + verdict + '</div></td>' +
+      '<td class="group-start sticky-z"><div class="verdict">' + verdict + '</div></td>' +
       '</tr>';
 
     if (!isOpen) return main;
@@ -1195,17 +1221,11 @@
       return record.map(csvCell).join(',');
     }).join('\r\n');
 
-    var blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
-    var url = URL.createObjectURL(blob);
-    var link = document.createElement('a');
-    link.href = url;
     var slug = (bom().name || 'bom').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
-    link.download = (slug || 'bom') + '-supplier-comparison-' +
-      new Date().toISOString().slice(0, 10) + '.csv';
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    download(
+      new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' }),
+      (slug || 'bom') + '-supplier-comparison-' + new Date().toISOString().slice(0, 10) + '.csv'
+    );
     toast('Exported ' + (lines.length - 1) + ' rows');
   }
 
@@ -1216,6 +1236,458 @@
     if (/^[=+\-@]/.test(text)) text = "'" + text;
     if (/[",\r\n]/.test(text)) return '"' + text.replace(/"/g, '""') + '"';
     return text;
+  }
+
+  // What the server will screen out, worked out here so it shows up before the
+  // Analyze button is pressed rather than after the lookups have run.
+  function previewScreening(entry) {
+    var prefixes = (state.health && state.health.ignorePrefixes) || [];
+    var owned = claimedParts(entry);
+    var seen = {};
+    var inhouse = 0;
+    var repeats = 0;
+    var elsewhere = 0;
+
+    (entry.lines || []).forEach(function (line) {
+      var mpn = normalizeMpn(line.mpn);
+      if (!mpn) return;
+      var ignored = prefixes.some(function (prefix) { return mpn.indexOf(prefix) === 0; });
+      if (ignored) { inhouse++; return; }
+      if (owned[mpn]) { elsewhere++; return; }
+      if (seen[mpn]) { repeats++; return; }
+      seen[mpn] = true;
+    });
+
+    var pieces = [];
+    if (inhouse) pieces.push(inhouse + ' in-house');
+    if (repeats) pieces.push(repeats + ' repeated');
+    if (elsewhere) pieces.push(elsewhere + ' already in another BOM');
+    if (!pieces.length) return null;
+    return pieces.join(', ') + ' — ' + (inhouse + repeats + elsewhere) +
+      ' line' + (inhouse + repeats + elsewhere === 1 ? '' : 's') + ' will be skipped.';
+  }
+
+  // ── Cross-BOM part ownership ─────────────────────────────────────────────
+
+  // A part number that turns up in three BOMs is still one part to buy and one
+  // lookup to pay for. The first BOM analyzed keeps it; the rest are told it is
+  // already covered and skip it. Ownership follows analysis order rather than
+  // tab order, so whichever BOM you run first is always the one that resolves
+  // the part — never a BOM that has not been looked up yet.
+  function normalizeMpn(value) {
+    return String(value === null || value === undefined ? '' : value)
+      .toUpperCase().trim().replace(/\s+/g, ' ');
+  }
+
+  function claimedParts(except) {
+    var map = {};
+    state.boms.forEach(function (entry) {
+      if (entry === except || !entry.results) return;
+      (entry.claimed || []).forEach(function (mpn) {
+        if (!map[mpn]) map[mpn] = entry.name;
+      });
+    });
+    return map;
+  }
+
+  // Which other loaded BOMs list the same part, so the report can show the
+  // demand that was folded into a single row.
+  function usageIndex() {
+    var index = {};
+    state.boms.forEach(function (entry) {
+      (entry.lines || []).forEach(function (line) {
+        var key = normalizeMpn(line.mpn);
+        if (!key) return;
+        if (!index[key]) index[key] = [];
+        index[key].push({ name: entry.name, quantity: line.quantity || 0, id: entry.id });
+      });
+    });
+    return index;
+  }
+
+  // ── Skipped lines ────────────────────────────────────────────────────────
+
+  var REASON_LABEL = {
+    ignored: 'In-house',
+    merged: 'Merged',
+    duplicate: 'Other BOM',
+  };
+
+  function skippedSummary(list) {
+    var counts = {};
+    list.forEach(function (entry) {
+      counts[entry.reason] = (counts[entry.reason] || 0) + 1;
+    });
+    var pieces = [];
+    if (counts.ignored) pieces.push(counts.ignored + ' in-house part number' + (counts.ignored === 1 ? '' : 's'));
+    if (counts.merged) pieces.push(counts.merged + ' duplicate line' + (counts.merged === 1 ? '' : 's') + ' merged');
+    if (counts.duplicate) pieces.push(counts.duplicate + ' already covered by another BOM');
+    return pieces.join(' · ');
+  }
+
+  function renderSkipped() {
+    var list = (bom().excluded || []);
+    if (!list.length) {
+      el.skippedNote.innerHTML = '';
+      return;
+    }
+    var rows = list.map(function (entry) {
+      return '<tr>' +
+        '<td>' + esc(entry.row === null || entry.row === undefined ? '—' : entry.row) + '</td>' +
+        '<td class="mpn-cell">' + esc(entry.mpn) + '</td>' +
+        '<td>' + count(entry.quantity) + '</td>' +
+        '<td><span class="reason-tag ' + esc(entry.reason) + '">' +
+        esc(REASON_LABEL[entry.reason] || entry.reason) + '</span></td>' +
+        '<td>' + esc(entry.detail || '') + '</td>' +
+        '</tr>';
+    }).join('');
+
+    el.skippedNote.innerHTML =
+      '<details class="skipped-note"><summary>' +
+      esc(list.length + ' line' + (list.length === 1 ? '' : 's') + ' not looked up — ' +
+        skippedSummary(list)) +
+      '</summary><table class="skipped-table">' +
+      '<thead><tr><th>Row</th><th>Part number</th><th>Qty</th><th>Reason</th><th>Detail</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table></details>';
+  }
+
+  // ── Summary report ───────────────────────────────────────────────────────
+
+  function reportModel(entry) {
+    var results = entry.results;
+    var summary = results.summary;
+    var currency = summary.currency || 'USD';
+    var usage = usageIndex();
+
+    var stockRisk = results.rows.filter(function (row) {
+      return row.comparison.inStockSuppliers.length === 0;
+    });
+    var lifecycleRisk = results.rows.filter(function (row) {
+      var severity = row.comparison.lifecycleSeverity;
+      return severity === 'bad' || severity === 'warn';
+    });
+    var risky = results.rows.filter(function (row) {
+      var found = results.suppliers.some(function (s) {
+        return row.offers[s.id] && row.offers[s.id].found;
+      });
+      var severity = row.comparison.lifecycleSeverity;
+      return !found || severity === 'bad' || severity === 'warn' ||
+        row.comparison.inStockSuppliers.length === 0;
+    });
+
+    return {
+      entry: entry,
+      currency: currency,
+      summary: summary,
+      suppliers: results.suppliers,
+      rows: results.rows,
+      excluded: entry.excluded || [],
+      usage: usage,
+      stockRisk: stockRisk,
+      lifecycleRisk: lifecycleRisk,
+      risky: risky,
+      generated: new Date().toLocaleString(),
+    };
+  }
+
+  // What the other BOMs need of this part, one entry per BOM: a BOM that lists
+  // the same part on two lines is still one BOM asking for the total.
+  function otherBomDemand(model, mpn) {
+    var totals = [];
+    var byId = {};
+    (model.usage[normalizeMpn(mpn)] || []).forEach(function (use) {
+      if (use.id === model.entry.id) return;
+      if (byId[use.id]) {
+        byId[use.id].quantity += use.quantity;
+        return;
+      }
+      byId[use.id] = { name: use.name, quantity: use.quantity };
+      totals.push(byId[use.id]);
+    });
+    return totals;
+  }
+
+  function kpi(label, value, note, tone) {
+    return '<div class="kpi ' + (tone || '') + '">' +
+      '<div class="k-label">' + esc(label) + '</div>' +
+      '<div class="k-value">' + esc(value) + '</div>' +
+      '<div class="k-note">' + esc(note || '') + '</div></div>';
+  }
+
+  // The offer the verdict actually points at: the recommended supplier already
+  // balances "soonest" against "cheapest among the soonest", so the report
+  // prices that one rather than re-deciding.
+  function recommendedOffer(row) {
+    var name = row.comparison.recommendedSupplier;
+    if (!name) return null;
+    var found = null;
+    Object.keys(row.offers).forEach(function (id) {
+      var offer = row.offers[id];
+      if (!found && offer && offer.found && offer.supplier === name) found = offer;
+    });
+    return found;
+  }
+
+  function reportHtml(model) {
+    var currency = model.currency;
+    var summary = model.summary;
+
+    var kpis = [
+      kpi('Lines', count(summary.lines), count(summary.totalQuantity) + ' units'),
+      kpi('Best-mix total', money(summary.bestMixTotal, currency) || '—',
+        summary.bestMixLines + ' of ' + summary.lines + ' priced', 'accent'),
+      kpi('Stock risk', String(model.stockRisk.length),
+        model.stockRisk.length ? 'no supplier covers the quantity' : 'all coverable today',
+        model.stockRisk.length ? 'bad' : 'good'),
+      kpi('Lifecycle risk', String(model.lifecycleRisk.length),
+        model.lifecycleRisk.length ? 'NRND, EOL or obsolete' : 'nothing flagged',
+        model.lifecycleRisk.length ? 'warn' : 'good'),
+      kpi('Not found', String(summary.notFoundLines || 0),
+        (summary.notFoundLines ? 'no supplier matched' : 'every line matched'),
+        summary.notFoundLines ? 'bad' : 'good'),
+      kpi('Skipped', String(model.excluded.length),
+        model.excluded.length ? 'in-house or duplicate' : 'nothing skipped'),
+    ].join('');
+
+    // Supplier carts.
+    var cartRows = model.suppliers.map(function (supplier) {
+      var totals = summary.supplierTotals[supplier.id];
+      if (!totals) return '';
+      var winner = summary.cheapestSingleSource === supplier.id;
+      return '<tr class="' + (winner ? 'winner' : '') + '">' +
+        '<td><strong>' + esc(supplier.name) + '</strong>' +
+        (winner ? ' <span class="badge info">cheapest cart</span>' : '') + '</td>' +
+        '<td class="num">' + count(totals.linesPriced) + '</td>' +
+        '<td class="num">' + count(totals.linesMissing) + '</td>' +
+        '<td class="num">' + count(totals.linesShort) + '</td>' +
+        '<td class="num">' + esc(money(totals.total, currency) || '—') + '</td></tr>';
+    }).join('');
+
+    if (model.suppliers.length > 1) {
+      var savings = summary.mixSavings;
+      cartRows += '<tr class="winner"><td><strong>Cheapest line by line</strong></td>' +
+        '<td class="num">' + count(summary.bestMixLines) + '</td>' +
+        '<td class="num">—</td><td class="num">—</td>' +
+        '<td class="num">' + esc(money(summary.bestMixTotal, currency) || '—') + '</td></tr>';
+      if (isFinite(savings) && savings > 0) {
+        cartRows += '<tr><td colspan="5" class="desc">Splitting the order across suppliers ' +
+          'saves ' + esc(money(savings, currency)) + ' against the cheapest single cart.</td></tr>';
+      }
+    }
+
+    // Lines that need a decision.
+    var riskHtml;
+    if (model.risky.length) {
+      riskHtml = '<div class="report-scroll"><table class="report-table">' +
+        '<thead><tr><th>Part</th><th class="num">Qty</th><th>Lifecycle</th><th>Issue</th></tr></thead><tbody>' +
+        model.risky.map(function (row) {
+          return '<tr><td class="mpn-cell">' + esc(row.mpn) +
+            (row.reference ? '<div class="desc">' + esc(row.reference) + '</div>' : '') + '</td>' +
+            '<td class="num">' + count(row.quantity) + '</td>' +
+            '<td>' + lifecycleBadge({
+              lifecycle: row.comparison.lifecycle,
+              lifecycleSeverity: row.comparison.lifecycleSeverity,
+            }) + '</td>' +
+            '<td>' + (row.comparison.flags.length
+              ? row.comparison.flags.map(function (flag) {
+                return '<span class="flag ' + esc(flag.level) + '">' + esc(flag.text) + '</span>';
+              }).join(' ')
+              : '<span class="muted">—</span>') + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    } else {
+      riskHtml = '<div class="report-empty">Every line is in stock, priced and in production.</div>';
+    }
+
+    // The parts themselves, with only the columns a buyer acts on.
+    var multi = state.boms.length > 1;
+    var partRows = model.rows.map(function (row) {
+      var offer = recommendedOffer(row);
+      var lead = '—';
+      if (offer) {
+        lead = offer.stockSufficient === true ? 'In stock' : (offer.leadTimeText || '—');
+      }
+      var elsewhere = otherBomDemand(model, row.mpn);
+      return '<tr>' +
+        '<td class="mpn-cell">' + esc(row.mpn) +
+        (row.description ? '<div class="desc">' + esc(row.description) + '</div>' : '') + '</td>' +
+        '<td class="num">' + count(row.quantity) + '</td>' +
+        (multi ? '<td class="desc">' + (elsewhere.length
+          ? esc(elsewhere.map(function (use) {
+            return use.name + ' (' + count(use.quantity) + ')';
+          }).join(', '))
+          : '—') + '</td>' : '') +
+        '<td>' + esc(row.comparison.recommendedSupplier || '—') +
+        (offer && offer.aggregator && offer.distributor
+          ? '<div class="desc">via ' + esc(offer.distributor) + '</div>' : '') + '</td>' +
+        '<td class="num">' + esc((offer && money(offer.unitPrice, offer.currency)) || '—') + '</td>' +
+        '<td class="num">' + esc((offer && money(offer.extendedPrice, offer.currency)) || '—') + '</td>' +
+        '<td>' + esc(lead) + '</td>' +
+        '<td>' + lifecycleBadge({
+          lifecycle: row.comparison.lifecycle,
+          lifecycleSeverity: row.comparison.lifecycleSeverity,
+        }) + '</td></tr>';
+    }).join('');
+
+    var partsHtml = '<div class="report-scroll"><table class="report-table">' +
+      '<thead><tr><th>Part</th><th class="num">Qty</th>' +
+      (multi ? '<th>Also in</th>' : '') +
+      '<th>Buy from</th><th class="num">Unit</th><th class="num">Extended</th>' +
+      '<th>Lead time</th><th>Lifecycle</th></tr></thead><tbody>' + partRows +
+      '</tbody></table></div>';
+
+    // Skipped lines.
+    var skippedHtml = '';
+    if (model.excluded.length) {
+      skippedHtml = '<section class="report-section"><h3>Not looked up ' +
+        '<span class="aside">' + esc(skippedSummary(model.excluded)) + '</span></h3>' +
+        '<div class="report-scroll"><table class="report-table">' +
+        '<thead><tr><th>Row</th><th>Part number</th><th class="num">Qty</th><th>Reason</th></tr></thead><tbody>' +
+        model.excluded.map(function (entry) {
+          return '<tr><td>' + esc(entry.row === null || entry.row === undefined ? '—' : entry.row) + '</td>' +
+            '<td class="mpn-cell">' + esc(entry.mpn) + '</td>' +
+            '<td class="num">' + count(entry.quantity) + '</td>' +
+            '<td>' + esc(entry.detail || REASON_LABEL[entry.reason] || '') + '</td></tr>';
+        }).join('') + '</tbody></table></div></section>';
+    }
+
+    var analyzed = state.boms.filter(function (b) { return b.results; });
+    var allButton = analyzed.length > 1
+      ? '<button type="button" class="btn ghost small" data-report="excel-all">Excel · all ' +
+        analyzed.length + ' BOMs</button>'
+      : '';
+
+    return '<div class="report-sheet">' +
+      '<div class="report-head">' +
+      '<div><h2 id="reportTitle">' + esc(model.entry.name) + '</h2>' +
+      '<div class="sub">Supplier report · ' + esc(model.generated) + ' · prices in ' +
+      esc(currency) + '</div></div>' +
+      '<div class="report-actions">' +
+      '<button type="button" class="btn primary small" data-report="excel">Export Excel</button>' +
+      allButton +
+      '<button type="button" class="btn ghost small" data-report="print">Print / PDF</button>' +
+      '<button type="button" class="icon-btn" data-report="close" aria-label="Close report">✕</button>' +
+      '</div></div>' +
+      '<div class="report-body">' +
+      '<section class="report-section"><h3>Overview</h3><div class="kpi-grid">' + kpis + '</div></section>' +
+      '<section class="report-section"><h3>What each supplier would cost</h3>' +
+      '<div class="report-scroll"><table class="report-table">' +
+      '<thead><tr><th>Supplier</th><th class="num">Lines quoted</th><th class="num">Not carried</th>' +
+      '<th class="num">Short on stock</th><th class="num">Cart total</th></tr></thead>' +
+      '<tbody>' + cartRows + '</tbody></table></div></section>' +
+      '<section class="report-section"><h3>Needs a decision ' +
+      '<span class="aside">' + model.risky.length + ' of ' + model.rows.length + ' lines</span></h3>' +
+      riskHtml + '</section>' +
+      '<section class="report-section"><h3>Parts <span class="aside">' + model.rows.length +
+      ' lines</span></h3>' + partsHtml + '</section>' +
+      skippedHtml +
+      '<div class="report-foot">Prices, stock and lifecycle status were read live from the supplier ' +
+      'APIs at the time shown above and move constantly &mdash; confirm on the supplier&rsquo;s own page ' +
+      'before raising a purchase order.</div>' +
+      '</div></div>';
+  }
+
+  var reportReturnFocus = null;
+
+  function openReport() {
+    var entry = bom();
+    if (!entry.results) {
+      toast('Analyze this BOM first', true);
+      return;
+    }
+    reportReturnFocus = document.activeElement;
+    el.reportOverlay.innerHTML = reportHtml(reportModel(entry));
+    el.reportOverlay.hidden = false;
+    document.body.style.overflow = 'hidden';
+
+    Array.prototype.forEach.call(
+      el.reportOverlay.querySelectorAll('[data-report]'),
+      function (button) {
+        button.addEventListener('click', function () {
+          var action = button.getAttribute('data-report');
+          if (action === 'close') closeReport();
+          else if (action === 'print') window.print();
+          else if (action === 'excel') exportWorkbook([entry]);
+          else if (action === 'excel-all') {
+            exportWorkbook(state.boms.filter(function (b) { return b.results; }));
+          }
+        });
+      }
+    );
+
+    var close = el.reportOverlay.querySelector('[data-report="close"]');
+    if (close) close.focus();
+  }
+
+  function closeReport() {
+    el.reportOverlay.hidden = true;
+    el.reportOverlay.innerHTML = '';
+    document.body.style.overflow = '';
+    if (reportReturnFocus && reportReturnFocus.focus) reportReturnFocus.focus();
+    reportReturnFocus = null;
+  }
+
+  // ── Excel export ─────────────────────────────────────────────────────────
+
+  // The workbook is built on the server: it already owns a dependency-free
+  // .xlsx writer, and rebuilding one in the browser would be a second
+  // implementation of the same thing, free to drift from the first.
+  function exportWorkbook(entries) {
+    var books = (entries || []).filter(function (entry) { return entry && entry.results; });
+    if (!books.length) {
+      toast('Nothing analyzed to report on yet', true);
+      return;
+    }
+    toast('Building the workbook…');
+
+    fetch(api('/api/report'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        books: books.map(function (entry) {
+          var model = reportModel(entry);
+          return {
+            name: entry.name,
+            generated: model.generated,
+            // Cross-BOM demand is attached here because only the browser knows
+            // which other BOMs are open; the workbook then says exactly what
+            // the report on screen says.
+            rows: entry.results.rows.map(function (row) {
+              var elsewhere = otherBomDemand(model, row.mpn);
+              return elsewhere.length ? Object.assign({}, row, { alsoIn: elsewhere }) : row;
+            }),
+            suppliers: entry.results.suppliers,
+            summary: entry.results.summary,
+            stats: entry.results.stats,
+            excluded: entry.excluded || [],
+          };
+        }),
+      }),
+    })
+      .then(function (res) {
+        if (!res.ok) return readJsonOrThrow(res);
+        return res.blob().then(function (blob) {
+          var slug = books.length === 1
+            ? (books[0].name || 'bom').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+            : 'all-boms';
+          download(blob, (slug || 'bom') + '-report-' +
+            new Date().toISOString().slice(0, 10) + '.xlsx');
+          toast('Exported ' + books.length + ' BOM' + (books.length === 1 ? '' : 's') + ' to Excel');
+        });
+      })
+      .catch(function (err) {
+        toast(err.message || 'Could not build the workbook', true);
+      });
+  }
+
+  function download(blob, filename) {
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
   }
 
   // ── Sample data ──────────────────────────────────────────────────────────
@@ -1328,6 +1800,15 @@
     renderAll();
   });
   el.exportBtn.addEventListener('click', exportCsv);
+  el.reportBtn.addEventListener('click', openReport);
+
+  // Clicking the backdrop closes; clicking the sheet itself must not.
+  el.reportOverlay.addEventListener('click', function (event) {
+    if (event.target === el.reportOverlay) closeReport();
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape' && !el.reportOverlay.hidden) closeReport();
+  });
 
   // "Start over" closes the BOM being viewed, leaving the others alone.
   el.resetBtn.addEventListener('click', function () {

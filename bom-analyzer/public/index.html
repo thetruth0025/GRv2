@@ -108,9 +108,12 @@
     <h2><span class="num">3</span> Supplier comparison</h2>
     <div class="stat-grid" id="statGrid"></div>
 
+    <div id="skippedNote"></div>
+
     <div class="toolbar">
       <input type="search" id="searchInput" class="search" placeholder="Filter by part number, description or reference" aria-label="Filter results" />
       <div class="chips" id="filterChips" role="group" aria-label="Result filters"></div>
+      <button type="button" id="reportBtn" class="btn primary small">Summary report</button>
       <button type="button" id="exportBtn" class="btn ghost small">Export CSV</button>
     </div>
 
@@ -140,7 +143,7 @@
     <ol class="steps">
       <li>Get free API credentials: a client ID and secret from <a href="https://developer.digikey.com/" target="_blank" rel="noopener">developer.digikey.com</a>, an API key from <a href="https://www.mouser.com/api-hub/" target="_blank" rel="noopener">mouser.com/api-hub</a>, and one from <a href="https://www.trustedparts.com/" target="_blank" rel="noopener">trustedparts.com</a> under My Account &rarr; Additional Features. Any one alone is enough to start.</li>
       <li>In <code>bom-analyzer/</code>, copy <code>.env.example</code> to <code>.env</code> and fill in the credentials you have.</li>
-      <li>Run <code>python3 server.py</code> (Python 3.8 or newer, standard library only — nothing to install).</li>
+      <li>Run <code>python3 server.py</code> — or <code>py server.py</code> on Windows (Python 3.8 or newer, standard library only, nothing to install).</li>
       <li>Open <code>http://localhost:8787</code>, or set the backend URL in Settings if you are running it elsewhere.</li>
     </ol>
   </section>
@@ -149,6 +152,9 @@
     <p>Pricing, stock and lifecycle data comes live from the DigiKey, Mouser and TrustedParts APIs. TrustedParts aggregates authorized distributors &mdash; expand a row to see every distributor it found. Always confirm on the supplier's own page before placing an order &mdash; stock moves fast.</p>
   </footer>
 </div>
+
+<div id="reportOverlay" class="report-overlay" role="dialog" aria-modal="true"
+     aria-labelledby="reportTitle" hidden></div>
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
