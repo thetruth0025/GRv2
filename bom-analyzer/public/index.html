@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0f1115" />
-<meta name="description" content="Upload a bill of materials and compare DigiKey, Mouser and TrustedParts on price, lead time, stock, and lifecycle status side by side." />
+<meta name="description" content="Search part numbers or upload a bill of materials and compare DigiKey, Mouser and TrustedParts on price, lead time, stock, and lifecycle status side by side." />
 <link rel="manifest" href="manifest.json" />
 <link rel="icon" href="icon.svg" type="image/svg+xml" />
 <title>BOM Supplier Analyzer</title>
@@ -21,7 +21,7 @@
       <div>
         <div class="eyebrow">Procurement</div>
         <h1>BOM Supplier Analyzer</h1>
-        <p>Upload a bill of materials and get lead time, cost, stock and lifecycle status for every part &mdash; from DigiKey, Mouser and TrustedParts side by side.</p>
+        <p>Search a part number, or upload a bill of materials, and get lead time, cost, stock and lifecycle status &mdash; from DigiKey, Mouser and TrustedParts side by side.</p>
       </div>
       <button type="button" id="settingsBtn" class="icon-btn" aria-label="Settings" aria-expanded="false" aria-controls="settingsPanel">
         <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 15.5A3.5 3.5 0 1 1 15.5 12 3.5 3.5 0 0 1 12 15.5m7.43-2.53a7.6 7.6 0 0 0 0-1.94l2.05-1.58a.5.5 0 0 0 .12-.64l-1.94-3.36a.5.5 0 0 0-.6-.22l-2.42.97a7.3 7.3 0 0 0-1.68-.97l-.36-2.57a.5.5 0 0 0-.5-.42h-3.88a.5.5 0 0 0-.5.42l-.36 2.57a7.3 7.3 0 0 0-1.68.97l-2.42-.97a.5.5 0 0 0-.6.22L2.4 8.81a.5.5 0 0 0 .12.64l2.05 1.58a7.6 7.6 0 0 0 0 1.94L2.52 14.6a.5.5 0 0 0-.12.64l1.94 3.36a.5.5 0 0 0 .6.22l2.42-.97a7.3 7.3 0 0 0 1.68.97l.36 2.57a.5.5 0 0 0 .5.42h3.88a.5.5 0 0 0 .5-.42l.36-2.57a7.3 7.3 0 0 0 1.68-.97l2.42.97a.5.5 0 0 0 .6-.22l1.94-3.36a.5.5 0 0 0-.12-.64Z"/></svg>
@@ -51,8 +51,20 @@
 
   <!-- ── 1. UPLOAD ────────────────────────────────────────────────────── -->
   <section class="card">
-    <h2><span class="num">1</span> Load your BOM</h2>
-    <p class="sub">Drop in a CSV, TSV or Excel (.xlsx) export. Column headings are detected automatically &mdash; you can correct them in the next step.</p>
+    <h2><span class="num">1</span> Look up parts</h2>
+    <p class="sub">Search part numbers straight away, or load a bill of materials to compare a whole board.</p>
+
+    <div class="quick">
+      <label class="sr-only" for="quickInput">Part numbers to look up</label>
+      <div class="quick-row">
+        <svg class="quick-icon" viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14"/></svg>
+        <textarea id="quickInput" rows="1" placeholder="STM32F103C8T6, LM358DR, RC0603FR-0710KL" autocomplete="off" spellcheck="false" enterkeyhint="search"></textarea>
+        <button type="button" id="quickBtn" class="btn primary">Search</button>
+      </div>
+      <div class="hint">Separate several with commas. Add a quantity with <code>x</code> &mdash; <code>STM32F103C8T6 x25</code> &mdash; otherwise 1 is assumed. <strong>Enter</strong> searches; paste a whole column and each line is read as <code>part, quantity</code>.</div>
+    </div>
+
+    <div class="or-rule"><span>or</span></div>
 
     <div id="dropZone" class="drop" tabindex="0" role="button" aria-label="Choose BOM files or drop them here">
       <svg viewBox="0 0 24 24" width="30" height="30" aria-hidden="true"><path fill="currentColor" d="M12 3 8 7h3v7h2V7h3zM5 17v2h14v-2z"/></svg>
@@ -60,13 +72,6 @@
       <div class="drop-sub">.csv &middot; .tsv &middot; .txt &middot; .xlsx &mdash; several at once is fine</div>
       <input type="file" id="fileInput" multiple accept=".csv,.tsv,.txt,.xlsx,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
     </div>
-
-    <details class="paste-block">
-      <summary>Or paste part numbers</summary>
-      <p class="sub">One per line. Add a quantity after a comma or tab, e.g. <code>GRM188R71H104KA93D, 100</code></p>
-      <textarea id="pasteInput" rows="6" spellcheck="false" placeholder="RC0603FR-0710KL, 250&#10;GRM188R71H104KA93D, 100&#10;STM32F103C8T6, 10"></textarea>
-      <button type="button" id="pasteBtn" class="btn ghost">Use pasted list</button>
-    </details>
 
     <div class="btn-row">
       <button type="button" id="sampleBtn" class="btn ghost">Load sample BOM</button>
@@ -76,13 +81,17 @@
   <!-- ── BOM SELECTOR ─────────────────────────────────────────────────── -->
   <section id="bomBar" class="card boms" hidden>
     <div class="boms-head">
-      <h2><span class="num">&#9776;</span> Loaded BOMs <span id="bomCount" class="bom-count"></span></h2>
+      <h2><span class="num">&#9776;</span> BOMs &amp; searches <span id="bomCount" class="bom-count"></span></h2>
       <div class="btn-row compact">
         <button type="button" id="analyzeAllBtn" class="btn ghost small">Analyze all pending</button>
         <button type="button" id="closeAllBtn" class="btn ghost small">Close all</button>
       </div>
     </div>
-    <div id="bomTabs" class="bom-tabs" role="tablist" aria-label="Loaded BOMs"></div>
+    <div id="bomTabs" class="bom-tabs" role="tablist" aria-label="Loaded BOMs and searches"></div>
+    <div id="progressWrap" class="progress-wrap" hidden>
+      <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+      <div class="progress-text" id="progressText"></div>
+    </div>
   </section>
 
   <!-- ── 2. MAPPING ───────────────────────────────────────────────────── -->
@@ -96,10 +105,6 @@
     <div class="btn-row">
       <button type="button" id="analyzeBtn" class="btn primary">Analyze BOM</button>
       <button type="button" id="resetBtn" class="btn ghost">Start over</button>
-    </div>
-    <div id="progressWrap" class="progress-wrap" hidden>
-      <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
-      <div class="progress-text" id="progressText"></div>
     </div>
   </section>
 

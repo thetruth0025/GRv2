@@ -302,10 +302,16 @@ class Handler(BaseHTTPRequestHandler):
 
         # In-house part numbers and repeats are dropped here rather than in the
         # browser, so no caller can spend an API call on them by accident.
+        #
+        # A hand-entered search is the exception: somebody who types a part
+        # number is asking about that part, so neither the in-house prefixes nor
+        # another BOM's claim should quietly answer with nothing. Screening is
+        # there to stop automatic waste, not to refuse a direct question.
+        manual = bool(payload.get('manual'))
         screened = prepare_lines(
             parts,
-            ignore_prefixes=IGNORE_PREFIXES,
-            claimed=_requested_claims(payload),
+            ignore_prefixes=[] if manual else IGNORE_PREFIXES,
+            claimed={} if manual else _requested_claims(payload),
         )
         parts = screened['lines']
         excluded = screened['excluded']

@@ -65,9 +65,15 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        'bom',
+        'bom', nargs='?',
         help='BOM file (.csv, .tsv, .xlsx), or - to read part numbers from stdin, '
-             'one per line with an optional quantity after a comma.',
+             'one per line with an optional quantity after a comma. Omit it when '
+             'using --part.',
+    )
+    parser.add_argument(
+        '-p', '--part', action='append', metavar='MPN', dest='parts',
+        help='Look up a part number directly, without a BOM file. Repeatable. '
+             'Add a quantity after a comma: --part "STM32F103C8T6,25".',
     )
     parser.add_argument('-o', '--output', help='Write the full comparison here (.xlsx, .csv or .json).')
     parser.add_argument('-f', '--format', choices=sorted(WRITERS), help='Override the format inferred from --output.')
@@ -161,9 +167,14 @@ def main(argv=None):
 
     # Screened before --limit so the limit counts parts that will really be
     # looked up, not assembly and cable lines that never reach a supplier.
+    # Naming a part on the command line is a direct question about that part,
+    # so the in-house prefixes do not answer it with nothing — unless the prefix
+    # list was given explicitly, which is somebody asking for it.
+    manual = bool(args.parts) and not args.ignore_prefixes
     screened = prepare_lines(
         lines,
-        ignore_prefixes=[] if args.no_ignore_prefixes else parse_prefixes(args.ignore_prefixes),
+        ignore_prefixes=[] if (args.no_ignore_prefixes or manual)
+                        else parse_prefixes(args.ignore_prefixes),
         merge_duplicates=not args.no_merge_duplicates,
     )
     lines = screened['lines']
@@ -243,6 +254,17 @@ def main(argv=None):
 
 def read_bom(args):
     """Return (lines, source-label). Honours any --*-column overrides."""
+    if args.parts:
+        lines = parse_pasted('\n'.join(args.parts))
+        if not lines:
+            raise ValueError('no usable part numbers in --part')
+        if args.list_columns:
+            print('--part takes part numbers directly; column mapping does not apply.')
+        return lines, _plural(len(lines), 'part number')
+
+    if args.bom is None:
+        raise ValueError('give a BOM file, - to read stdin, or --part to look up a part number')
+
     if args.bom == '-':
         lines = parse_pasted(sys.stdin.read())
         if args.list_columns:

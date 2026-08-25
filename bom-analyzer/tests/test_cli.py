@@ -455,6 +455,46 @@ class ScreeningCliTests(unittest.TestCase):
         data = self.run_to_json([('ABC123', 10), ('ABC123', 5)], ['-b', '10'])
         self.assertEqual([r['quantity'] for r in data['rows']], [150])
 
+    def test_a_part_can_be_looked_up_without_a_bom_file(self):
+        out = self.temp('.json')
+        self.assertEqual(bom.main(['--part', 'ABC123,25', '--part', 'DEF456',
+                                   '-o', out, '--quiet', '--no-color']), 0)
+        with open(out, encoding='utf-8') as handle:
+            data = json.load(handle)
+        self.assertEqual([r['mpn'] for r in data['rows']], ['ABC123', 'DEF456'])
+        self.assertEqual([r['quantity'] for r in data['rows']], [25, 1])
+
+    def test_naming_a_part_directly_is_not_screened_out_as_in_house(self):
+        out = self.temp('.json')
+        self.assertEqual(bom.main(['--part', 'ASY0-9001', '-o', out,
+                                   '--quiet', '--no-color']), 0)
+        with open(out, encoding='utf-8') as handle:
+            self.assertEqual([r['mpn'] for r in json.load(handle)['rows']], ['ASY0-9001'])
+
+    def test_an_explicit_prefix_list_still_applies_to_named_parts(self):
+        out = self.temp('.json')
+        errors = io.StringIO()
+        original = sys.stderr
+        sys.stderr = errors
+        try:
+            code = bom.main(['--part', 'ASY0-9001', '--ignore-prefix', 'ASY0',
+                             '-o', out, '--quiet', '--no-color'])
+        finally:
+            sys.stderr = original
+        self.assertEqual(code, 1)
+        self.assertIn('skipped', errors.getvalue())
+
+    def test_no_source_at_all_says_what_the_options_are(self):
+        errors = io.StringIO()
+        original = sys.stderr
+        sys.stderr = errors
+        try:
+            code = bom.main(['--quiet', '--no-color'])
+        finally:
+            sys.stderr = original
+        self.assertEqual(code, 1)
+        self.assertIn('--part', errors.getvalue())
+
     def test_a_bom_of_nothing_but_in_house_numbers_fails_with_advice(self):
         source = self.source([('ASY0-1', 1), ('CBL0-2', 1)])
         errors = io.StringIO()

@@ -51,6 +51,7 @@
       mapping: {},
       lines: [],
       fromPaste: false,
+      adhoc: false,
       results: null,
       excluded: [],
       claimed: [],
@@ -108,7 +109,7 @@
   var el = {};
   [
     'statusBar', 'settingsBtn', 'settingsPanel', 'apiBase', 'currencyLabel', 'recheckBtn',
-    'clearCacheBtn', 'dropZone', 'fileInput', 'pasteInput', 'pasteBtn', 'sampleBtn',
+    'clearCacheBtn', 'dropZone', 'fileInput', 'quickInput', 'quickBtn', 'sampleBtn',
     'mappingCard', 'mappingSummary', 'mappingGrid', 'previewTable', 'analyzeBtn', 'resetBtn',
     'progressWrap', 'progressBar', 'progressText', 'resultsCard', 'statGrid', 'searchInput',
     'filterChips', 'exportBtn', 'resultsTable', 'resultsHead', 'resultsBody', 'emptyState',
@@ -296,29 +297,116 @@
     });
   }
 
-  // Pasted lists are parsed in the browser: they have no header row and no
-  // packaging for the server to interpret.
-  function parsePasted(text) {
+  // Hand-typed part numbers are parsed in the browser: there is no header row
+  // and no packaging for the server to interpret.
+  //
+  // Two shapes have to coexist. A pasted BOM column is one part per line with
+  // the quantity after a comma — "RC0603FR-0710KL, 250". Typing into a search
+  // box is several parts on one line — "STM32F103C8T6, LM358DR". Whether the
+  // second field is a number tells them apart, which is why that check comes
+  // before anything is treated as a separator.
+  function parseManualInput(text) {
     var lines = [];
-    String(text || '')
-      .split(/\r?\n/)
-      .forEach(function (raw, index) {
-        var line = raw.trim();
-        if (!line) return;
-        var parts = line.split(/[\t,;]/).map(function (p) { return p.trim(); });
-        var mpn = parts[0];
-        if (!mpn) return;
-        var qty = parseInt(String(parts[1] || '').replace(/[^0-9]/g, ''), 10);
-        lines.push({
-          row: index + 1,
-          mpn: mpn,
-          quantity: isFinite(qty) && qty > 0 ? qty : 1,
-          reference: null,
-          manufacturer: parts[2] || null,
-          description: null,
-        });
+    String(text || '').split(/\r?\n/).forEach(function (raw) {
+      var trimmed = raw.trim();
+      if (!trimmed || trimmed.charAt(0) === '#') return;
+
+      var fields = trimmed.split(/[\t,;]/)
+        .map(function (piece) { return piece.trim(); })
+        .filter(function (piece) { return piece; });
+      if (!fields.length) return;
+
+      if (fields.length > 1 && isQuantity(fields[1])) {
+        // "MPN, qty" and "MPN, qty, manufacturer" — the documented paste format.
+        push(fields[0], parseQuantity(fields[1]), fields[2] || null);
+      } else {
+        fields.forEach(function (field) { push(field, null, null); });
+      }
+    });
+
+    function push(field, quantity, manufacturer) {
+      // "STM32F103C8T6 x25". The space before the x matters: without it,
+      // MAX232 would be read as part "MA" in a quantity of 232.
+      var marked = /^(\S.*?)\s+[x\u00d7@]\s*(\d[\d,]*)$/i.exec(field);
+      var mpn = marked ? marked[1].trim() : field;
+      if (!mpn) return;
+      var qty = marked ? parseQuantity(marked[2]) : quantity;
+      lines.push({
+        row: lines.length + 1,
+        mpn: mpn,
+        quantity: qty && qty > 0 ? qty : 1,
+        reference: null,
+        manufacturer: manufacturer,
+        description: null,
       });
+    }
+
     return lines;
+  }
+
+  function isQuantity(value) {
+    return /^\d[\d,]*$/.test(String(value || '').trim());
+  }
+
+  function parseQuantity(value) {
+    var digits = String(value || '').replace(/[^0-9]/g, '');
+    var parsed = parseInt(digits, 10);
+    return isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  // ── Quick search ─────────────────────────────────────────────────────────
+
+  // Searching reuses one tab rather than opening a new one each time: a search
+  // is a question you refine, not a document you collect. The box keeps its
+  // text afterwards, so adding another part is a comma and Enter away.
+  function quickSearch() {
+    var lines = parseManualInput(el.quickInput.value);
+    if (!lines.length) {
+      toast('Type a part number to look up', true);
+      return;
+    }
+
+    var entry = null;
+    state.boms.forEach(function (candidate) {
+      if (!entry && candidate.adhoc) entry = candidate;
+    });
+
+    if (entry && entry.running) {
+      toast('That search is still running', true);
+      return;
+    }
+
+    if (entry) {
+      entry.name = searchName(lines);
+      entry.lines = lines;
+      entry.results = null;
+      entry.excluded = [];
+      entry.claimed = [];
+      entry.expanded = {};
+      entry.filter = 'all';
+      entry.search = '';
+      entry.error = null;
+      entry.progress = null;
+      state.activeId = entry.id;
+    } else {
+      entry = addBom(searchName(lines), { lines: lines, fromPaste: true, adhoc: true });
+    }
+
+    renderAll();
+    growQuickInput();
+    analyze(entry);
+  }
+
+  // One row until the content needs more, capped by the CSS max-height so a
+  // 200-line paste does not push the rest of the page off the screen.
+  function growQuickInput() {
+    el.quickInput.style.height = 'auto';
+    el.quickInput.style.height = el.quickInput.scrollHeight + 'px';
+  }
+
+  function searchName(lines) {
+    if (lines.length === 1) return lines[0].mpn;
+    return lines[0].mpn + ' +' + (lines.length - 1);
   }
 
   // ── Column mapping ───────────────────────────────────────────────────────
@@ -436,6 +524,12 @@
   }
 
   function renderMapping() {
+    // A search has no header row to check and no columns to remap, and the
+    // search box above is already the way to change it.
+    if (bom().adhoc) {
+      el.mappingCard.hidden = true;
+      return;
+    }
     el.mappingCard.hidden = false;
     var heading = el.mappingCard.querySelector('h2');
     if (heading) {
@@ -574,7 +668,7 @@
     renderAll();
     el.analyzeBtn.disabled = true;
 
-    return streamLookup(parts, claimedParts(entry), function (event, data) {
+    return streamLookup(parts, entry, function (event, data) {
       if (event === 'start') {
         var expected = data.parts * data.suppliers.length;
         entry.percent = 0;
@@ -630,11 +724,18 @@
     el.progressText.textContent = text || '';
   }
 
-  function streamLookup(parts, claimed, onEvent) {
+  function streamLookup(parts, entry, onEvent) {
     return fetch(api('/api/lookup'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify({ parts: parts, stream: true, claimed: claimed }),
+      body: JSON.stringify({
+        parts: parts,
+        stream: true,
+        // Hand-entered part numbers are looked up as asked: no in-house prefix
+        // is applied and no other BOM's claim answers for them.
+        manual: !!entry.adhoc,
+        claimed: entry.adhoc ? {} : claimedParts(entry),
+      }),
     }).then(function (res) {
       if (!res.ok) return readJsonOrThrow(res);
       if (!res.body || !res.body.getReader) {
@@ -1241,6 +1342,7 @@
   // What the server will screen out, worked out here so it shows up before the
   // Analyze button is pressed rather than after the lookups have run.
   function previewScreening(entry) {
+    if (entry.adhoc) return null;
     var prefixes = (state.health && state.health.ignorePrefixes) || [];
     var owned = claimedParts(entry);
     var seen = {};
@@ -1282,7 +1384,9 @@
   function claimedParts(except) {
     var map = {};
     state.boms.forEach(function (entry) {
-      if (entry === except || !entry.results) return;
+      // A search answers a question about a part; it does not own it, or a
+      // later BOM containing that part would come back empty.
+      if (entry === except || entry.adhoc || !entry.results) return;
       (entry.claimed || []).forEach(function (mpn) {
         if (!map[mpn]) map[mpn] = entry.name;
       });
@@ -1776,16 +1880,19 @@
     el.fileInput.value = '';
   });
 
-  el.pasteBtn.addEventListener('click', function () {
-    var lines = parsePasted(el.pasteInput.value);
-    if (lines.length === 0) {
-      toast('Nothing to read — paste one part number per line', true);
-      return;
+  el.quickBtn.addEventListener('click', quickSearch);
+
+  // Enter searches, because this reads as a search box however it is built.
+  // Shift+Enter is the way to add a line by hand; pasting a column brings its
+  // own newlines and needs no key at all.
+  el.quickInput.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      quickSearch();
     }
-    addBom(uniqueName('Pasted list'), { lines: lines, fromPaste: true });
-    renderAll();
-    toast('Loaded ' + lines.length + ' part' + (lines.length === 1 ? '' : 's') + ' as a new BOM');
   });
+  el.quickInput.addEventListener('input', growQuickInput);
+  el.quickInput.addEventListener('change', growQuickInput);
 
   el.sampleBtn.addEventListener('click', loadSample);
   el.analyzeBtn.addEventListener('click', function () { analyze(); });
@@ -1817,7 +1924,6 @@
       return;
     }
     if (state.activeId) removeBom(state.activeId);
-    el.pasteInput.value = '';
   });
 
   var searchTimer = null;

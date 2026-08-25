@@ -10,6 +10,10 @@ TrustedParts is an aggregator rather than a distributor: it searches many author
 at once. Its column quotes whichever distributor is cheapest for your quantity, and expanding a row
 lists **every** distributor it found, with stock, minimum order and price for each.
 
+**A search box, not just an uploader.** Type a part number and press Enter to compare it across all
+three suppliers — no file, no column mapping. Several at once, with optional quantities, and a
+column pasted straight out of a spreadsheet all work.
+
 **Several BOMs at once.** Load as many as you like — each gets its own tab, its own results, and
 its own filter and search state, so switching between them restores exactly the view you left.
 Results stay separate per BOM, but a part number is only ever looked up once: whichever BOM you
@@ -19,7 +23,8 @@ call on the same answer.
 Two front ends over the same engine:
 
 - **`python3 server.py`** — a browser app at <http://localhost:8787> for interactive work.
-- **`python3 bom.py my-bom.csv -o comparison.xlsx`** — a CLI for scripting and one-shot runs.
+- **`python3 bom.py my-bom.csv -o comparison.xlsx`** — a CLI for scripting and one-shot runs;
+  `python3 bom.py --part STM32F103C8T6` answers a single part without a file.
 
 ---
 
@@ -183,6 +188,7 @@ the whole analysis, screened-out lines included, for scripting.
 | --- | --- |
 | `-o FILE` | Write the comparison (`.xlsx`, `.csv` or `.json`; `-f` overrides the extension) |
 | `-b N` | Building N units — multiplies every BOM quantity by N before pricing |
+| `-p MPN` / `--part MPN` | Look up a part number directly, no BOM file (repeatable; `--part "STM32F103C8T6,25"` sets a quantity) |
 | `-s digikey` / `-s mouser` / `-s trustedparts` | Query one supplier only (repeatable) |
 | `--limit N` | Analyze just the first N parts, e.g. to sanity-check a big BOM |
 | `--ignore-prefix PREFIX` | Skip part numbers starting with PREFIX (repeatable); replaces the `ASY0`/`CBL0`/`DES0`/`PCB0` default |
@@ -193,6 +199,16 @@ the whole analysis, screened-out lines included, for scripting.
 | `--mpn-column COL` | Force a column by header name or 0-based index (one flag per field) |
 | `--fail-on risk` | Exit non-zero when any line is flagged — for CI and scripts |
 | `--no-cache`, `--clear-cache` | Bypass or empty the cached supplier answers |
+
+For a one-off question there is no need for a file at all:
+
+```bash
+python3 bom.py --part STM32F103C8T6
+python3 bom.py --part "STM32F103C8T6,25" --part "LM358DR,100" -o quote.xlsx
+```
+
+As in the web app's search box, a part named with `--part` is looked up as asked — the in-house
+prefixes do not apply unless you pass `--ignore-prefix` yourself.
 
 Reading part numbers from stdin works too, one per line with an optional quantity:
 
@@ -215,9 +231,30 @@ your file and which flag to reach for:
 
 ## Using the web app
 
-1. **Load your BOMs** — drop one or more files on the upload area (multi-select works), or paste a
-   list of part numbers with optional quantities (`GRM188R71H104KA93D, 100`). Each file becomes its
-   own tab; a file that cannot be read gets a tab saying so rather than aborting the batch.
+### Searching for a part
+
+Type a part number into the search box and press **Enter**. That is the whole flow — no file, no
+column mapping. The results land in the same comparison table, with the same filters, report and
+exports as a BOM.
+
+* Several at once: `STM32F103C8T6, LM358DR, RC0603FR-0710KL`
+* A quantity: `STM32F103C8T6 x25` — otherwise 1 is assumed, which is enough to compare unit price,
+  stock and lifecycle status
+* A column pasted from a spreadsheet: one part per line, `part, quantity` — **Shift+Enter** adds a
+  line by hand
+
+Searches share one tab, replacing it each time, and the box keeps its text — so adding another part
+to the comparison is a comma and Enter away. Loaded BOMs are untouched by this.
+
+**A search is answered as asked.** Neither the in-house prefixes nor another BOM's claim applies to
+a part number you typed yourself: screening is there to stop automatic waste, not to answer a direct
+question with nothing. Searching `ASY0-1234` looks up `ASY0-1234`.
+
+### Analyzing a BOM
+
+1. **Load your BOMs** — drop one or more files on the upload area; multi-select works. Each file
+   becomes its own tab; a file that cannot be read gets a tab saying so rather than aborting the
+   batch.
 2. **Check the columns** — confirm the detected mapping against the preview and fix anything wrong.
    The mapping belongs to the BOM you are viewing.
 3. **Analyze** — either the BOM on screen, or **Analyze all pending** to work through the loaded
@@ -297,9 +334,10 @@ Settings panel, and set `ALLOWED_ORIGINS` on the server to the origin serving th
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 196 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 204 tests, no network access required
 python3 server.py                            # http://localhost:8787
-python3 bom.py samples/sample-bom.csv        # the CLI
+python3 bom.py --part STM32F103C8T6          # look one part up
+python3 bom.py samples/sample-bom.csv        # or a whole BOM
 ```
 
 ```
@@ -360,7 +398,8 @@ shapes, so no network access is needed.
   the line at the combined quantity — buying the total in one order would usually be cheaper still.
 - **Screening is by prefix, not by meaning.** `ASY0`, `CBL0`, `DES0` and `PCB0` are assumed to be
   in-house numbering. If a real manufacturer part number starts with one of those, set
-  `IGNORE_PART_PREFIXES` to something narrower, or clear it and let everything through.
+  `IGNORE_PART_PREFIXES` to something narrower, clear it to let everything through, or just search
+  for the part directly — a hand-entered lookup is never screened.
 - **TrustedParts reports no lead time.** Its API carries stock but no lead time field, so that
   column reads as unknown for TrustedParts rather than guessing. Lines it stocks still compare
   correctly, because stock on hand outranks any quoted lead time.

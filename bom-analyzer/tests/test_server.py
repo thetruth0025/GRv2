@@ -304,6 +304,40 @@ class ScreeningTests(unittest.TestCase):
                       {'Content-Type': 'application/json'})
         self.assertEqual(result['status'], 200)
 
+    def test_a_hand_entered_search_is_answered_rather_than_screened(self):
+        # Somebody who types ASY0-1 is asking about ASY0-1. Screening exists to
+        # stop automatic waste, not to refuse a direct question.
+        result = call('/api/lookup', 'POST', json.dumps({
+            'parts': [{'row': 1, 'mpn': 'ASY0-1', 'quantity': 1}],
+            'manual': True,
+        }), {'Content-Type': 'application/json'})
+        # No supplier is configured, so reaching the lookup is a 502 — which is
+        # the proof the part was not screened out first.
+        self.assertEqual(result['status'], 502)
+
+    def test_a_search_ignores_another_boms_claim(self):
+        result = call('/api/lookup', 'POST', json.dumps({
+            'parts': [{'row': 1, 'mpn': 'SHARED-PART', 'quantity': 1}],
+            'claimed': {'SHARED-PART': 'Main board'},
+            'manual': True,
+        }), {'Content-Type': 'application/json'})
+        self.assertEqual(result['status'], 502)
+
+    def test_the_same_request_without_the_flag_is_screened_normally(self):
+        result = self._lookup([{'row': 1, 'mpn': 'ASY0-1', 'quantity': 1}])
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['data']['excluded'][0]['reason'], 'ignored')
+
+    def test_a_search_still_merges_the_same_part_typed_twice(self):
+        result = call('/api/lookup', 'POST', json.dumps({
+            'parts': [{'row': 1, 'mpn': 'ABC', 'quantity': 5},
+                      {'row': 2, 'mpn': 'abc', 'quantity': 5}],
+            'manual': True,
+        }), {'Content-Type': 'application/json'})
+        # Still one part to price, so still one lookup — 502 for want of
+        # credentials, not a screening result.
+        self.assertEqual(result['status'], 502)
+
     def test_the_row_cap_counts_parts_that_survive_screening(self):
         # More rows than MAX_PARTS_PER_REQUEST, but nearly all in-house: the
         # request is about a handful of real parts and must be accepted.
