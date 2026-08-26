@@ -158,13 +158,39 @@ def preferred_offer(row):
     return None
 
 
-def suggested_replacement(row):
-    """What to use instead, if anything has said so.
+def approved_alternates(row, usable_only=True):
+    """The BOM's own approved alternates, best first.
 
-    An alternative found through Nexar wins over a supplier's own suggestion:
-    it was looked up deliberately for this part, whereas the supplier field is
-    whatever happened to be attached to the catalogue entry.
+    Usable ones lead — stocked somewhere and not themselves ending — because a
+    form is read to find something that can be bought.
     """
+    entries = [a for a in (row.get('alternates') or []) if isinstance(a, dict) and a.get('mpn')]
+    if usable_only:
+        usable = [a for a in entries if a.get('usable')]
+        if usable:
+            return usable
+    return entries
+
+
+def suggested_replacement(row):
+    """What to use instead, in the order the answers deserve trust.
+
+    An alternate named on the BOM comes first and by a distance: somebody with
+    the schematic in front of them already decided it fits. A Nexar suggestion
+    is an algorithm's opinion about attributes, and a supplier's own field is
+    whatever happened to be attached to the catalogue entry. All three are
+    worth having; only the first is a decision that has already been made.
+    """
+    approved = approved_alternates(row)
+    if approved:
+        return '; '.join(
+            '%s (BOM alternate%s)' % (
+                entry['mpn'],
+                '' if entry.get('usable') else ', unavailable',
+            )
+            for entry in approved[:2]
+        )
+
     named = row.get('suggestedReplacement')
     if named:
         return str(named)

@@ -258,9 +258,57 @@ FIELD_ALIASES = {
         'skiptoproduction', 'skiptoprod', 'skipproduction', 'skipsourcing',
         'donotsource', 'skip',
     ],
+    # Parts the BOM's author has already approved in place of the primary.
+    # "alternate" is listed before "alt" so the fuller spelling wins, and the
+    # bare words come last so they cannot claim a more specific column.
+    'alternates': [
+        'alternatepartnumber', 'alternatepartnumbers', 'alternatepart', 'alternateparts',
+        'alternatempn', 'alternatepn', 'approvedalternate', 'approvedalternates',
+        'altpartnumber', 'altpart', 'altmpn', 'altpn',
+        'secondsource', 'substitutepart', 'substitute', 'alternate', 'alternates', 'alt',
+    ],
 }
 
-FIELD_ORDER = ['mpn', 'quantity', 'reference', 'manufacturer', 'description', 'footprint', 'skip']
+FIELD_ORDER = [
+    'mpn', 'quantity', 'reference', 'manufacturer', 'description', 'footprint',
+    'skip', 'alternates',
+]
+
+# One cell can name several approved alternates. Commas, semicolons, pipes and
+# newlines are the separators; a space is not, because part numbers contain
+# them, and neither is a slash — LM358DR/NOPB is one part number, not two.
+ALTERNATE_SEPARATORS = re.compile(r'[,;|\n\r]+')
+
+
+# What people write in an alternates cell to mean there are none. Matched
+# whole, so a real part number containing these letters is untouched.
+NO_ALTERNATE = frozenset(('NONE', 'NA', 'N/A', 'NIL', 'NO', 'TBD', '-', '--', '—'))
+
+
+def split_alternates(value):
+    """The part numbers named in an alternates cell, in the order given.
+
+    Deduplicated on the same normalized key part numbers are matched by, so a
+    cell listing one part twice does not cost two lookups, and words meaning
+    "there are none" are not looked up as though they were parts.
+    """
+    # Checked whole and first: "N/A" is one answer, not the two parts N and A.
+    whole = clean_cell(value)
+    if not whole or whole.upper() in NO_ALTERNATE:
+        return []
+
+    seen = set()
+    found = []
+    for piece in ALTERNATE_SEPARATORS.split(whole):
+        mpn = clean_cell(piece)
+        if not mpn or mpn.upper() in NO_ALTERNATE:
+            continue
+        key = re.sub(r'[^A-Z0-9]', '', mpn.upper())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        found.append(mpn)
+    return found
 
 
 def squash(text):
@@ -352,6 +400,8 @@ def line_from_row(row, mapping, row_index):
         # Kept as written rather than as a boolean, so the reason a line was
         # skipped can quote what the cell actually said.
         'skip': cell('skip') or None,
+        # Kept as a list: the column holds "none", one, or several.
+        'alternates': split_alternates(cell('alternates')),
         'quantity': quantity if quantity > 0 else 1,
         'quantityRaw': quantity_raw or None,
         'reference': cell('reference') or None,

@@ -86,6 +86,14 @@ stock, so part numbers starting with `ASY0`, `CBL0`, `DES0` or `PCB0` never reac
 list is configurable, nothing is silently dropped, and every skipped line stays visible with the
 reason it was skipped.
 
+**Prices the alternates your BOM already approved.** If a column names approved substitutes —
+*Alternate Part Number*, *Alt P/N*, *Second Source*, and the usual spellings — each one is looked up
+alongside the primary and reduced to the answer you need: could it cover this line today. Somebody
+with the schematic in front of them already decided those parts fit, so they outrank anything an
+algorithm suggests: they lead the DMSMS form's Suggested Replacement column, get their own sheet in
+the workbook, and a line whose primary is in trouble but whose alternate is stocked says so in the
+table without being expanded.
+
 **Finds alternatives to a part in trouble.** Nexar (Altium) answers a different question from the
 three suppliers: not what a part costs, but what could be used instead. It runs only for parts the
 comparison has already found to be obsolete, NRND, end of life or simply unavailable — and only for
@@ -229,6 +237,7 @@ the whole analysis, screened-out lines included, for scripting.
 | `--no-ignore-prefixes` | Look up in-house part numbers too |
 | `--no-merge-duplicates` | Keep repeated part numbers as separate lines instead of adding their quantities |
 | `--ignore-skip-column` | Look up lines the BOM marks YES in a skip-to-production column |
+| `--no-alternates` | Do not look up the approved alternates named in the BOM's alternates column |
 | `--show-skipped` | List every skipped line and why |
 | `--dmsms FILE --program NAME` | Write a DMSMS case form for every at-risk part |
 | `--dmsms-status STATUS` | Narrow the form to given lifecycle statuses (repeatable) |
@@ -305,7 +314,8 @@ question with nothing. Looking up `ASY0-1234` looks up `ASY0-1234`.
    The mapping belongs to the BOM you are viewing. A *Skip to Production* column is detected like
    any other, appears in the preview, and can be pointed at a different column or unmapped
    entirely — and the summary line says how many lines it will remove before you spend a call on
-   them.
+   them. An *Alternate Part Number* column is detected the same way, and can be
+   remapped or unmapped just as easily.
 3. **Analyze** — either the BOM on screen, or **Analyze all pending** to work through the loaded
    BOMs one after another. Progress streams back per query, and each tab shows its own line count,
    cheapest-mix total and how many lines need review. Repeat runs come from cache and are near
@@ -349,6 +359,47 @@ column in the browser does the same.
 
 Typed lookups ignore the column entirely, as they ignore every other screening rule: a part number
 you entered by hand is a direct question, and it gets answered.
+
+### The alternates column
+
+Many BOMs carry a column naming the parts engineering approved as substitutes. It is detected by its
+header the same way every other column is — *Alternate Part Number*, *Alternate Parts*, *Alt P/N*,
+*Alt MPN*, *Approved Alternates*, *Second Source*, *Substitute Part*, and the shorter spellings —
+and can be remapped or unmapped in the browser like any other.
+
+One cell may name several parts. Commas, semicolons, pipes and newlines separate them; a space does
+not, because part numbers contain spaces, and neither does a slash — `LM358DR/NOPB` is one part
+number, not two. A cell that says `N/A`, `None`, `TBD` or `-` names none. Repeats collapse.
+
+Each named alternate is then looked up against the same suppliers as the primary, at the same
+quantity — the question an alternate answers is "could this cover the same build", which is a
+question about the same number of pieces — and reduced to one verdict:
+
+| Verdict | Means |
+| --- | --- |
+| **available** | Found, stocked somewhere in the quantity this line needs, and not itself ending |
+| **no stock** | Found, and nobody has enough today |
+| **ending** | Found and stocked, but obsolete or discontinued itself — a substitution that buys you nothing |
+| **no match** | No supplier carries that number at all |
+
+Where that shows up:
+
+- **In the comparison table** — a line whose primary is unbuyable, unstocked or ending, but whose
+  BOM names a stocked alternate, is badged `alt: <part>` in the Verdict column. One with alternates
+  that are all unavailable says that instead. A healthy line is not badged: it has no question to
+  answer.
+- **When you expand a row** — every alternate, with its verdict, lifecycle, stock, best price and
+  which suppliers have it.
+- **In the summary report** — an *Approved alternates* column on the parts table and on *Needs a
+  decision*, and an **Alternates** sheet in the exported workbook.
+- **On the DMSMS form** — an approved alternate leads the Suggested Replacement column, ahead of
+  anything Nexar suggests and anything the supplier's own catalogue field says. A stocked one is
+  preferred to one that is not, and an unavailable one is still named, labelled `unavailable`,
+  because knowing the approved substitute is also gone is the point of the form.
+
+Looking the column up costs one lookup per alternate per supplier. `--no-alternates` on the CLI, or
+`SKIP_ALTERNATES=1` in `.env`, leaves it unqueried — the column is still read, mapped and shown,
+just not priced. `MAX_ALTERNATES_PER_PART` caps how many one line may name (default 6).
 
 ### How a part number is matched
 

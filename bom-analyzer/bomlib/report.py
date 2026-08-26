@@ -401,6 +401,12 @@ PARTS_WIDTHS = [6, 26, 8, 18, 36, 15, 12, 13, 15, 16, 46]
 EXCLUDED_COLUMNS = ['Row', 'Part Number', 'Qty', 'Reference', 'Description', 'Why it was skipped']
 EXCLUDED_WIDTHS = [6, 26, 8, 18, 36, 44]
 
+ALTERNATE_COLUMNS = [
+    'Row', 'Primary Part', 'Primary Status', 'Alternate', 'Qty',
+    'Available', 'Stock', 'Lifecycle', 'Best Price', 'From', 'Notes',
+]
+ALTERNATE_WIDTHS = [6, 26, 20, 26, 8, 11, 13, 20, 13, 15, 40]
+
 EXCLUSION_LABEL = {
     FLAGGED: 'Marked skip to production on the BOM',
     IGNORED: 'In-house part number',
@@ -577,9 +583,12 @@ def build_parts_rows(result, summary, styled=False):
         return Cell(value, style) if styled else value
 
     shared = any(_also_in(row) for row in result['rows'])
+    alternates = has_alternates(result)
     columns = list(PARTS_COLUMNS)
     if shared:
         columns.insert(3, 'Also In')
+    if alternates:
+        columns.insert(-1, 'Approved Alternates')
 
     rows = [[cell(name, STYLE_HEADER) for name in columns]]
 
@@ -622,9 +631,70 @@ def build_parts_rows(result, summary, styled=False):
             cell(lead),
             cell(comparison.get('lifecycle'),
                  SEVERITY_STYLE.get(comparison.get('lifecycleSeverity'), STYLE_DEFAULT)),
-            cell('; '.join(notes)),
         ])
+        if alternates:
+            record.append(cell(alternate_summary(row), STYLE_MUTED))
+        record.append(cell('; '.join(notes)))
         rows.append(record)
+    return rows
+
+
+def has_alternates(result):
+    """True when any analyzed line named an approved alternate."""
+    return any(row.get('alternates') for row in result['rows'])
+
+
+def alternate_summary(row):
+    """One cell's worth: what the BOM offers instead, and whether it is there."""
+    entries = [a for a in (row.get('alternates') or []) if a.get('mpn')]
+    if not entries:
+        return None
+    return '; '.join(
+        '%s (%s)' % (entry['mpn'], 'available' if entry.get('usable') else 'not available')
+        for entry in entries
+    )
+
+
+def build_alternate_rows(result, styled=False):
+    """One row per approved alternate, with the primary it stands in for.
+
+    Separate from the parts sheet because the question is different: not what
+    to buy, but what could be bought instead, and how ready that answer is.
+    """
+    def cell(value, style=STYLE_DEFAULT):
+        return Cell(value, style) if styled else value
+
+    rows = [[cell(name, STYLE_HEADER) for name in ALTERNATE_COLUMNS]]
+
+    for row in result['rows']:
+        comparison = row.get('comparison') or {}
+        for entry in row.get('alternates') or []:
+            if not entry.get('mpn'):
+                continue
+            notes = []
+            if not entry.get('found'):
+                notes.append('No supplier carries it')
+            elif not entry.get('coversQuantity'):
+                notes.append('Nobody holds the full quantity')
+            if entry.get('lifecycleSeverity') == 'bad':
+                notes.append('Alternate is itself ending')
+
+            rows.append([
+                cell(row.get('row'), STYLE_INT),
+                cell(row.get('mpn')),
+                cell(comparison.get('lifecycle'),
+                     SEVERITY_STYLE.get(comparison.get('lifecycleSeverity'), STYLE_DEFAULT)),
+                cell(entry.get('mpn')),
+                cell(entry.get('quantity'), STYLE_INT),
+                cell('yes' if entry.get('usable') else 'no',
+                     STYLE_GOOD if entry.get('usable') else STYLE_WARN),
+                cell(entry.get('stock'), STYLE_INT),
+                cell(entry.get('lifecycle'),
+                     SEVERITY_STYLE.get(entry.get('lifecycleSeverity'), STYLE_DEFAULT)),
+                cell(entry.get('bestPrice'), STYLE_MONEY),
+                cell(entry.get('bestPriceSupplier')),
+                cell('; '.join(notes)),
+            ])
     return rows
 
 
@@ -643,6 +713,17 @@ def build_excluded_rows(excluded, styled=False):
             cell(entry.get('detail') or EXCLUSION_LABEL.get(entry.get('reason'), ''), STYLE_MUTED),
         ])
     return rows
+
+
+def _parts_widths(header):
+    """Widths for the parts sheet, which grows a column or two conditionally."""
+    extra = {'Also In': 24, 'Approved Alternates': 34}
+    widths = []
+    base = dict(zip(PARTS_COLUMNS, PARTS_WIDTHS))
+    for name in header:
+        label = getattr(name, 'value', name)
+        widths.append(base.get(label, extra.get(label, 18)))
+    return widths
 
 
 def build_workbook_sheets(result, summary, meta=None, excluded=None, prefix=''):
@@ -673,7 +754,7 @@ def build_workbook_sheets(result, summary, meta=None, excluded=None, prefix=''):
         'name': name('Parts'),
         'rows': parts_rows,
         'widths': PARTS_WIDTHS if len(parts_rows[0]) == len(PARTS_COLUMNS)
-                  else PARTS_WIDTHS[:3] + [24] + PARTS_WIDTHS[3:],
+                  else _parts_widths(parts_rows[0]),
     }, {
         'name': name('Full comparison'),
         'rows': build_rows(result, summary, styled=True),
@@ -685,6 +766,12 @@ def build_workbook_sheets(result, summary, meta=None, excluded=None, prefix=''):
             'name': name('Distributors'),
             'rows': build_distributor_rows(result, summary, styled=True),
             'widths': DISTRIBUTOR_WIDTHS,
+        })
+    if has_alternates(result):
+        sheets.append({
+            'name': name('Alternates'),
+            'rows': build_alternate_rows(result, styled=True),
+            'widths': ALTERNATE_WIDTHS,
         })
     if excluded:
         sheets.append({

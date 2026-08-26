@@ -119,6 +119,10 @@ def build_parser():
         help="Look up lines the BOM marks YES in a skip-to-production column.",
     )
     screening.add_argument(
+        '--no-alternates', action='store_true',
+        help="Do not look up the approved alternates named in the BOM's alternates column.",
+    )
+    screening.add_argument(
         '--show-skipped', action='store_true',
         help='List every skipped line and why it was skipped.',
     )
@@ -602,7 +606,12 @@ def build_service(args):
     except ValueError:
         concurrency = 3
 
-    return LookupService(clients=clients, cache=cache, concurrency=concurrency), cache
+    return LookupService(
+        clients=clients,
+        cache=cache,
+        concurrency=concurrency,
+        include_alternates=not getattr(args, 'no_alternates', False),
+    ), cache
 
 
 # ── Output ──────────────────────────────────────────────────────────────────
@@ -716,6 +725,7 @@ def render_summary(result, summary, paint):
 
     risks = summary.get('riskLines') or []
     if risks:
+        by_mpn = {row['mpn']: row for row in result['rows']}
         out.append('')
         out.append(paint('Needs attention', 'bold'))
         for risk in risks[:20]:
@@ -724,10 +734,34 @@ def render_summary(result, summary, paint):
             colour = {'bad': 'red', 'warn': 'yellow'}.get(worst)
             marker = paint('•', colour) if colour else '•'
             out.append('  %s %-28s %s' % (marker, truncate(risk['mpn'], 28), truncate(flags, 78)))
+            # The BOM already answered this one; say so rather than making
+            # somebody open the workbook to find out.
+            answer = _alternate_note(by_mpn.get(risk['mpn']))
+            if answer:
+                out.append(paint('    %s' % truncate(answer, 104), 'dim'))
         if len(risks) > 20:
             out.append(paint('  … and %d more' % (len(risks) - 20), 'dim'))
 
     return '\n'.join(out)
+
+
+def _alternate_note(row):
+    """One line about the alternates this BOM named for a part in trouble."""
+    entries = [a for a in ((row or {}).get('alternates') or [])
+               if isinstance(a, dict) and a.get('mpn')]
+    if not entries:
+        return None
+    usable = [a for a in entries if a.get('usable')]
+    if usable:
+        return 'approved %s available: %s' % (
+            'alternate' if len(usable) == 1 else 'alternates',
+            ', '.join(a['mpn'] for a in usable[:3]),
+        )
+    return 'approved %s (%s) %s not available' % (
+        'alternate' if len(entries) == 1 else 'alternates',
+        ', '.join(a['mpn'] for a in entries[:3]),
+        'is' if len(entries) == 1 else 'are',
+    )
 
 
 def check_exit(fail_on, summary):

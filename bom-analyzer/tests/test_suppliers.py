@@ -494,5 +494,107 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary['riskLines'][0]['mpn'], 'NOSUCHPART999')
 
 
+class ApprovedAlternateTests(unittest.TestCase):
+    """The BOM's own alternates column, priced alongside the primary.
+
+    Engineering already decided these parts fit. The tool's job is only to say
+    whether they can actually be bought, so each one is looked up the same way
+    the primary is and reduced to that one answer.
+    """
+
+    def catalogue(self, stock_by_mpn, lifecycle_by_mpn=None):
+        lifecycles = lifecycle_by_mpn or {}
+
+        def handler(part):
+            mpn = part['mpn']
+            if mpn not in stock_by_mpn:
+                return None
+            return {
+                'supplier': 'DigiKey', 'supplierId': 'digikey',
+                'manufacturerPartNumber': mpn, 'manufacturer': 'Acme',
+                'supplierPartNumber': mpn + '-ND', 'description': 'A part',
+                'totalStock': stock_by_mpn[mpn],
+                'lifecycle': lifecycles.get(mpn, Lifecycle.ACTIVE),
+                'lifecycleRaw': lifecycles.get(mpn, Lifecycle.ACTIVE),
+                'currency': 'USD', 'exactMatch': True, 'matchCount': 1,
+                'variations': [{
+                    'supplierPartNumber': mpn + '-ND', 'packaging': 'Cut Tape',
+                    'stock': stock_by_mpn[mpn], 'minimumOrderQuantity': 1,
+                    'orderMultiple': 1,
+                    'priceBreaks': [{'quantity': 1, 'unitPrice': 1.0}],
+                }],
+            }
+        return FakeClient('digikey', 'DigiKey', handler)
+
+    def analyze(self, client, line, **kwargs):
+        service = LookupService(clients=[client], cache=None, **kwargs)
+        return service.lookup_parts([line])['rows'][0]
+
+    def test_each_alternate_is_looked_up_and_judged(self):
+        client = self.catalogue({'PRIMARY': 0, 'SUB-OK': 9000, 'SUB-DEAD': 0})
+        row = self.analyze(client, {
+            'row': 1, 'mpn': 'PRIMARY', 'quantity': 100,
+            'alternates': ['SUB-OK', 'SUB-DEAD'],
+        })
+        picked = {entry['mpn']: entry for entry in row['alternates']}
+        self.assertEqual(sorted(picked), ['SUB-DEAD', 'SUB-OK'])
+        self.assertTrue(picked['SUB-OK']['usable'])
+        self.assertTrue(picked['SUB-OK']['coversQuantity'])
+        # Found, but nobody has any, so it cannot stand in today.
+        self.assertTrue(picked['SUB-DEAD']['found'])
+        self.assertFalse(picked['SUB-DEAD']['usable'])
+
+    def test_an_alternate_nobody_carries_is_reported_not_dropped(self):
+        client = self.catalogue({'PRIMARY': 500})
+        row = self.analyze(client, {
+            'row': 1, 'mpn': 'PRIMARY', 'quantity': 10, 'alternates': ['NOSUCHPART999'],
+        })
+        self.assertEqual(len(row['alternates']), 1)
+        self.assertFalse(row['alternates'][0]['found'])
+        self.assertFalse(row['alternates'][0]['usable'])
+
+    def test_an_alternate_that_is_itself_obsolete_is_not_usable(self):
+        client = self.catalogue({'PRIMARY': 0, 'SUB': 9000},
+                                {'SUB': Lifecycle.OBSOLETE})
+        row = self.analyze(client, {
+            'row': 1, 'mpn': 'PRIMARY', 'quantity': 10, 'alternates': ['SUB'],
+        })
+        entry = row['alternates'][0]
+        self.assertTrue(entry['coversQuantity'])
+        self.assertFalse(entry['usable'])
+
+    def test_an_alternate_is_priced_at_the_quantity_the_line_needs(self):
+        client = self.catalogue({'PRIMARY': 0, 'SUB': 9000})
+        row = self.analyze(client, {
+            'row': 1, 'mpn': 'PRIMARY', 'quantity': 250, 'alternates': ['SUB'],
+        })
+        entry = row['alternates'][0]
+        self.assertEqual(entry['quantity'], 250)
+        self.assertEqual(entry['offers']['digikey']['extendedPrice'], 250.0)
+
+    def test_a_line_with_no_alternates_column_carries_an_empty_list(self):
+        client = self.catalogue({'PRIMARY': 500})
+        row = self.analyze(client, {'row': 1, 'mpn': 'PRIMARY', 'quantity': 10})
+        self.assertEqual(row['alternates'], [])
+        self.assertEqual(client.calls, 1)
+
+    def test_turning_alternates_off_spends_no_api_calls_on_them(self):
+        client = self.catalogue({'PRIMARY': 500, 'SUB-1': 500, 'SUB-2': 500})
+        row = self.analyze(client, {
+            'row': 1, 'mpn': 'PRIMARY', 'quantity': 10, 'alternates': ['SUB-1', 'SUB-2'],
+        }, include_alternates=False)
+        self.assertEqual(row['alternates'], [])
+        self.assertEqual(client.calls, 1)
+
+    def test_the_primary_row_is_unchanged_by_having_alternates(self):
+        client = self.catalogue({'PRIMARY': 500, 'SUB': 500})
+        with_alt = self.analyze(client, {
+            'row': 1, 'mpn': 'PRIMARY', 'quantity': 10, 'alternates': ['SUB'],
+        })
+        self.assertTrue(with_alt['offers']['digikey']['found'])
+        self.assertEqual(with_alt['offers']['digikey']['manufacturerPartNumber'], 'PRIMARY')
+        self.assertEqual(with_alt['comparison']['inStockSuppliers'], ['DigiKey'])
+
+
 if __name__ == '__main__':
     unittest.main()

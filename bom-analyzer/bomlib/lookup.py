@@ -33,6 +33,62 @@ def _miss_reason(entry, supplier, mpn):
     return 'No %s match for %s' % (supplier, mpn)
 
 
+def summarize_alternate(part, offers, offer_list):
+    """One approved alternate, reduced to the question being asked of it.
+
+    A buyer looking at an alternates column wants one thing first: could this
+    cover the line if the primary could not. That is stock and lifecycle, so
+    those lead; the full per-supplier detail rides along for the row that gets
+    expanded.
+    """
+    comparison = compare_offers(offer_list, part.get('quantity'))
+    found = [offer for offer in offer_list if offer and offer.get('found')]
+    covers = bool(comparison.get('inStockSuppliers'))
+    healthy = comparison.get('lifecycleSeverity') not in ('bad',)
+
+    return {
+        'mpn': part.get('mpn'),
+        'quantity': part.get('quantity'),
+        'offers': offers,
+        'comparison': comparison,
+        'found': bool(found),
+        # The headline: stocked somewhere, and not itself on the way out.
+        'usable': bool(found) and covers and healthy,
+        'coversQuantity': covers,
+        'lifecycle': comparison.get('lifecycle'),
+        'lifecycleSeverity': comparison.get('lifecycleSeverity'),
+        'bestPrice': comparison.get('bestPrice'),
+        'bestPriceSupplier': comparison.get('bestPriceSupplier'),
+        'stock': sum(
+            offer['stock'] for offer in found
+            if isinstance(offer.get('stock'), (int, float))
+        ) or None,
+    }
+
+
+def alternate_parts(part):
+    """The BOM's approved alternates, shaped like parts so they can be looked up.
+
+    They inherit the line's quantity, because the question an alternate answers
+    is "could this cover the same build", which is a question about the same
+    number of pieces. They do not inherit the manufacturer: an alternate is
+    usually a second source, so a different one.
+    """
+    found = []
+    for mpn in part.get('alternates') or []:
+        mpn = str(mpn or '').strip()
+        if not mpn:
+            continue
+        found.append({
+            'mpn': mpn,
+            'quantity': part.get('quantity') or 1,
+            'manufacturer': None,
+            'reference': part.get('reference'),
+            'description': None,
+        })
+    return found
+
+
 def cache_key(supplier_id, part):
     mpn = ' '.join(str(part.get('mpn') or '').upper().split())
     mfr = ' '.join(str(part.get('manufacturer') or '').upper().split())
@@ -40,10 +96,11 @@ def cache_key(supplier_id, part):
 
 
 class LookupService:
-    def __init__(self, clients=None, cache=None, concurrency=3):
+    def __init__(self, clients=None, cache=None, concurrency=3, include_alternates=True):
         self.clients = [c for c in (clients or []) if c and c.configured]
         self.cache = cache
         self.concurrency = max(1, concurrency)
+        self.include_alternates = bool(include_alternates)
 
     @property
     def suppliers(self):
@@ -56,10 +113,19 @@ class LookupService:
 
         # The same part number often appears on several BOM lines; one API call
         # per distinct part per supplier is enough for all of them.
-        jobs = {}
+        # Alternates are looked up alongside their primary rather than instead
+        # of it: knowing a second source is available before the primary goes
+        # obsolete is the reason a BOM carries the column at all.
+        targets = []
         for part in parts:
             if not part or not part.get('mpn'):
                 continue
+            targets.append(part)
+            if self.include_alternates:
+                targets.extend(alternate_parts(part))
+
+        jobs = {}
+        for part in targets:
             for client in self.clients:
                 key = cache_key(client.id, part)
                 if key not in jobs:
@@ -181,21 +247,34 @@ class LookupService:
                     units,
                 ))
 
-        rows = []
-        for index, part in enumerate(parts):
+        def offers_for(target):
             offers = {}
             for client in self.clients:
-                entry = resolved.get(cache_key(client.id, part))
+                entry = resolved.get(cache_key(client.id, target))
                 if entry is None:
                     offers[client.id] = missing_offer(client.name, 'Not looked up')
                 elif entry.get('error'):
                     offers[client.id] = error_offer(client.name, entry['error'])
                 elif entry.get('notFound'):
                     offers[client.id] = missing_offer(
-                        client.name, _miss_reason(entry, client.name, part.get('mpn'))
+                        client.name, _miss_reason(entry, client.name, target.get('mpn'))
                     )
                 else:
-                    offers[client.id] = record_to_offer(entry['record'], part)
+                    offers[client.id] = record_to_offer(entry['record'], target)
+            return offers
+
+        rows = []
+        for index, part in enumerate(parts):
+            offers = offers_for(part)
+
+            alternates = []
+            if self.include_alternates:
+                for alternate in alternate_parts(part):
+                    alternate_offers = offers_for(alternate)
+                    alternates.append(summarize_alternate(
+                        alternate, alternate_offers,
+                        [alternate_offers[c.id] for c in self.clients],
+                    ))
 
             offer_list = [offers[c.id] for c in self.clients]
             rows.append({
@@ -208,6 +287,10 @@ class LookupService:
                 'description': part.get('description'),
                 'offers': offers,
                 'comparison': compare_offers(offer_list, part.get('quantity')),
+                # The BOM's own approved alternates, each priced and compared
+                # the same way, kept beside the primary rather than mixed into
+                # it: they are a fallback, not a competing quote.
+                'alternates': alternates,
             })
 
         return {'rows': rows, 'suppliers': self.suppliers, 'stats': stats}

@@ -196,3 +196,52 @@ class FormTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def alternate(mpn, usable=True, found=True):
+    return {'mpn': mpn, 'usable': usable, 'found': found, 'coversQuantity': usable}
+
+
+class SuggestedReplacementTests(unittest.TestCase):
+    """Whose answer wins when several sources offer one."""
+
+    def test_a_bom_alternate_outranks_everything_else(self):
+        entry = row('OLD-1', Lifecycle.OBSOLETE,
+                    alternates=[alternate('BOM-SUB')],
+                    suggestedReplacement='NEXAR-SUB')
+        entry['offers']['digikey']['suggestedReplacement'] = 'SUPPLIER-SUB'
+        self.assertEqual(dmsms.suggested_replacement(entry), 'BOM-SUB (BOM alternate)')
+
+    def test_a_usable_alternate_is_preferred_over_one_that_is_not(self):
+        entry = row('OLD-1', Lifecycle.OBSOLETE, alternates=[
+            alternate('GONE', usable=False),
+            alternate('STOCKED'),
+        ])
+        self.assertEqual(dmsms.suggested_replacement(entry), 'STOCKED (BOM alternate)')
+
+    def test_an_unavailable_alternate_is_still_named_and_labelled(self):
+        entry = row('OLD-1', Lifecycle.OBSOLETE, alternates=[alternate('GONE', usable=False)])
+        self.assertEqual(dmsms.suggested_replacement(entry), 'GONE (BOM alternate, unavailable)')
+
+    def test_at_most_two_are_listed(self):
+        entry = row('OLD-1', Lifecycle.OBSOLETE,
+                    alternates=[alternate('A'), alternate('B'), alternate('C')])
+        self.assertEqual(dmsms.suggested_replacement(entry),
+                         'A (BOM alternate); B (BOM alternate)')
+
+    def test_nexar_answers_when_the_bom_named_nobody(self):
+        entry = row('OLD-1', Lifecycle.OBSOLETE, alternates=[], suggestedReplacement='NEXAR-SUB')
+        self.assertEqual(dmsms.suggested_replacement(entry), 'NEXAR-SUB')
+
+    def test_the_supplier_field_is_the_last_resort(self):
+        entry = row('OLD-1', Lifecycle.OBSOLETE)
+        entry['offers']['digikey']['suggestedReplacement'] = 'SUPPLIER-SUB'
+        self.assertEqual(dmsms.suggested_replacement(entry), 'SUPPLIER-SUB')
+
+    def test_no_answer_at_all_is_left_blank(self):
+        self.assertIsNone(dmsms.suggested_replacement(row('OLD-1', Lifecycle.OBSOLETE)))
+
+    def test_a_malformed_alternates_cell_is_ignored_rather_than_crashing(self):
+        entry = row('OLD-1', Lifecycle.OBSOLETE,
+                    alternates=['not a dict', {}, alternate('OK')])
+        self.assertEqual(dmsms.suggested_replacement(entry), 'OK (BOM alternate)')

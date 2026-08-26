@@ -562,6 +562,24 @@ tr.detail-row > td { background: var(--surface2); padding: 0; border-bottom: 1px
 .breaks tr.applied td { color: var(--accent); }
 .detail-links { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 9px; font-size: 0.74rem; }
 
+/* The BOM's own approved alternates, below the supplier columns because they
+   answer the question the columns raise rather than being one of them. */
+.alt-detail {
+  padding: 14px 12px 0;
+}
+.alt-detail h4 {
+  font-family: 'Syne', sans-serif;
+  font-size: 0.82rem;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+.alt-detail h4 .aside { font-family: 'DM Sans', sans-serif; font-size: 0.72rem; font-weight: 500; color: var(--text3); }
+.alt-detail .badge { font-family: 'DM Sans', sans-serif; }
+.alt-line { white-space: nowrap; }
+.alt-line + .alt-line { margin-top: 3px; }
+
 .expander {
   background: none;
   border: none;

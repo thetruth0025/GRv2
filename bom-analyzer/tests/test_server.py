@@ -274,6 +274,23 @@ class ScreeningTests(unittest.TestCase):
         self.assertEqual(result['data']['ignorePrefixes'],
                          ['ASY0', 'CBL0', 'DES0', 'PCB0'])
 
+    def test_health_says_whether_bom_alternates_are_looked_up(self):
+        self.assertIs(call('/api/health')['data']['lookupAlternates'], True)
+
+    def test_a_line_names_at_most_the_configured_number_of_alternates(self):
+        # A pasted column can hold a paragraph; the quota should not.
+        many = ['SUB-%d' % i for i in range(server.MAX_ALTERNATES_PER_PART + 10)]
+        result = self._lookup([{'row': 1, 'mpn': 'ASY0-1', 'quantity': 1, 'alternates': many}])
+        # Screened out as in-house, so nothing was looked up — but the request
+        # was accepted rather than rejected for its size.
+        self.assertEqual(result['status'], 200)
+        self.assertGreater(server.MAX_ALTERNATES_PER_PART, 0)
+
+    def test_a_non_list_alternates_field_does_not_break_the_request(self):
+        result = self._lookup([{'row': 1, 'mpn': 'ASY0-1', 'quantity': 1, 'alternates': 'SUB-1'}])
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['data']['excluded'][0]['reason'], 'ignored')
+
     def _lookup(self, parts, claimed=None):
         payload = {'parts': parts}
         if claimed is not None:

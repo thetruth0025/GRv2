@@ -592,6 +592,70 @@ class ReportSheetTests(unittest.TestCase):
         self.assertEqual(len(parts['widths']), len(parts['rows'][0]))
 
 
+class AlternateSheetTests(unittest.TestCase):
+    """What the BOM's alternates column turns into in the workbook."""
+
+    def analyze_with(self, alternates, clients=None):
+        return analyze([
+            {'row': 1, 'mpn': 'ABC123', 'quantity': 100, 'reference': 'R1',
+             'manufacturer': 'Acme', 'description': '10k', 'alternates': alternates},
+        ], clients=clients)
+
+    def test_a_bom_without_the_column_gets_no_alternates_sheet(self):
+        from bomlib.report import build_workbook_sheets, has_alternates
+        result, summary = self.analyze_with([])
+        self.assertFalse(has_alternates(result))
+        names = [sheet['name'] for sheet in build_workbook_sheets(result, summary)]
+        self.assertNotIn('Alternates', names)
+
+    def test_a_bom_with_the_column_gets_one(self):
+        from bomlib.report import build_workbook_sheets, has_alternates
+        result, summary = self.analyze_with(['SUB-1', 'SUB-2'])
+        self.assertTrue(has_alternates(result))
+        sheets = build_workbook_sheets(result, summary)
+        alt = next(s for s in sheets if s['name'] == 'Alternates')
+        header = [getattr(c, 'value', c) for c in alt['rows'][0]]
+        self.assertIn('Alternate', header)
+        # One row per alternate, under the primary they belong to.
+        body = [[getattr(c, 'value', c) for c in row] for row in alt['rows'][1:]]
+        self.assertEqual([r[header.index('Alternate')] for r in body], ['SUB-1', 'SUB-2'])
+        self.assertEqual(len(alt['widths']), len(alt['rows'][0]))
+
+    def test_the_parts_sheet_carries_the_approved_alternates(self):
+        from bomlib.report import build_parts_rows
+        result, summary = self.analyze_with(['SUB-1'])
+        rows = build_parts_rows(result, summary)
+        header, first = rows[0], rows[1]
+        self.assertIn('Approved Alternates', header)
+        self.assertIn('SUB-1', first[header.index('Approved Alternates')])
+        # The extra column must not shift the ones after it.
+        self.assertEqual(first[header.index('Part Number')], 'ABC123')
+        self.assertEqual(first[header.index('Qty')], 100)
+
+    def test_the_cell_says_whether_each_one_can_be_bought(self):
+        from bomlib.report import alternate_summary
+        available, _ = self.analyze_with(['SUB-1'])
+        self.assertEqual(alternate_summary(available['rows'][0]), 'SUB-1 (available)')
+
+        gone, _ = self.analyze_with(['SUB-1'], clients=[
+            StubSupplier('digikey', 'DigiKey', 0.10, found=False),
+        ])
+        self.assertEqual(alternate_summary(gone['rows'][0]), 'SUB-1 (not available)')
+
+    def test_a_line_with_no_alternates_leaves_the_cell_empty(self):
+        from bomlib.report import alternate_summary
+        result, _ = self.analyze_with([])
+        self.assertIsNone(alternate_summary(result['rows'][0]))
+
+    def test_the_widths_still_line_up_on_every_sheet(self):
+        from bomlib.report import build_workbook_sheets
+        result, summary = self.analyze_with(['SUB-1'])
+        result['rows'][0]['alsoIn'] = [{'name': 'Board B', 'quantity': 250}]
+        for sheet in build_workbook_sheets(result, summary):
+            if sheet.get('widths'):
+                self.assertEqual(len(sheet['widths']), len(sheet['rows'][0]), sheet['name'])
+
+
 class DmsmsCliTests(unittest.TestCase):
     """--dmsms writes the same form the web app builds."""
 
@@ -803,3 +867,40 @@ class SkipColumnCliTests(unittest.TestCase):
     def test_the_rule_can_be_turned_off(self):
         data = self.run_to_json(['--ignore-skip-column'])
         self.assertEqual(sorted(r['mpn'] for r in data['rows']), ['ABC123', 'DEF456'])
+
+
+class AlternateNoteTests(unittest.TestCase):
+    """The one line the summary adds under a part in trouble."""
+
+    def note(self, alternates):
+        return bom._alternate_note({'mpn': 'ABC123', 'alternates': alternates})
+
+    def test_a_line_with_no_alternates_says_nothing(self):
+        self.assertIsNone(self.note([]))
+        self.assertIsNone(bom._alternate_note({'mpn': 'ABC123'}))
+        self.assertIsNone(bom._alternate_note(None))
+
+    def test_one_that_can_be_bought_is_named(self):
+        self.assertEqual(self.note([{'mpn': 'SUB-1', 'usable': True}]),
+                         'approved alternate available: SUB-1')
+
+    def test_several_read_as_plural(self):
+        self.assertEqual(
+            self.note([{'mpn': 'SUB-1', 'usable': True}, {'mpn': 'SUB-2', 'usable': True}]),
+            'approved alternates available: SUB-1, SUB-2')
+
+    def test_only_the_usable_ones_are_offered(self):
+        self.assertEqual(
+            self.note([{'mpn': 'GONE', 'usable': False}, {'mpn': 'SUB-2', 'usable': True}]),
+            'approved alternate available: SUB-2')
+
+    def test_none_available_says_so_rather_than_going_quiet(self):
+        self.assertEqual(self.note([{'mpn': 'GONE', 'usable': False}]),
+                         'approved alternate (GONE) is not available')
+        self.assertEqual(
+            self.note([{'mpn': 'A', 'usable': False}, {'mpn': 'B', 'usable': False}]),
+            'approved alternates (A, B) are not available')
+
+    def test_a_long_list_is_trimmed(self):
+        many = [{'mpn': 'S%d' % i, 'usable': True} for i in range(6)]
+        self.assertEqual(self.note(many), 'approved alternates available: S0, S1, S2')

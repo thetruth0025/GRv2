@@ -13,6 +13,7 @@
     { key: 'description', label: 'Description' },
     { key: 'footprint', label: 'Package / footprint' },
     { key: 'skip', label: 'Skip to production' },
+    { key: 'alternates', label: 'Alternate parts' },
   ];
 
   var SUPPLIER_COLUMNS = [
@@ -1198,6 +1199,48 @@
     }
   }
 
+  // ── Approved alternates ──────────────────────────────────────────────────
+  //
+  // Some BOMs carry a column naming the parts engineering already approved as
+  // substitutes. They are looked up alongside the primary, so the answer to
+  // "the primary is obsolete, now what" is on the page before anyone asks.
+
+  function alternateEntries(row) {
+    return (row.alternates || []).filter(function (entry) { return entry && entry.mpn; });
+  }
+
+  function usableAlternates(row) {
+    return alternateEntries(row).filter(function (entry) { return entry.usable; });
+  }
+
+  // The same question the report's "Needs a decision" section asks: is this
+  // line unbuyable, unstocked, or on its way out.
+  function rowAtRisk(row, suppliers) {
+    var comparison = row.comparison;
+    var found = (suppliers || []).some(function (supplier) {
+      var offer = row.offers[supplier.id];
+      return offer && offer.found;
+    });
+    var severity = comparison.lifecycleSeverity;
+    return !found || severity === 'bad' || severity === 'warn' ||
+      comparison.inStockSuppliers.length === 0;
+  }
+
+  function alternateSummaryText(row) {
+    var entries = alternateEntries(row);
+    if (!entries.length) return '';
+    return entries.map(function (entry) {
+      return entry.mpn + ' (' + (entry.usable ? 'available' : 'not available') + ')';
+    }).join('; ');
+  }
+
+  function alternateBadge(entry) {
+    if (entry.usable) return '<span class="badge ok">available</span>';
+    if (!entry.found) return '<span class="badge bad">no match</span>';
+    if (!entry.coversQuantity) return '<span class="badge warn">no stock</span>';
+    return '<span class="badge warn">ending</span>';
+  }
+
   function renderRow(row, suppliers) {
     var isOpen = !!bom().expanded[row.index];
     var comparison = row.comparison;
@@ -1212,6 +1255,18 @@
     }).join('');
 
     var verdict = renderVerdict(comparison, suppliers);
+
+    // A line whose primary is in trouble but whose BOM already names a stocked
+    // alternate is not the same emergency as one with nowhere to go, so the
+    // table says which it is without waiting to be expanded.
+    var entries = alternateEntries(row);
+    if (entries.length && rowAtRisk(row, suppliers)) {
+      var covered = usableAlternates(row);
+      verdict += covered.length
+        ? '<div class="rowmeta"><span class="badge ok">alt: ' + esc(covered[0].mpn) + '</span></div>'
+        : '<div class="rowmeta"><span class="badge warn">' + entries.length +
+          ' alt' + (entries.length === 1 ? '' : 's') + ', none available</span></div>';
+    }
 
     var main = '<tr class="part-row' + (isOpen ? ' expanded' : '') + '">' +
       '<td class="sticky-a"><button type="button" class="expander" data-index="' + row.index +
@@ -1420,7 +1475,48 @@
         '</div>';
     }).join('');
 
-    return '<div class="detail">' + columns + '</div>';
+    return alternateDetail(row) + '<div class="detail">' + columns + '</div>';
+  }
+
+  // What the BOM's alternates column promised, checked against the same
+  // suppliers as the primary.
+  function alternateDetail(row) {
+    var entries = alternateEntries(row);
+    if (!entries.length) return '';
+
+    var rows = entries.map(function (entry) {
+      var suppliers = (entry.comparison && entry.comparison.inStockSuppliers) || [];
+      return '<tr class="' + (entry.usable ? 'covers' : '') + '">' +
+        '<td class="l">' + esc(entry.mpn) + '</td>' +
+        '<td>' + alternateBadge(entry) + '</td>' +
+        '<td>' + (entry.found
+          ? lifecycleBadge({
+            lifecycle: entry.lifecycle,
+            lifecycleSeverity: entry.lifecycleSeverity,
+          })
+          : '<span class="muted">—</span>') + '</td>' +
+        '<td>' + (entry.stock === null || entry.stock === undefined
+          ? '<span class="muted">—</span>' : count(entry.stock)) + '</td>' +
+        '<td>' + esc(money(entry.bestPrice, bom().results.summary.currency) || '—') +
+        (entry.bestPriceSupplier
+          ? '<div class="rowmeta">' + esc(entry.bestPriceSupplier) + '</div>' : '') + '</td>' +
+        '<td class="l">' + (suppliers.length
+          ? esc(suppliers.join(', ')) : '<span class="muted">—</span>') + '</td>' +
+        '</tr>';
+    }).join('');
+
+    var usable = usableAlternates(row).length;
+    return '<div class="alt-detail"><h4>Approved alternates ' +
+      '<span class="aside">from this BOM</span></h4>' +
+      '<div class="breaks dist"><table>' +
+      '<tr><th class="l">Part number</th><th>Verdict</th><th>Lifecycle</th>' +
+      '<th>Stock</th><th>Best price</th><th class="l">In stock at</th></tr>' +
+      rows + '</table>' +
+      '<div class="rowmeta">' + (usable
+        ? usable + ' of ' + entries.length + ' could cover this line at ' + count(row.quantity)
+        : 'None of the ' + entries.length + ' listed alternate' +
+          (entries.length === 1 ? '' : 's') + ' can cover this line today') +
+      '</div></div></div>';
   }
 
   // ── CSV export ───────────────────────────────────────────────────────────
@@ -1442,7 +1538,8 @@
         supplier.name + ' Status'
       );
     });
-    header.push('Cheapest Supplier', 'Soonest Supplier', 'Soonest (days)', 'Recommended', 'Worst Lifecycle', 'Notes');
+    header.push('Cheapest Supplier', 'Soonest Supplier', 'Soonest (days)', 'Recommended',
+      'Worst Lifecycle', 'Approved Alternates', 'Notes');
 
     var lines = [header];
     visibleRows().forEach(function (row) {
@@ -1472,6 +1569,7 @@
         row.comparison.bestLeadTimeDays,
         row.comparison.recommendedSupplier,
         row.comparison.lifecycle,
+        alternateSummaryText(row),
         row.comparison.flags.map(function (f) { return f.text; }).join('; ')
       );
       lines.push(record);
@@ -1662,6 +1760,10 @@
       stockRisk: stockRisk,
       lifecycleRisk: lifecycleRisk,
       risky: risky,
+      // Only worth a column when the BOM actually carried one.
+      hasAlternates: results.rows.some(function (row) {
+        return alternateEntries(row).length > 0;
+      }),
       generated: new Date().toLocaleString(),
     };
   }
@@ -1702,6 +1804,16 @@
       if (!found && offer && offer.found && offer.supplier === name) found = offer;
     });
     return found;
+  }
+
+  // One report cell: every approved alternate, each carrying whether it could
+  // actually stand in today. A dash means the BOM named none for this line.
+  function reportAlternateCell(row) {
+    var entries = alternateEntries(row);
+    if (!entries.length) return '<span class="muted">—</span>';
+    return entries.map(function (entry) {
+      return '<div class="alt-line">' + esc(entry.mpn) + ' ' + alternateBadge(entry) + '</div>';
+    }).join('');
   }
 
   function reportHtml(model) {
@@ -1755,7 +1867,9 @@
     var riskHtml;
     if (model.risky.length) {
       riskHtml = '<div class="report-scroll"><table class="report-table">' +
-        '<thead><tr><th>Part</th><th class="num">Qty</th><th>Lifecycle</th><th>Issue</th></tr></thead><tbody>' +
+        '<thead><tr><th>Part</th><th class="num">Qty</th><th>Lifecycle</th><th>Issue</th>' +
+        (model.hasAlternates ? '<th>Approved alternate</th>' : '') +
+        '</tr></thead><tbody>' +
         model.risky.map(function (row) {
           return '<tr><td class="mpn-cell">' + esc(row.mpn) +
             (row.reference ? '<div class="desc">' + esc(row.reference) + '</div>' : '') + '</td>' +
@@ -1768,7 +1882,9 @@
               ? row.comparison.flags.map(function (flag) {
                 return '<span class="flag ' + esc(flag.level) + '">' + esc(flag.text) + '</span>';
               }).join(' ')
-              : '<span class="muted">—</span>') + '</td></tr>';
+              : '<span class="muted">—</span>') + '</td>' +
+            (model.hasAlternates ? '<td>' + reportAlternateCell(row) + '</td>' : '') +
+            '</tr>';
         }).join('') + '</tbody></table></div>';
     } else {
       riskHtml = '<div class="report-empty">Every line is in stock, priced and in production.</div>';
@@ -1801,14 +1917,18 @@
         '<td>' + lifecycleBadge({
           lifecycle: row.comparison.lifecycle,
           lifecycleSeverity: row.comparison.lifecycleSeverity,
-        }) + '</td></tr>';
+        }) + '</td>' +
+        (model.hasAlternates ? '<td>' + reportAlternateCell(row) + '</td>' : '') +
+        '</tr>';
     }).join('');
 
     var partsHtml = '<div class="report-scroll"><table class="report-table">' +
       '<thead><tr><th>Part</th><th class="num">Qty</th>' +
       (multi ? '<th>Also in</th>' : '') +
       '<th>Buy from</th><th class="num">Unit</th><th class="num">Extended</th>' +
-      '<th>Lead time</th><th>Lifecycle</th></tr></thead><tbody>' + partRows +
+      '<th>Lead time</th><th>Lifecycle</th>' +
+      (model.hasAlternates ? '<th>Approved alternates</th>' : '') +
+      '</tr></thead><tbody>' + partRows +
       '</tbody></table></div>';
 
     // Skipped lines.
@@ -2140,7 +2260,17 @@
 
   // Whether anything has been found to put in the form's Suggested Replacement
   // column yet, so it is visible that running Find alternatives fills it in.
+  // Same order of trust as bomlib/dmsms.py: a BOM alternate is a decision an
+  // engineer already made, so it outranks anything an algorithm suggests.
   function dmsmsReplacementCell(row) {
+    var approved = usableAlternates(row);
+    if (!approved.length) approved = alternateEntries(row);
+    if (approved.length) {
+      return '<span class="mpn-cell">' + esc(approved[0].mpn) + '</span>' +
+        '<div class="desc">BOM alternate' +
+        (approved[0].usable ? '' : ', unavailable') +
+        (approved.length > 1 ? ' +' + (approved.length - 1) + ' more' : '') + '</div>';
+    }
     var found = state.alternatives[normalizeMpn(row.mpn)];
     if (found && found.length) {
       return '<span class="mpn-cell">' + esc(found[0].mpn) + '</span>' +

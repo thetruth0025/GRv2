@@ -73,6 +73,9 @@ MAX_PARTS_PER_REQUEST = _int_env('MAX_PARTS_PER_REQUEST', 500)
 # The raw list is screened before this limit applies, so a BOM padded with
 # in-house part numbers is not rejected for parts nobody would look up.
 MAX_RAW_PARTS_PER_REQUEST = _int_env('MAX_RAW_PARTS_PER_REQUEST', 5000)
+# Each alternate is a lookup per supplier, so a pathological cell cannot turn
+# one BOM line into a hundred queries.
+MAX_ALTERNATES_PER_PART = _int_env('MAX_ALTERNATES_PER_PART', 6)
 IGNORE_PREFIXES = parse_prefixes(os.environ.get('IGNORE_PART_PREFIXES'))
 
 
@@ -87,6 +90,11 @@ def _match_mode():
 
 
 MPN_MATCH = _match_mode()
+
+# A BOM that names approved alternates is answering "what if this one is gone"
+# in advance; looking them up is the point of the column. Costs one lookup per
+# alternate per supplier, so it can be turned off for a tight quota.
+LOOKUP_ALTERNATES = not _bool_env('SKIP_ALTERNATES')
 ALLOWED_ORIGINS = [o.strip() for o in str(os.environ.get('ALLOWED_ORIGINS') or '*').split(',') if o.strip()]
 
 digikey = DigiKeyClient(
@@ -137,6 +145,7 @@ lookup_service = LookupService(
     clients=[digikey, mouser, trustedparts],
     cache=cache,
     concurrency=_int_env('LOOKUP_CONCURRENCY', 3),
+    include_alternates=LOOKUP_ALTERNATES,
 )
 
 
@@ -246,6 +255,7 @@ class Handler(BaseHTTPRequestHandler):
                 'maxPartsPerRequest': MAX_PARTS_PER_REQUEST,
                 'ignorePrefixes': IGNORE_PREFIXES,
                 'mpnMatch': MPN_MATCH,
+                'lookupAlternates': LOOKUP_ALTERNATES,
                 'dmsms': {
                     'statuses': list(dmsms_module.DMSMS_STATUSES),
                     'defaultSelected': list(dmsms_module.DEFAULT_SELECTED_STATUSES),
@@ -341,6 +351,13 @@ class Handler(BaseHTTPRequestHandler):
                 # The BOM's own skip-to-production column, quoted as written so
                 # the reason a line was dropped can name the value.
                 'skip': clean_cell(entry.get('skip')) or None,
+                # Approved alternates from the BOM's own column, cleaned the
+                # same way the primary is.
+                'alternates': [
+                    clean_cell(alternate) for alternate in
+                    (entry.get('alternates') if isinstance(entry.get('alternates'), list) else [])
+                    if clean_cell(alternate)
+                ][:MAX_ALTERNATES_PER_PART],
             })
 
         if not parts:

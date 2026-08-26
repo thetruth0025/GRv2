@@ -11,6 +11,7 @@ from bomlib.spreadsheet import (
     parse_delimited,
     parse_workbook,
     parse_xlsx,
+    split_alternates,
 )
 
 
@@ -347,3 +348,49 @@ class SkipColumnDetectionTests(unittest.TestCase):
         screened = prepare_lines(lines)
         self.assertEqual([line['mpn'] for line in screened['lines']], ['AAA', 'CCC'])
         self.assertEqual(sorted(e['mpn'] for e in screened['excluded']), ['BBB', 'DDD'])
+
+
+class AlternateColumnTests(unittest.TestCase):
+    """Reading the column that names approved substitutes."""
+
+    def parse(self, header, value):
+        text = ('Manufacturer Part Number,Qty,%s\nPRIMARY-1,10,%s\n' % (header, value))
+        return extract_bom(parse_delimited(text))
+
+    def test_the_column_is_found_by_its_name(self):
+        for header in ('Alternate Part Number', 'Alternate Parts', 'Alt P/N', 'Alt MPN',
+                       'Approved Alternates', 'Second Source', 'Substitute Part', 'Alternates'):
+            parsed = self.parse(header, 'SUB-1')
+            self.assertIn('alternates', parsed['mapping'], header)
+            self.assertEqual(parsed['lines'][0]['alternates'], ['SUB-1'], header)
+
+    def test_a_bom_without_the_column_carries_none(self):
+        parsed = self.parse('Notes', 'anything')
+        self.assertNotIn('alternates', parsed['mapping'])
+        self.assertEqual(parsed['lines'][0]['alternates'], [])
+
+    def test_separators_split_but_slashes_do_not(self):
+        self.assertEqual(
+            split_alternates('LM358DR/NOPB, LM2904; TL072 | NE5532'),
+            ['LM358DR/NOPB', 'LM2904', 'TL072', 'NE5532'],
+        )
+
+    def test_newlines_separate_a_stacked_cell(self):
+        self.assertEqual(split_alternates('SUB-1\nSUB-2\r\nSUB-3'), ['SUB-1', 'SUB-2', 'SUB-3'])
+
+    def test_ways_of_saying_there_is_no_alternate(self):
+        for value in ('', '   ', 'N/A', 'n/a', 'None', 'NONE', 'TBD', '-', '—', 'NIL'):
+            self.assertEqual(split_alternates(value), [], repr(value))
+
+    def test_invisible_characters_and_padding_are_stripped(self):
+        self.assertEqual(split_alternates('​  SUB-1 ,\tSUB-2 '), ['SUB-1', 'SUB-2'])
+
+    def test_repeats_collapse_keeping_the_first_spelling(self):
+        self.assertEqual(split_alternates('SUB-1, sub-1, SUB-2'), ['SUB-1', 'SUB-2'])
+
+    def test_the_alternates_column_does_not_steal_the_part_number(self):
+        text = ('Manufacturer Part Number,Alternate Part Number,Qty\nAAA,BBB,10\n')
+        parsed = extract_bom(parse_delimited(text))
+        line = parsed['lines'][0]
+        self.assertEqual(line['mpn'], 'AAA')
+        self.assertEqual(line['alternates'], ['BBB'])
