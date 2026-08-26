@@ -1,8 +1,10 @@
 """Decide which BOM lines are worth a supplier lookup.
 
-Three things are screened out before any API call goes out, because each one
+Four things are screened out before any API call goes out, because each one
 costs a request per supplier and adds a row nobody reads:
 
+  * lines the BOM itself marks as not for sourcing, in a skip-to-production
+    column — the author of the BOM said so, which beats any rule here;
   * in-house part numbers — assemblies, cables, drawings and bare boards are
     not distributor stock, so no distributor will ever match them;
   * the same part listed twice inside one BOM, which is one purchase, not two;
@@ -18,11 +20,27 @@ DEFAULT_IGNORE_PREFIXES = ('ASY0', 'CBL0', 'DES0', 'PCB0')
 IGNORED = 'ignored'
 MERGED = 'merged'
 DUPLICATE = 'duplicate'
+FLAGGED = 'flagged'
+
+# What a spreadsheet means by yes in a tick-box column. Anything else — blank,
+# NO, N/A, a date, a note — leaves the line in: dropping a part because of a
+# value nobody recognised is the wrong way to be wrong.
+SKIP_VALUES = ('YES', 'Y', 'TRUE', 'T', '1', 'X', '✓', '✔')
+
+
+def fold(value):
+    """Upper case, with runs of whitespace collapsed to one."""
+    return ' '.join(str(value or '').upper().split())
 
 
 def normalize_mpn(value):
     """The form two part numbers are compared in: case and spacing folded."""
-    return ' '.join(str(value or '').upper().split())
+    return fold(value)
+
+
+def skip_requested(value):
+    """True when a BOM's own skip column says to leave this line alone."""
+    return fold(value) in SKIP_VALUES
 
 
 def parse_prefixes(raw, default=DEFAULT_IGNORE_PREFIXES):
@@ -77,7 +95,7 @@ def _join_references(*values):
 
 
 def prepare_lines(lines, ignore_prefixes=DEFAULT_IGNORE_PREFIXES,
-                  merge_duplicates=True, claimed=None):
+                  merge_duplicates=True, claimed=None, honour_skip_flag=True):
     """Screen a BOM down to the lines that should actually be looked up.
 
     `claimed` maps a normalized part number to the name of whatever already
@@ -97,6 +115,15 @@ def prepare_lines(lines, ignore_prefixes=DEFAULT_IGNORE_PREFIXES,
 
     for line in lines or []:
         if not line or not line.get('mpn'):
+            continue
+
+        # Checked first: whoever wrote the BOM marked this line deliberately,
+        # and that reason is more use than "in-house part number" would be.
+        if honour_skip_flag and skip_requested(line.get('skip')):
+            excluded.append(_excluded(
+                line, FLAGGED,
+                'Marked "%s" in the skip-to-production column' % line.get('skip'),
+            ))
             continue
 
         prefix = matching_prefix(line.get('mpn'), prefixes)
@@ -157,6 +184,8 @@ def describe_exclusions(excluded):
     """A short human sentence, or None when nothing was screened out."""
     counts = excluded_counts(excluded)
     pieces = []
+    if counts.get(FLAGGED):
+        pieces.append('%d marked skip to production' % counts[FLAGGED])
     if counts.get(IGNORED):
         pieces.append('%d in-house' % counts[IGNORED])
     if counts.get(MERGED):

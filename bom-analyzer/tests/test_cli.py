@@ -641,3 +641,48 @@ class DmsmsCliTests(unittest.TestCase):
         # The stubs report Obsolete, so filtering to End of Life leaves nothing.
         self.assertEqual(code, 1)
         self.assertIn('no at-risk parts', errors)
+
+
+class SkipColumnCliTests(unittest.TestCase):
+    """The CLI honours the BOM's own skip column too."""
+
+    def setUp(self):
+        self.paths = []
+        self._original = bom.build_service
+        bom.build_service = EndToEndTests._stub_service.__get__(self, EndToEndTests)
+
+    def tearDown(self):
+        bom.build_service = self._original
+        for path in self.paths:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def temp(self, suffix):
+        handle, path = tempfile.mkstemp(suffix=suffix)
+        os.close(handle)
+        self.paths.append(path)
+        return path
+
+    def source(self):
+        path = self.temp('.csv')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('Manufacturer Part Number,Qty,Skip to Production\n'
+                         'ABC123,10,\n'
+                         'DEF456,20,YES\n')
+        return path
+
+    def run_to_json(self, extra=None):
+        out = self.temp('.json')
+        argv = [self.source(), '-o', out, '--quiet', '--no-color'] + (extra or [])
+        self.assertEqual(bom.main(argv), 0)
+        with open(out, encoding='utf-8') as handle:
+            return json.load(handle)
+
+    def test_a_marked_line_is_left_out(self):
+        data = self.run_to_json()
+        self.assertEqual([r['mpn'] for r in data['rows']], ['ABC123'])
+        self.assertEqual(data['excluded'][0]['reason'], 'flagged')
+
+    def test_the_rule_can_be_turned_off(self):
+        data = self.run_to_json(['--ignore-skip-column'])
+        self.assertEqual(sorted(r['mpn'] for r in data['rows']), ['ABC123', 'DEF456'])

@@ -12,6 +12,7 @@
     { key: 'manufacturer', label: 'Manufacturer' },
     { key: 'description', label: 'Description' },
     { key: 'footprint', label: 'Package / footprint' },
+    { key: 'skip', label: 'Skip to production' },
   ];
 
   var SUPPLIER_COLUMNS = [
@@ -770,6 +771,11 @@
     }
     var cols = ['row', 'mpn', 'quantity', 'reference', 'manufacturer', 'description'];
     var labels = ['Row', 'Part number', 'Qty', 'Ref', 'Manufacturer', 'Description'];
+    // Only worth a column when the BOM actually has one.
+    if (bom().mapping && bom().mapping.skip !== undefined) {
+      cols.push('skip');
+      labels.push('Skip');
+    }
     var head = '<tr>' + labels.map(function (l) { return '<th>' + esc(l) + '</th>'; }).join('') + '</tr>';
     var body = sample.map(function (line) {
       return '<tr>' + cols.map(function (col) {
@@ -778,7 +784,8 @@
       }).join('') + '</tr>';
     }).join('');
     var more = bom().lines.length > sample.length
-      ? '<tr><td colspan="6" class="muted">…and ' + (bom().lines.length - sample.length) + ' more</td></tr>'
+      ? '<tr><td colspan="' + cols.length + '" class="muted">…and ' +
+        (bom().lines.length - sample.length) + ' more</td></tr>'
       : '';
     el.previewTable.innerHTML = head + body + more;
   }
@@ -1489,6 +1496,7 @@
     var prefixes = (state.health && state.health.ignorePrefixes) || [];
     var owned = claimedParts(entry);
     var seen = {};
+    var flagged = 0;
     var inhouse = 0;
     var repeats = 0;
     var elsewhere = 0;
@@ -1496,6 +1504,7 @@
     (entry.lines || []).forEach(function (line) {
       var mpn = normalizeMpn(line.mpn);
       if (!mpn) return;
+      if (skipRequested(line.skip)) { flagged++; return; }
       var ignored = prefixes.some(function (prefix) { return mpn.indexOf(prefix) === 0; });
       if (ignored) { inhouse++; return; }
       if (owned[mpn]) { elsewhere++; return; }
@@ -1504,12 +1513,21 @@
     });
 
     var pieces = [];
+    if (flagged) pieces.push(flagged + ' marked skip to production');
     if (inhouse) pieces.push(inhouse + ' in-house');
     if (repeats) pieces.push(repeats + ' repeated');
     if (elsewhere) pieces.push(elsewhere + ' already in another BOM');
     if (!pieces.length) return null;
-    return pieces.join(', ') + ' — ' + (inhouse + repeats + elsewhere) +
-      ' line' + (inhouse + repeats + elsewhere === 1 ? '' : 's') + ' will be skipped.';
+    var total = flagged + inhouse + repeats + elsewhere;
+    return pieces.join(', ') + ' — ' + total +
+      ' line' + (total === 1 ? '' : 's') + ' will be skipped.';
+  }
+
+  // Mirrors SKIP_VALUES in bomlib/prepare.py.
+  var SKIP_VALUES = ['YES', 'Y', 'TRUE', 'T', '1', 'X', '\u2713', '\u2714'];
+
+  function skipRequested(value) {
+    return SKIP_VALUES.indexOf(cleanCell(value).toUpperCase()) !== -1;
   }
 
   // ── Cross-BOM part ownership ─────────────────────────────────────────────
@@ -1555,6 +1573,7 @@
   // ── Skipped lines ────────────────────────────────────────────────────────
 
   var REASON_LABEL = {
+    flagged: 'Marked skip',
     ignored: 'In-house',
     merged: 'Merged',
     duplicate: 'Other BOM',
@@ -1566,6 +1585,7 @@
       counts[entry.reason] = (counts[entry.reason] || 0) + 1;
     });
     var pieces = [];
+    if (counts.flagged) pieces.push(counts.flagged + ' marked skip to production');
     if (counts.ignored) pieces.push(counts.ignored + ' in-house part number' + (counts.ignored === 1 ? '' : 's'));
     if (counts.merged) pieces.push(counts.merged + ' duplicate line' + (counts.merged === 1 ? '' : 's') + ' merged');
     if (counts.duplicate) pieces.push(counts.duplicate + ' already covered by another BOM');

@@ -306,6 +306,9 @@ class Handler(BaseHTTPRequestHandler):
                 'manufacturer': clean_cell(entry.get('manufacturer')) or None,
                 'reference': clean_cell(entry.get('reference')) or None,
                 'description': clean_cell(entry.get('description')) or None,
+                # The BOM's own skip-to-production column, quoted as written so
+                # the reason a line was dropped can name the value.
+                'skip': clean_cell(entry.get('skip')) or None,
             })
 
         if not parts:
@@ -315,14 +318,18 @@ class Handler(BaseHTTPRequestHandler):
         # browser, so no caller can spend an API call on them by accident.
         #
         # A hand-entered search is the exception: somebody who types a part
-        # number is asking about that part, so neither the in-house prefixes nor
-        # another BOM's claim should quietly answer with nothing. Screening is
-        # there to stop automatic waste, not to refuse a direct question.
+        # number is asking about that part, so nothing screens it out — not the
+        # in-house prefixes, not another BOM's claim, not a skip flag that could
+        # only have been carried over from a BOM it did not come from.
+        # Screening is there to stop automatic waste, not to refuse a direct
+        # question. Repeats still merge, because typing a part twice is still
+        # one part.
         manual = bool(payload.get('manual'))
         screened = prepare_lines(
             parts,
             ignore_prefixes=[] if manual else IGNORE_PREFIXES,
             claimed={} if manual else _requested_claims(payload),
+            honour_skip_flag=not manual,
         )
         parts = screened['lines']
         excluded = screened['excluded']

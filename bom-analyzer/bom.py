@@ -107,6 +107,10 @@ def build_parser():
         help='Keep repeated part numbers as separate lines instead of adding their quantities.',
     )
     screening.add_argument(
+        '--ignore-skip-column', action='store_true',
+        help="Look up lines the BOM marks YES in a skip-to-production column.",
+    )
+    screening.add_argument(
         '--show-skipped', action='store_true',
         help='List every skipped line and why it was skipped.',
     )
@@ -201,6 +205,7 @@ def main(argv=None):
         ignore_prefixes=[] if (args.no_ignore_prefixes or manual)
                         else parse_prefixes(args.ignore_prefixes),
         merge_duplicates=not args.no_merge_duplicates,
+        honour_skip_flag=not args.ignore_skip_column,
     )
     lines = screened['lines']
     excluded = screened['excluded']

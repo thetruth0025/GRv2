@@ -301,3 +301,49 @@ class PaddedPartNumberTests(unittest.TestCase):
         line = extract_bom(parse_delimited(text))['lines'][0]
         self.assertEqual(line['manufacturer'], 'Yageo')
         self.assertEqual(line['description'], 'RES SMD')
+
+
+class SkipColumnDetectionTests(unittest.TestCase):
+    """Finding the column, whatever the BOM calls it."""
+
+    def parse(self, header, *values):
+        rows = ['Manufacturer Part Number,Qty,%s' % header]
+        for index, value in enumerate(values):
+            rows.append('PART-%d,10,%s' % (index + 1, value))
+        return extract_bom(parse_delimited('\n'.join(rows) + '\n'))
+
+    def test_the_column_is_found_by_its_name(self):
+        for header in ('Skip to Production', 'skip to production', 'SKIP_TO_PRODUCTION',
+                       'Skip To Prod', 'Skip Production', 'Do Not Source', 'Skip'):
+            parsed = self.parse(header, 'YES')
+            self.assertIn('skip', parsed['mapping'], header)
+            self.assertEqual(parsed['lines'][0]['skip'], 'YES', header)
+
+    def test_a_bom_without_the_column_carries_no_flag(self):
+        parsed = self.parse('Notes', 'anything')
+        self.assertNotIn('skip', parsed['mapping'])
+        self.assertIsNone(parsed['lines'][0]['skip'])
+
+    def test_the_skip_column_does_not_steal_another_field(self):
+        text = ('Manufacturer Part Number,Qty,Description,Skip to Production\n'
+                'ABC123,10,A resistor,YES\n')
+        parsed = extract_bom(parse_delimited(text))
+        headers = parsed['headers']
+        self.assertEqual(headers[parsed['mapping']['description']], 'Description')
+        self.assertEqual(headers[parsed['mapping']['skip']], 'Skip to Production')
+
+    def test_the_value_is_read_clean(self):
+        parsed = self.parse('Skip to Production', '"  YES "')
+        self.assertEqual(parsed['lines'][0]['skip'], 'YES')
+
+    def test_a_marked_bom_screens_down_to_the_lines_that_matter(self):
+        from bomlib.prepare import prepare_lines
+        text = ('Manufacturer Part Number,Qty,Skip to Production\n'
+                'AAA,10,\n'
+                'BBB,20,YES\n'
+                'CCC,30,No\n'
+                'DDD,40,Y\n')
+        lines = extract_bom(parse_delimited(text))['lines']
+        screened = prepare_lines(lines)
+        self.assertEqual([line['mpn'] for line in screened['lines']], ['AAA', 'CCC'])
+        self.assertEqual(sorted(e['mpn'] for e in screened['excluded']), ['BBB', 'DDD'])

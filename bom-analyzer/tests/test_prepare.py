@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bomlib.prepare import (  # noqa: E402
     DEFAULT_IGNORE_PREFIXES,
     DUPLICATE,
+    FLAGGED,
     IGNORED,
     MERGED,
     describe_exclusions,
@@ -16,6 +17,7 @@ from bomlib.prepare import (  # noqa: E402
     normalize_mpn,
     parse_prefixes,
     prepare_lines,
+    skip_requested,
 )
 
 
@@ -169,3 +171,61 @@ class NormalizeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SkipColumnTests(unittest.TestCase):
+    """A BOM that marks its own lines as not for sourcing."""
+
+    def test_the_usual_spreadsheet_affirmatives_all_mean_yes(self):
+        for value in ('YES', 'yes', ' Yes ', 'Y', 'y', 'TRUE', 'true', 'T', '1', 'X', 'x',
+                      '\u2713', '\u2714'):
+            self.assertTrue(skip_requested(value), repr(value))
+
+    def test_anything_else_leaves_the_line_in(self):
+        # Dropping a part because of a value nobody recognised is the wrong way
+        # to be wrong, so only the affirmatives above count.
+        for value in ('', None, 'NO', 'no', 'N', 'FALSE', '0', 'N/A', '-', 'maybe',
+                      'yes if late', '2026-01-01'):
+            self.assertFalse(skip_requested(value), repr(value))
+
+    def test_a_marked_line_never_reaches_a_supplier(self):
+        result = prepare_lines([
+            line(1, 'ABC123', skip='NO'),
+            line(2, 'DEF456', skip='YES'),
+            line(3, 'GHI789'),
+        ])
+        self.assertEqual([r['mpn'] for r in result['lines']], ['ABC123', 'GHI789'])
+        self.assertEqual(result['excluded'][0]['reason'], FLAGGED)
+
+    def test_the_reason_quotes_what_the_cell_said(self):
+        result = prepare_lines([line(4, 'ABC123', skip='Yes')])
+        self.assertIn('"Yes"', result['excluded'][0]['detail'])
+        self.assertIn('skip-to-production', result['excluded'][0]['detail'])
+
+    def test_the_marked_line_does_not_claim_the_part_for_this_bom(self):
+        # It was never looked up, so another BOM must still be free to.
+        result = prepare_lines([line(1, 'ABC123', skip='YES')])
+        self.assertEqual(result['claimed'], [])
+
+    def test_the_bom_author_beats_the_in_house_prefix_rule(self):
+        # Both would drop it; the explicit mark is the more useful reason.
+        result = prepare_lines([line(1, 'ASY0-1', skip='YES')])
+        self.assertEqual(result['excluded'][0]['reason'], FLAGGED)
+
+    def test_a_marked_line_is_not_merged_into_the_line_above_it(self):
+        result = prepare_lines([
+            line(1, 'ABC123', 10),
+            line(2, 'ABC123', 90, skip='YES'),
+        ])
+        self.assertEqual([r['quantity'] for r in result['lines']], [10])
+        self.assertEqual(result['excluded'][0]['reason'], FLAGGED)
+
+    def test_the_rule_can_be_turned_off(self):
+        result = prepare_lines([line(1, 'ABC123', skip='YES')], honour_skip_flag=False)
+        self.assertEqual([r['mpn'] for r in result['lines']], ['ABC123'])
+
+    def test_the_summary_counts_it_separately(self):
+        text = describe_exclusions([{'reason': FLAGGED}, {'reason': FLAGGED},
+                                    {'reason': IGNORED}])
+        self.assertIn('2 marked skip to production', text)
+        self.assertIn('1 in-house', text)

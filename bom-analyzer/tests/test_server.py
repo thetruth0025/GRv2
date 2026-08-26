@@ -338,6 +338,32 @@ class ScreeningTests(unittest.TestCase):
         # credentials, not a screening result.
         self.assertEqual(result['status'], 502)
 
+    def test_a_line_the_bom_marks_skip_costs_no_lookup(self):
+        result = self._lookup([
+            {'row': 1, 'mpn': 'ABC123', 'quantity': 10, 'skip': 'YES'},
+            {'row': 2, 'mpn': 'DEF456', 'quantity': 10, 'skip': 'NO'},
+        ])
+        # DEF456 reaches the (unconfigured) suppliers and fails; ABC123 never
+        # gets that far, which is the point.
+        self.assertEqual(result['status'], 502)
+
+        only_marked = self._lookup([{'row': 1, 'mpn': 'ABC123', 'quantity': 10, 'skip': 'Y'}])
+        self.assertEqual(only_marked['status'], 200)
+        self.assertEqual(only_marked['data']['rows'], [])
+        self.assertEqual(only_marked['data']['stats']['apiCalls'], 0)
+        self.assertEqual(only_marked['data']['excluded'][0]['reason'], 'flagged')
+
+    def test_an_unrecognised_value_in_that_column_does_not_drop_the_line(self):
+        result = self._lookup([{'row': 1, 'mpn': 'ABC123', 'quantity': 10, 'skip': 'maybe'}])
+        self.assertEqual(result['status'], 502)
+
+    def test_a_hand_entered_lookup_ignores_the_column_entirely(self):
+        result = call('/api/lookup', 'POST', json.dumps({
+            'parts': [{'row': 1, 'mpn': 'ABC123', 'quantity': 1, 'skip': 'YES'}],
+            'manual': True,
+        }), {'Content-Type': 'application/json'})
+        self.assertEqual(result['status'], 502)
+
     def test_the_row_cap_counts_parts_that_survive_screening(self):
         # More rows than MAX_PARTS_PER_REQUEST, but nearly all in-house: the
         # request is about a handful of real parts and must be accepted.

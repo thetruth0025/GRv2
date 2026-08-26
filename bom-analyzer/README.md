@@ -69,6 +69,11 @@ and it is quoted once, on whichever BOM you analyze first; the others report it 
 rather than paying for the lookup again. The same part on two lines of one BOM becomes a single
 line with the quantities added and the reference designators joined, because that is one purchase.
 
+**Honours the BOM's own skip column.** If a column called *Skip to Production* (or *Skip*, *Do Not
+Source*, and the usual spellings around them) is present, lines marked `YES` in it are never sent to
+a supplier. Whoever wrote the BOM decided that deliberately, which beats any rule here — so it is
+the first thing checked, and the reason quotes the cell.
+
 **Ignores your own part numbers.** Assemblies, cables, drawings and bare boards are not distributor
 stock, so part numbers starting with `ASY0`, `CBL0`, `DES0` or `PCB0` never reach a supplier. The
 list is configurable, nothing is silently dropped, and every skipped line stays visible with the
@@ -208,6 +213,7 @@ the whole analysis, screened-out lines included, for scripting.
 | `--ignore-prefix PREFIX` | Skip part numbers starting with PREFIX (repeatable); replaces the `ASY0`/`CBL0`/`DES0`/`PCB0` default |
 | `--no-ignore-prefixes` | Look up in-house part numbers too |
 | `--no-merge-duplicates` | Keep repeated part numbers as separate lines instead of adding their quantities |
+| `--ignore-skip-column` | Look up lines the BOM marks YES in a skip-to-production column |
 | `--show-skipped` | List every skipped line and why |
 | `--dmsms FILE --program NAME` | Write a DMSMS case form for every at-risk part |
 | `--dmsms-status STATUS` | Narrow the form to given lifecycle statuses (repeatable) |
@@ -279,7 +285,10 @@ question with nothing. Looking up `ASY0-1234` looks up `ASY0-1234`.
    becomes its own tab; a file that cannot be read gets a tab saying so rather than aborting the
    batch.
 2. **Check the columns** — confirm the detected mapping against the preview and fix anything wrong.
-   The mapping belongs to the BOM you are viewing.
+   The mapping belongs to the BOM you are viewing. A *Skip to Production* column is detected like
+   any other, appears in the preview, and can be pointed at a different column or unmapped
+   entirely — and the summary line says how many lines it will remove before you spend a call on
+   them.
 3. **Analyze** — either the BOM on screen, or **Analyze all pending** to work through the loaded
    BOMs one after another. Progress streams back per query, and each tab shows its own line count,
    cheapest-mix total and how many lines need review. Repeat runs come from cache and are near
@@ -300,8 +309,29 @@ left, and **Verdict** stays pinned to the right, so the column the comparison bu
 never the one you have to go looking for. Drag the bottom edge of the table to make it taller or
 shorter.
 
-Above the table, a line reports anything that was not looked up — in-house part numbers, lines
-merged into another line, and parts an earlier BOM already claimed. Open it to see each one and why.
+Above the table, a line reports anything that was not looked up — lines the BOM marked skip to
+production, in-house part numbers, lines merged into another line, and parts an earlier BOM already
+claimed. Open it to see each one and why.
+
+### The skip-to-production column
+
+A line is skipped when that column holds any of the values a spreadsheet uses for yes:
+
+```
+YES   Y   TRUE   T   1   X   ✓   ✔        (any case, spacing ignored)
+```
+
+Everything else leaves the line in — blank, `NO`, `N/A`, `-`, a date, a note, a half-answer like
+`yes if late`. Dropping a part on the strength of a value nobody recognised is the wrong way to be
+wrong, so the rule only fires on an unambiguous yes.
+
+The mark beats the in-house prefix rule, so a line that is both reports the mark: it is the more
+useful reason. A marked line also claims nothing, so if another loaded BOM uses the same part it is
+still free to look it up. `--ignore-skip-column` on the CLI turns the rule off, and unmapping the
+column in the browser does the same.
+
+Typed lookups ignore the column entirely, as they ignore every other screening rule: a part number
+you entered by hand is a direct question, and it gets answered.
 
 ### The DMSMS form
 
@@ -378,8 +408,8 @@ All settings live in `.env`; `.env.example` documents each one. The ones worth k
 ### Quotas
 
 Free tiers are limited (both suppliers cap a free key in the low thousands of calls per day). The
-app minimises calls in five ways: in-house part numbers never leave the building, repeated part
-numbers within a BOM collapse into one line, a part already quoted for another loaded BOM is not
+app minimises calls in six ways: lines the BOM marks skip to production are never sent, in-house
+part numbers never leave the building, repeated part numbers within a BOM collapse into one line, a part already quoted for another loaded BOM is not
 quoted again, answers are cached on disk for `CACHE_TTL_HOURS`, and the cache stores a
 quantity-independent catalog record — so re-running the same BOM at a different quantity reprices
 without any new API calls. Failed lookups are never cached, so a rate limit does not poison the
@@ -411,7 +441,7 @@ Opening the app once removes it for good.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 250 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 269 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py --part STM32F103C8T6          # look one part up
 python3 bom.py samples/sample-bom.csv        # or a whole BOM
@@ -425,7 +455,7 @@ bomlib/digikey.py         OAuth 2.0 + Product Information V4 → catalog record
 bomlib/mouser.py          Search API v1 → catalog record
 bomlib/trustedparts.py    Inventory API v2 (aggregator, batched) → catalog record
 bomlib/normalize.py       Lead time, lifecycle and price-break normalization; cross-supplier comparison
-bomlib/prepare.py         Screening: in-house prefixes, duplicate lines, parts another BOM owns
+bomlib/prepare.py         Screening: the BOM's skip column, in-house prefixes, duplicates, parts another BOM owns
 bomlib/lookup.py          Deduplication, caching, concurrency, BOM roll-up
 bomlib/cache.py           TTL cache with disk persistence
 bomlib/http_client.py     urllib with timeout, retry and backoff
@@ -481,6 +511,9 @@ shapes, so no network access is needed.
   said today, which can lag a manufacturer's PCN and can differ between distributors for the same
   part. The form names its source and the date so the entry can be checked; confirm against the
   manufacturer before a case turns into a buy.
+- **The skip column only understands yes.** It fires on `YES`/`Y`/`TRUE`/`T`/`1`/`X`/`✓` and
+  nothing else, so a column using some other convention will be read as "source everything". Check
+  the summary line before analyzing: it says how many lines the column will remove.
 - **Cell cleaning keeps one interior space.** A run of spaces inside a value collapses to one, but a
   single space between characters is left alone: a few real part numbers carry one, and guessing
   which is which would break more than it fixed.

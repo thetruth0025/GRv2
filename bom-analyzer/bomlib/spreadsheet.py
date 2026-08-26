@@ -251,9 +251,16 @@ FIELD_ALIASES = {
         'name', 'partname',
     ],
     'footprint': ['footprint', 'package', 'packagetype', 'casecode', 'case'],
+    # A column the BOM's own author uses to mark lines that should not be
+    # sourced. "skip" is listed last and so scores weakest, which keeps it from
+    # claiming a column a more specific alias should have had.
+    'skip': [
+        'skiptoproduction', 'skiptoprod', 'skipproduction', 'skipsourcing',
+        'donotsource', 'skip',
+    ],
 }
 
-FIELD_ORDER = ['mpn', 'quantity', 'reference', 'manufacturer', 'description', 'footprint']
+FIELD_ORDER = ['mpn', 'quantity', 'reference', 'manufacturer', 'description', 'footprint', 'skip']
 
 
 def squash(text):
@@ -342,6 +349,9 @@ def line_from_row(row, mapping, row_index):
     return {
         'row': row_index + 1,
         'mpn': cell('mpn'),
+        # Kept as written rather than as a boolean, so the reason a line was
+        # skipped can quote what the cell actually said.
+        'skip': cell('skip') or None,
         'quantity': quantity if quantity > 0 else 1,
         'quantityRaw': quantity_raw or None,
         'reference': cell('reference') or None,

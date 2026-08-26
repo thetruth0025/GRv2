@@ -11,7 +11,7 @@ import os
 import re
 
 from .normalize import format_lead_time
-from .prepare import DUPLICATE, IGNORED, MERGED
+from .prepare import DUPLICATE, FLAGGED, IGNORED, MERGED
 from .xlsx_writer import (
     Cell,
     STYLE_BAD,
@@ -402,6 +402,7 @@ EXCLUDED_COLUMNS = ['Row', 'Part Number', 'Qty', 'Reference', 'Description', 'Wh
 EXCLUDED_WIDTHS = [6, 26, 8, 18, 36, 44]
 
 EXCLUSION_LABEL = {
+    FLAGGED: 'Marked skip to production on the BOM',
     IGNORED: 'In-house part number',
     MERGED: 'Duplicate line, quantities added',
     DUPLICATE: 'Already covered by another BOM',
