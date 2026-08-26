@@ -1,52 +1,30 @@
-const CACHE_NAME = 'bom-analyzer-v1';
-const STATIC_ASSETS = [
-  './',
-  './index.html',
-  './styles.css',
-  './app.js',
-  './manifest.json',
-  './icon.svg',
-];
+// This service worker exists only to remove itself.
+//
+// It used to cache the app shell, with index.html fetched network-first and
+// app.js and styles.css served cache-first from a fixed cache name. Every
+// release after the first therefore handed the browser a new index.html and an
+// old app.js, and the app died on the first line that touched an element the
+// old script had never heard of.
+//
+// Caching the shell bought nothing to begin with: this app is a front end for
+// three supplier APIs and its own backend, so a shell that loads without a
+// network has nothing to show. Rather than make the caching correct, the
+// caching is gone — and this file stays behind to clean up after the copies
+// already installed in people's browsers.
 
-self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS)));
-  self.skipWaiting();
-});
+self.addEventListener('install', () => self.skipWaiting());
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
-    )
-  );
-  self.clients.claim();
-});
-
-self.addEventListener('fetch', (event) => {
-  const url = new URL(event.request.url);
-
-  // Supplier data must never come from a cache — stock and pricing move by the
-  // hour, and a stale answer here is worse than no answer.
-  if (url.pathname.startsWith('/api/') || event.request.method !== 'GET') {
-    return;
-  }
-
-  // Network-first for the shell so a redeploy is picked up immediately, with
-  // the cache as the offline fallback.
-  if (event.request.mode === 'navigate' || url.pathname.endsWith('.html')) {
-    event.respondWith(
-      fetch(event.request)
-        .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-          return response;
-        })
-        .catch(() => caches.match(event.request).then((cached) => cached || caches.match('./index.html')))
-    );
-    return;
-  }
-
-  event.respondWith(
-    caches.match(event.request).then((cached) => cached || fetch(event.request))
+    caches.keys()
+      .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+      .then(() => self.registration.unregister())
+      // Without a reload the page keeps whatever this worker already served it.
+      .then(() => self.clients.matchAll({ type: 'window' }))
+      .then((clients) => clients.forEach((client) => client.navigate(client.url)))
+      .catch(() => {})
   );
 });
+
+// Everything goes straight to the network while this worker is still alive.
+self.addEventListener('fetch', () => {});

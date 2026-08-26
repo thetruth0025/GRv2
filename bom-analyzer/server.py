@@ -505,12 +505,19 @@ class Handler(BaseHTTPRequestHandler):
         with open(target, 'rb') as handle:
             body = handle.read()
 
+        # The page and its script are one unit: caching them for different
+        # lengths of time is how a browser ends up running last week's app.js
+        # against today's index.html. "no-cache" still stores them — it just
+        # revalidates first, which costs a 304 and removes the whole problem.
+        # Images are versionless and genuinely static, so they keep the long TTL.
+        revalidate = target.endswith(('.html', '.js', '.css', '.json'))
+
         self.send_response(200)
         self.send_header('Content-Type', content_type or 'application/octet-stream')
         self.send_header('Content-Length', str(len(body)))
         self.send_header(
             'Cache-Control',
-            'no-cache' if target.endswith('.html') else 'public, max-age=3600',
+            'no-cache' if revalidate else 'public, max-age=3600',
         )
         self.end_headers()
         if self.command != 'HEAD':

@@ -333,8 +333,19 @@ next run.
 
 ### Hosting the frontend separately
 
-`public/` is a static PWA and can be served from anywhere. Set the backend URL in the app's
-Settings panel, and set `ALLOWED_ORIGINS` on the server to the origin serving the page.
+`public/` is static and can be served from anywhere. Set the backend URL in the app's Settings
+panel, and set `ALLOWED_ORIGINS` on the server to the origin serving the page.
+
+Serve `index.html`, `app.js` and `styles.css` with the same caching policy — `server.py` sends
+`no-cache` for all three. They are one unit, and caching them for different lengths of time is how a
+browser ends up running last week's script against this week's page. If that ever happens the app
+says so and offers to clear the old copy, rather than dying silently.
+
+### If the page never gets past "Checking backend…"
+
+The browser is holding an old copy of `app.js`. Reload with **Ctrl+Shift+R** (**Cmd+Shift+R** on a
+Mac), or use **Clear browser copy** in Settings. Versions before this one installed a service worker
+that caused exactly this; opening the app once removes it for good.
 
 ---
 
@@ -362,6 +373,7 @@ bomlib/http_client.py     urllib with timeout, retry and backoff
 bomlib/report.py          The report and comparison layouts shared by CSV, .xlsx and terminal output
 bomlib/xlsx_writer.py     Minimal styled .xlsx writer (zipfile + hand-built XML)
 public/                   The web frontend (plain HTML/CSS/JS, no build step)
+public/sw.js              A service worker that exists only to uninstall an earlier one
 ```
 
 `server.py` and `bom.py` are both thin shells over `bomlib/`: they parse input, call

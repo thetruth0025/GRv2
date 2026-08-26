@@ -109,7 +109,7 @@
   var el = {};
   [
     'statusBar', 'settingsBtn', 'settingsPanel', 'apiBase', 'currencyLabel', 'recheckBtn',
-    'clearCacheBtn', 'dropZone', 'fileInput', 'lookupRows', 'quickBtn', 'addRowBtn',
+    'clearCacheBtn', 'resetAppBtn', 'dropZone', 'fileInput', 'lookupRows', 'quickBtn', 'addRowBtn',
     'clearRowsBtn', 'sampleBtn',
     'mappingCard', 'mappingSummary', 'mappingGrid', 'previewTable', 'analyzeBtn', 'resetBtn',
     'progressWrap', 'progressBar', 'progressText', 'resultsCard', 'statGrid', 'searchInput',
@@ -120,6 +120,75 @@
   ].forEach(function (id) {
     el[id] = document.getElementById(id);
   });
+
+  // index.html and app.js are one unit. When they arrive from different
+  // versions the first line that touches a missing element throws, and the page
+  // dies wherever it stood — historically on "Checking backend…", which says
+  // nothing about what went wrong. Check once, up front, and say it plainly.
+  var missing = Object.keys(el).filter(function (id) { return !el[id]; });
+  if (missing.length) {
+    reportStaleShell(missing);
+    return;
+  }
+
+  // ── Recovering from a stale copy ─────────────────────────────────────────
+
+  function reportStaleShell(missing) {
+    var bar = document.getElementById('statusBar');
+    if (bar) {
+      bar.innerHTML = '<span class="status-pill err"><span class="dot"></span> ' +
+        'Page and script are from different versions</span>';
+    }
+
+    var notice = document.createElement('section');
+    notice.className = 'card setup';
+    notice.innerHTML =
+      '<h2><span class="num">!</span> The browser is holding an old copy</h2>' +
+      '<p class="sub">This page loaded with a script from an earlier version, so the app ' +
+      'could not start. Nothing is wrong with your data or the server.</p>' +
+      '<div class="btn-row"><button type="button" id="resetShellBtn" class="btn primary">' +
+      'Clear the old copy and reload</button></div>' +
+      '<div class="hint">Or reload with <strong>Ctrl+Shift+R</strong> ' +
+      '(<strong>Cmd+Shift+R</strong> on a Mac). Missing from this page: <code>' +
+      missing.map(function (id) { return String(id).replace(/[^A-Za-z0-9_-]/g, ''); })
+        .join('</code>, <code>') + '</code>.</div>';
+
+    var app = document.getElementById('app');
+    if (app) app.insertBefore(notice, app.firstChild ? app.firstChild.nextSibling : null);
+
+    var button = document.getElementById('resetShellBtn');
+    if (button) {
+      button.addEventListener('click', function () {
+        button.disabled = true;
+        button.textContent = 'Clearing…';
+        clearBrowserCopy(true);
+      });
+    }
+  }
+
+  // Unregisters any service worker and empties every cache it left behind.
+  // Reloads afterwards only when asked, so the ordinary startup call can do its
+  // cleanup without throwing the page away underneath the user.
+  function clearBrowserCopy(reload) {
+    var jobs = [];
+
+    if (window.caches && caches.keys) {
+      jobs.push(caches.keys().then(function (keys) {
+        return Promise.all(keys.map(function (key) { return caches.delete(key); }));
+      }));
+    }
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+      jobs.push(navigator.serviceWorker.getRegistrations().then(function (registrations) {
+        return Promise.all(registrations.map(function (r) { return r.unregister(); }));
+      }));
+    }
+
+    return Promise.all(jobs)
+      .catch(function () {})
+      .then(function () {
+        if (reload) location.reload();
+      });
+  }
 
   // ── Small helpers ────────────────────────────────────────────────────────
 
@@ -1921,6 +1990,13 @@
       });
   });
 
+  // "Clear server cache" empties the supplier answers the backend is holding.
+  // This one empties what the browser is holding of the app itself.
+  el.resetAppBtn.addEventListener('click', function () {
+    toast('Clearing the browser copy and reloading…');
+    clearBrowserCopy(true);
+  });
+
   el.dropZone.addEventListener('click', function () { el.fileInput.click(); });
   el.dropZone.addEventListener('keydown', function (event) {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -2040,9 +2116,8 @@
   el.apiBase.value = state.apiBase;
   checkHealth();
 
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', function () {
-      navigator.serviceWorker.register('sw.js').catch(function () {});
-    });
-  }
+  // No service worker is registered any more — see public/sw.js. Any copy left
+  // over from an earlier version is removed here as well, for browsers that
+  // would not otherwise re-fetch the worker for a while.
+  clearBrowserCopy(false);
 })();
