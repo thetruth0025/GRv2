@@ -1,17 +1,19 @@
 # BOM Supplier Analyzer
 
 Upload a bill of materials and get **lead time, cost, stock availability and lifecycle status**
-for every part, from **DigiKey**, **Mouser** and **TrustedParts**, side by side in one table.
+for every part, from **DigiKey**, **Mouser**, **TrustedParts** and **Nexar**, side by side in one
+table.
 
 Each supplier gets its own column group, so you can see at a glance which one is cheaper for a
 given line, which one can ship today, and which parts are heading for end of life.
 
-TrustedParts is an aggregator rather than a distributor: it searches many authorized distributors
-at once. Its column quotes whichever distributor is cheapest for your quantity, and expanding a row
-lists **every** distributor it found, with stock, minimum order and price for each.
+TrustedParts and Nexar are aggregators rather than distributors: each searches many authorized
+sellers at once. Their columns quote whichever seller is cheapest for your quantity, and expanding
+a row lists **every** seller they found, with stock, minimum order and price for each.
 
 **A lookup form, not just an uploader.** Fill in a part number, an optional description and a
-quantity, and press Enter to compare it across all three suppliers — no file, no column mapping. As
+quantity, and press Enter to compare it across every configured supplier — no file, no column
+mapping. As
 many rows as you like, and a column pasted straight out of a spreadsheet fills them for you.
 
 **Several BOMs at once.** Load as many as you like — each gets its own tab, its own results, and
@@ -94,11 +96,13 @@ algorithm suggests: they lead the DMSMS form's Suggested Replacement column, get
 the workbook, and a line whose primary is in trouble but whose alternate is stocked says so in the
 table without being expanded.
 
-**Finds alternatives to a part in trouble.** Nexar (Altium) answers a different question from the
-three suppliers: not what a part costs, but what could be used instead. It runs only for parts the
+**Finds alternatives to a part in trouble.** Besides its supplier column, Nexar answers a second
+question: not what a part costs, but what could be used instead. That one runs only for parts the
 comparison has already found to be obsolete, NRND, end of life or simply unavailable — and only for
-the ones you tick — so a free-tier quota is spent on the parts that need it rather than on every
-line of a healthy BOM. What it finds fills the DMSMS form's Suggested Replacement column.
+the ones you tick — so a metered quota is spent on the parts that need it rather than on every line
+of a healthy BOM. What it finds fills the DMSMS form's Suggested Replacement column. It is a
+separate query from part search and fails separately: `similarParts` is not on every Nexar plan, and
+a plan without it still gives you the supplier column.
 
 **Fills a DMSMS form per program.** Parts whose supply is ending — obsolete, discontinued, end of
 life, last time buy, NRND — are collected across every analyzed BOM into a picker. Tick the ones
@@ -161,7 +165,7 @@ All are free to start. Any one supplier alone is enough — the app just shows f
 | DigiKey | [developer.digikey.com](https://developer.digikey.com/) | Create an organization and an app, add the **Product Information** API to it, then copy the **Client ID** and **Client Secret** |
 | Mouser | [mouser.com/api-hub](https://www.mouser.com/api-hub/) | Request a **Search API** key (not the Order API key) |
 | TrustedParts | [trustedparts.com](https://www.trustedparts.com/) | Register, then request API access under **My Account → Additional Features**. The key arrives as *Trial* with an expiry — email `user-requests@trustedparts.com` to move it to *Active* |
-| Nexar *(optional)* | [nexar.com](https://nexar.com/) | Create an application **with Supply access** and copy its **Client ID** and **Client Secret**. A Design application will not work: it signs a user in rather than authenticating itself, and the part data lives in the Supply API. Only needed for **Find alternatives** — the rest of the app works without it |
+| Nexar *(optional)* | [nexar.com](https://nexar.com/) | Create an application **with Supply access** and copy its **Client ID** and **Client Secret**. A Design application will not work: it signs a user in rather than authenticating itself, and the part data lives in the Supply API. Adds a fourth supplier column and powers **Find alternatives**; every other supplier works without it |
 
 DigiKey issues both Sandbox and Production keys. Sandbox returns fixed demo data, so use the
 Production pair unless you are specifically testing against the sandbox.
@@ -444,7 +448,36 @@ python3 bom.py my-bom.csv --dmsms falcon-ii.xlsx --program "Falcon II" --alterna
 ```
 
 Nexar needs its own credentials (`NEXAR_CLIENT_ID`, `NEXAR_CLIENT_SECRET`); the button says so if
-they are missing. It is never called during a BOM analysis.
+they are missing. This query is never called during a BOM analysis — only the supplier search below
+is.
+
+### Nexar as a supplier
+
+Once its credentials are set, Nexar also takes its place beside DigiKey, Mouser and TrustedParts as
+a fourth column. Like TrustedParts it is an aggregator: one part number comes back with every seller
+Nexar knows, each with its own stock, price ladder, minimum order and packaging. The column quotes
+whichever of them is cheapest for the whole order, and expanding the row lists them all. Sellers
+Nexar reports as unauthorized are kept but ranked last, the way a marketplace listing is.
+
+Lifecycle status arrives as a specification rather than a field, so it is read from the specs and
+only used when the value is actually a lifecycle status — an unfamiliar spec value is not a claim
+about supply, and is left as Unknown rather than rendered as one.
+
+A whole BOM goes out as **one batched request** (`supMultiMatch`), not one per part, which is what
+makes a metered plan last. `NEXAR_BATCH_SIZE` sets how many parts ride in each request.
+
+If `supMultiMatch` is not in your plan's schema, the client notices the rejection, drops to the
+per-part `supSearchMpn` query for the rest of the run, and says nothing about it — reporting every
+line as "not carried" because one query is missing would be a lie about availability. A rejection
+that means something else is raised, not worked around.
+
+To keep Nexar out of the comparison and use it for alternatives only — worth doing if you set the
+credentials up for that and would rather not spend the quota on every line — set
+`SKIP_NEXAR_SUPPLIER=1`, or pick suppliers explicitly with `-s` on the CLI.
+
+`python3 bom.py --nexar-check` tests the credentials and both queries separately and prints exactly
+what Nexar said about each, so "alternatives are not on this plan" reads differently from "these
+credentials are wrong".
 
 #### If Nexar refuses the credentials
 

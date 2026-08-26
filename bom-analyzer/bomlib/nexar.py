@@ -1,44 +1,131 @@
-"""Nexar (Altium) client, used to find alternatives to a part in trouble.
+"""Nexar (Altium) client: a supplier column, and a source of alternatives.
 
-Nexar is not a supplier. The other three clients answer "what does this part
-cost and can I get it"; this one answers a different question — "what could I
-use instead" — and only for parts the comparison has already found to be
-obsolete, end of life, not recommended, or simply unavailable. It is deliberately
-never part of the BOM run: alternatives are a decision you go looking for, and
-running them for every line would spend a free-tier quota on parts that are
-perfectly fine.
+Nexar answers two questions, and this client asks both.
+
+**"Can I get this part, and what does it cost."** Like TrustedParts, Nexar is an
+aggregator rather than a distributor: one part number comes back with a list of
+sellers, each with its own stock, price ladder and packaging. It takes its place
+alongside DigiKey, Mouser and TrustedParts as another column in the comparison,
+built from the same catalog-record shape, so nothing downstream needs to know
+where the numbers came from.
+
+**"What could I use instead."** Nexar's `similarParts` is asked separately, on
+demand, and only for parts the comparison has already found to be in trouble.
+That is a decision you go looking for, so it is never part of a BOM run.
+
+The two are independent. `similarParts` is not on every Nexar plan, and a plan
+that refuses it still answers part search perfectly well — which is the point of
+keeping them apart rather than behind one query.
 
 Auth is OAuth 2.0 client credentials, the same shape DigiKey uses. The API
-itself is GraphQL rather than REST, so there is one query rather than a set of
-endpoints.
+itself is GraphQL rather than REST, so there are queries rather than endpoints.
 
-The query below could not be checked against a live schema while this was
-written — the sandbox it was built in has no route to api.nexar.com — so it is
-written from Nexar's documented Supply schema and left overridable. A wrong
-field name in GraphQL fails loudly with a message naming the field, and that
-message is passed straight through to the caller rather than being swallowed,
-so a mismatch is a one-line fix rather than a silent empty result. Set
-NEXAR_QUERY_FILE to point at your own query if the schema has moved on.
+Neither query could be checked against a live schema while this was written —
+the sandbox it was built in has no route to api.nexar.com — so both are written
+from Nexar's documented Supply schema and left overridable. A wrong field name
+in GraphQL fails loudly with a message naming the field, and that message is
+passed straight through rather than being swallowed, so a mismatch is a one-line
+fix and never a silent empty result. Part search additionally falls back on its
+own: if the batched `supMultiMatch` query is rejected by the schema, the client
+drops to per-part `supSearchMpn` for the rest of the run rather than reporting
+every line as not carried. Set NEXAR_SEARCH_QUERY_FILE or NEXAR_QUERY_FILE to
+point at your own query if the schema has moved on.
 """
 
 import json
 import os
+import re
 import threading
 import time
 import urllib.parse
 
 from .http_client import HttpError, request_json
+from .normalize import (
+    MATCH_EXACT,
+    NoMatch,
+    normalize_lifecycle,
+    normalize_mpn_key,
+    Lifecycle,
+)
 
 SUPPLIER = 'Nexar'
 TOKEN_URL = 'https://identity.nexar.com/connect/token'
 API_URL = 'https://api.nexar.com/graphql'
 SCOPE = 'supply.domain'
 
+# Nexar's Supply data is Octopart's, and their terms ask that it be credited.
+ATTRIBUTION_TEXT = 'Part data via'
+ATTRIBUTION_NAME = 'Nexar (Octopart)'
+ATTRIBUTION_HOME = 'https://octopart.com'
+
+# supMultiMatch takes many queries in one request, which is what a BOM is. The
+# free tier is metered, so asking once for fifty parts rather than fifty times
+# for one is the difference between a quota that lasts a month and one that
+# does not.
+MAX_QUERIES_PER_REQUEST = 20
+
+# The fields a supplier column needs: who sells it, how many they hold, what
+# they charge at each break, and what you have to buy to get one.
+PART_FIELDS = """
+    mpn
+    manufacturer { name }
+    shortDescription
+    octopartUrl
+    bestDatasheet { url }
+    totalAvail
+    estimatedFactoryLeadDays
+    medianPrice1000 { price currency }
+    specs { attribute { name shortname } displayValue }
+    sellers {
+      company { name }
+      isAuthorized
+      offers {
+        sku
+        inventoryLevel
+        moq
+        orderMultiple
+        packaging
+        clickUrl
+        factoryLeadDays
+        prices { quantity price currency convertedPrice convertedCurrency }
+      }
+    }
+"""
+
+# Batched part search: one request, one entry per BOM line. `reference` comes
+# back on each hit, which is what pairs an answer with the line that asked.
+SEARCH_QUERY = """
+query BomMultiMatch($queries: [SupPartMatchQuery!]!) {
+  supMultiMatch(queries: $queries) {
+    reference
+    hits
+    parts {
+%s
+    }
+  }
+}
+""" % PART_FIELDS
+
+# The fallback, used per part when the batched query is not in the schema.
+SEARCH_ONE_QUERY = """
+query BomPartSearch($q: String!, $limit: Int!) {
+  supSearchMpn(q: $q, limit: $limit) {
+    results {
+      part {
+%s
+      }
+    }
+  }
+}
+""" % PART_FIELDS
+
+
 # One query, asking for the part Nexar matched and the alternatives it knows
 # about. `similarParts` is Nexar's own notion of a like-for-like replacement;
 # the specs come back alongside so a buyer can see *why* it is being suggested
-# rather than taking the word for it.
-DEFAULT_QUERY = """
+# rather than taking the word for it. Not on every Nexar plan — a plan without
+# it still answers part search, which is why the two are separate queries.
+ALTERNATIVES_QUERY = """
 query BomAlternatives($q: String!, $limit: Int!) {
   supSearchMpn(q: $q, limit: $limit) {
     results {
@@ -68,6 +155,10 @@ query BomAlternatives($q: String!, $limit: Int!) {
   }
 }
 """
+
+
+# The name this query went by when alternatives were all Nexar did here.
+DEFAULT_QUERY = ALTERNATIVES_QUERY
 
 
 # What an OAuth error code from the token endpoint actually means for someone
@@ -192,10 +283,240 @@ def part_from_node(node):
     }
 
 
+# ── Part search: turning a Nexar part into a catalog record ─────────────────
+
+normalize_key = normalize_mpn_key
+
+# What Nexar calls the field. It arrives as a spec rather than a column, so it
+# is looked for by name rather than assumed to be in a fixed place.
+LIFECYCLE_SPEC_NAMES = ('lifecyclestatus', 'lifecycle_status', 'lifecycle status',
+                        'lifecycle', 'partstatus', 'part status')
+
+
+def mpn_of(node):
+    return _text((node or {}).get('mpn'))
+
+
+def manufacturer_of(node):
+    return _text(((node or {}).get('manufacturer') or {}).get('name'))
+
+
+def specs_of(node):
+    """Nexar specs, flattened to name/value pairs."""
+    out = []
+    for spec in (node or {}).get('specs') or []:
+        if not isinstance(spec, dict):
+            continue
+        attribute = spec.get('attribute') or {}
+        name = _text(attribute.get('shortname')) or _text(attribute.get('name'))
+        value = _text(spec.get('displayValue'))
+        if name and value:
+            out.append({'name': name, 'value': value})
+    return out
+
+
+def lifecycle_of(node):
+    """The lifecycle status, if Nexar reported one among the specs.
+
+    Anything it does not recognise as a status stays unset rather than being
+    rendered as one: an unfamiliar spec value is not a claim about supply.
+    """
+    for spec in specs_of(node):
+        if str(spec['name']).replace(' ', '').lower().rstrip('s') not in (
+                n.replace(' ', '').replace('_', '').rstrip('s') for n in LIFECYCLE_SPEC_NAMES):
+            continue
+        if normalize_lifecycle(spec['value']) != Lifecycle.UNKNOWN:
+            return spec['value']
+    return None
+
+
+def price_breaks_of(offer, fallback_currency):
+    """One offer's price ladder, cheapest-per-piece ordering left to the caller.
+
+    Nexar returns both the seller's own currency and a converted figure. The
+    converted one is used when it exists, because a column that mixes
+    currencies is not a comparison.
+    """
+    breaks = []
+    for entry in (offer or {}).get('prices') or []:
+        if not isinstance(entry, dict):
+            continue
+        quantity = _integer(entry.get('quantity'))
+        price = _number(entry.get('convertedPrice'))
+        currency = _text(entry.get('convertedCurrency'))
+        if price is None:
+            price = _number(entry.get('price'))
+            currency = _text(entry.get('currency'))
+        if quantity is None or quantity < 1 or price is None:
+            continue
+        breaks.append({
+            'quantity': quantity,
+            'unitPrice': price,
+            'currency': currency or fallback_currency,
+        })
+    breaks.sort(key=lambda b: b['quantity'])
+    return breaks
+
+
+def variations_of(node, currency, authorized_only=False):
+    """Flatten sellers → offers into the packaging options the app ranks.
+
+    Each offer is one seller's way of selling the part — a reel, a cut tape, a
+    tube — so it maps onto the same variation shape TrustedParts produces and
+    is ranked by the same total-order-cost rule.
+    """
+    variations = []
+    for seller in (node or {}).get('sellers') or []:
+        if not isinstance(seller, dict):
+            continue
+        authorized = seller.get('isAuthorized')
+        if authorized_only and authorized is False:
+            continue
+        name = _text((seller.get('company') or {}).get('name')) or 'Unknown seller'
+        for offer in seller.get('offers') or []:
+            if not isinstance(offer, dict):
+                continue
+            breaks = price_breaks_of(offer, currency)
+            variations.append({
+                'distributor': name,
+                'supplierPartNumber': _text(offer.get('sku')),
+                'packaging': _text(offer.get('packaging')),
+                'stock': _integer(offer.get('inventoryLevel')),
+                'minimumOrderQuantity': _integer(offer.get('moq')) or 1,
+                'orderMultiple': _integer(offer.get('orderMultiple')) or 1,
+                'priceBreaks': breaks,
+                'currency': (breaks[0]['currency'] if breaks else currency),
+                'productUrl': _text(offer.get('clickUrl')),
+                'leadDays': _integer(offer.get('factoryLeadDays')),
+                # Nexar flags an unauthorized seller; the ranking treats those
+                # the way it treats a marketplace listing — a last resort.
+                'marketPlace': authorized is False,
+            })
+    return variations
+
+
+def lead_time_of(node, variations):
+    """Days to the factory, said in the words the lead-time parser expects."""
+    days = _integer((node or {}).get('estimatedFactoryLeadDays'))
+    if days is None:
+        offered = [v['leadDays'] for v in variations if isinstance(v.get('leadDays'), int)]
+        days = min(offered) if offered else None
+    return None if days is None else '%d Days' % days
+
+
+def build_record(node, part, currency, match_count=1):
+    """One Nexar part, in the supplier-agnostic shape the app prices later."""
+    variations = variations_of(node, currency)
+    if not variations:
+        # Nexar knows the part but nobody listed is selling it. That is a real
+        # answer — "not carried" — rather than a match.
+        return None
+
+    known_stock = [v['stock'] for v in variations if isinstance(v['stock'], int)]
+    total = _integer((node or {}).get('totalAvail'))
+    part_url = _text((node or {}).get('octopartUrl'))
+
+    return {
+        'supplier': SUPPLIER,
+        'aggregator': True,
+        'manufacturer': manufacturer_of(node),
+        'manufacturerPartNumber': mpn_of(node),
+        'description': _text((node or {}).get('shortDescription')),
+        'productUrl': part_url,
+        'attribution': {
+            'text': ATTRIBUTION_TEXT,
+            'name': ATTRIBUTION_NAME,
+            'url': part_url or ATTRIBUTION_HOME,
+            'home': ATTRIBUTION_HOME,
+        },
+        'datasheetUrl': _text(((node or {}).get('bestDatasheet') or {}).get('url')),
+        'leadTime': lead_time_of(node, variations),
+        'lifecycle': lifecycle_of(node),
+        'totalStock': total if total is not None else (sum(known_stock) if known_stock else None),
+        'currency': currency,
+        'matchCount': match_count,
+        'exactMatch': normalize_key(mpn_of(node)) == normalize_key(part.get('mpn')),
+        'variations': variations,
+    }
+
+
+def pick_best_part(nodes, keyword, manufacturer=None, mode=MATCH_EXACT):
+    """The node that is the part asked for, or None.
+
+    Same rule as the other clients: in exact mode nothing but the part number
+    itself will do, and the manufacturer only breaks ties between spellings of
+    that number — it never promotes a different one.
+    """
+    want_mpn = normalize_key(keyword)
+    if not want_mpn:
+        return None
+    want_mfr = normalize_key(manufacturer)
+
+    best = None
+    best_score = -1
+    for node in nodes:
+        mpn = normalize_key(mpn_of(node))
+        mfr = normalize_key(manufacturer_of(node))
+        score = 0
+        if mpn and mpn == want_mpn:
+            score += 100
+        elif mode == MATCH_EXACT:
+            continue
+        elif mpn and (mpn.startswith(want_mpn) or want_mpn.startswith(mpn)):
+            score += 50
+        elif mpn and (want_mpn in mpn or mpn in want_mpn):
+            score += 20
+        if want_mfr and mfr and (mfr == want_mfr or want_mfr in mfr or mfr in want_mfr):
+            score += 30
+        if (_integer(node.get('totalAvail')) or 0) > 0:
+            score += 5
+        if score > best_score:
+            best_score = score
+            best = node
+
+    floor = 100 if mode == MATCH_EXACT else 20
+    return best if best_score >= floor else None
+
+
+def nearest_part(nodes, keyword):
+    """The returned part number closest to the one asked for, for the message."""
+    want = normalize_key(keyword)
+    best = None
+    best_shared = -1
+    for node in nodes:
+        key = normalize_key(mpn_of(node))
+        if not key:
+            continue
+        shared = 0
+        for a, b in zip(key, want):
+            if a != b:
+                break
+            shared += 1
+        if shared > best_shared:
+            best_shared = shared
+            best = node
+    return best
+
+
+# A GraphQL rejection that means "this query is not in the schema" rather than
+# "your input was wrong". Nexar words it as an unknown field or unknown type;
+# either way the query can never succeed, so retrying it is waste.
+_SCHEMA_MISS = re.compile(
+    r"cannot query field|unknown (?:field|type|argument)|"
+    r"is not defined by type|no field named|not available on your plan",
+    re.I,
+)
+
+
+def _query_not_in_schema(error):
+    return bool(_SCHEMA_MISS.search(str(error or '')))
+
+
 class NexarClient:
     def __init__(self, client_id=None, client_secret=None, scope=None, limit=1,
                  alternatives_limit=12, token_url=None, api_url=None, query=None,
-                 timeout=25.0):
+                 search_query=None, currency='USD', match_mode=MATCH_EXACT,
+                 batch_size=MAX_QUERIES_PER_REQUEST, timeout=25.0):
         self.client_id = client_id
         self.client_secret = client_secret
         # None means "not configured", so use the default. An empty string is
@@ -205,16 +526,27 @@ class NexarClient:
         self.alternatives_limit = max(1, int(alternatives_limit or 12))
         self.token_url = token_url or TOKEN_URL
         self.api_url = api_url or API_URL
-        self.query = query or DEFAULT_QUERY
+        self.query = query or ALTERNATIVES_QUERY
+        self.search_query = search_query or SEARCH_QUERY
+        self.currency = currency or 'USD'
+        self.match_mode = match_mode or MATCH_EXACT
+        self.batch_size = max(1, int(batch_size or MAX_QUERIES_PER_REQUEST))
         self.timeout = timeout
         self._token = None
         self._token_expires_at = 0.0
         self._token_lock = threading.Lock()
         # Which scope actually produced a token, once one has been minted.
         self.scope_used = None
+        # Set once the batched query is found not to be in the schema, so the
+        # rest of the run goes straight to the per-part fallback.
+        self._batch_unsupported = False
+        # GraphQL requests actually sent, so a run that fell back to per-part
+        # queries reports the quota it really spent rather than one per batch.
+        self.requests_made = 0
 
     id = 'nexar'
     name = SUPPLIER
+    aggregator = True
 
     @property
     def configured(self):
@@ -282,8 +614,9 @@ class NexarClient:
             self._token_expires_at = time.time() + max(30.0, lifetime - 60.0)
             return self._token
 
-    def run_query(self, variables):
+    def run_query(self, variables, query=None):
         token = self.get_token()
+        self.requests_made += 1
         result = request_json(
             self.api_url,
             method='POST',
@@ -292,7 +625,7 @@ class NexarClient:
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
             },
-            body=json.dumps({'query': self.query, 'variables': variables}),
+            body=json.dumps({'query': query or self.query, 'variables': variables}),
             timeout=self.timeout,
             retries=1,
         )
@@ -313,6 +646,109 @@ class NexarClient:
                 0, errors,
             )
         return data.get('data') or {}
+
+    # ── Part search ─────────────────────────────────────────────────────────
+
+    def match_query(self, part, reference):
+        """One entry of a supMultiMatch request.
+
+        The manufacturer is sent as its own field rather than glued onto the
+        part number: a jellybean number is made by several people, and Nexar
+        can only narrow on it if it is told which field it is.
+        """
+        query = {'mpn': str(part.get('mpn') or '').strip(),
+                 'reference': reference,
+                 'limit': self.limit}
+        manufacturer = str(part.get('manufacturer') or '').strip()
+        if manufacturer:
+            query['manufacturer'] = manufacturer
+        return query
+
+    def search(self, parts):
+        """One batched request covering up to `batch_size` parts.
+
+        Returns {reference: [part nodes]}. A line Nexar had nothing for is
+        absent rather than present and empty, which `to_records` reads as a
+        miss.
+        """
+        queries = []
+        wanted = []
+        for index, part in enumerate(parts):
+            if not str(part.get('mpn') or '').strip():
+                continue
+            reference = 'line-%d' % index
+            queries.append(self.match_query(part, reference))
+            wanted.append(reference)
+        if not queries:
+            return {}
+
+        payload = self.run_query({'queries': queries}, query=self.search_query)
+        found = {}
+        for hit in payload.get('supMultiMatch') or []:
+            if not isinstance(hit, dict):
+                continue
+            reference = _text(hit.get('reference'))
+            nodes = [n for n in (hit.get('parts') or []) if isinstance(n, dict)]
+            if reference:
+                found[reference] = nodes
+        return found
+
+    def search_one(self, part):
+        """The per-part fallback, used when supMultiMatch is not in the schema."""
+        term = self.search_term(part)
+        if not term:
+            return []
+        payload = self.run_query({'q': term, 'limit': self.limit}, query=SEARCH_ONE_QUERY)
+        results = ((payload.get('supSearchMpn') or {}).get('results')) or []
+        nodes = []
+        for entry in results:
+            node = (entry or {}).get('part') if isinstance(entry, dict) else None
+            if isinstance(node, dict):
+                nodes.append(node)
+        return nodes
+
+    def to_record(self, nodes, part):
+        """A catalog record, or a NoMatch naming what came back instead."""
+        nodes = [n for n in (nodes or []) if isinstance(n, dict)]
+        if not nodes:
+            return NoMatch(considered=0)
+        node = pick_best_part(nodes, part.get('mpn'), part.get('manufacturer'), self.match_mode)
+        if not node:
+            near = nearest_part(nodes, part.get('mpn'))
+            return NoMatch(
+                closest=mpn_of(near) if near else None,
+                manufacturer=manufacturer_of(near) if near else None,
+                considered=len(nodes),
+            )
+        record = build_record(node, part, self.currency, len(nodes))
+        if record is None:
+            # Nexar knows the part; nobody it lists is selling it.
+            return NoMatch(considered=len(nodes))
+        return record
+
+    def fetch_records(self, parts):
+        """Batch entry point used by LookupService, keyed by the MPN asked for."""
+        parts = list(parts)
+        if not self._batch_unsupported:
+            try:
+                found = self.search(parts)
+            except HttpError as err:
+                if not _query_not_in_schema(err):
+                    raise
+                # The plan or the schema does not have supMultiMatch. Reporting
+                # every line as not carried would be a lie about availability,
+                # so drop to the query that does exist and stay there.
+                self._batch_unsupported = True
+            else:
+                return {part.get('mpn'): self.to_record(found.get('line-%d' % index), part)
+                        for index, part in enumerate(parts)}
+        return {part.get('mpn'): self.fetch_record(part) for part in parts}
+
+    def fetch_record(self, part):
+        """Single-part entry point, on the query every plan has."""
+        return self.to_record(self.search_one(part), part)
+
+    # ── Alternatives ────────────────────────────────────────────────────────
 
     def search_term(self, part):
         """What to ask Nexar for. The manufacturer narrows a part number that
@@ -376,8 +812,12 @@ def load_query(path):
     return text or None
 
 
-def client_from_env(env=None):
+def client_from_env(env=None, match_mode=MATCH_EXACT):
     env = env if env is not None else os.environ
+    try:
+        batch = int(env.get('NEXAR_BATCH_SIZE') or MAX_QUERIES_PER_REQUEST)
+    except ValueError:
+        batch = MAX_QUERIES_PER_REQUEST
     return NexarClient(
         client_id=env.get('NEXAR_CLIENT_ID'),
         client_secret=env.get('NEXAR_CLIENT_SECRET'),
@@ -386,4 +826,8 @@ def client_from_env(env=None):
         token_url=env.get('NEXAR_TOKEN_URL'),
         api_url=env.get('NEXAR_API_URL'),
         query=load_query(env.get('NEXAR_QUERY_FILE')),
+        search_query=load_query(env.get('NEXAR_SEARCH_QUERY_FILE')),
+        currency=env.get('NEXAR_CURRENCY') or env.get('DIGIKEY_CURRENCY') or 'USD',
+        match_mode=match_mode,
+        batch_size=batch,
     )

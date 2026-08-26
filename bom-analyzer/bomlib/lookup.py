@@ -170,10 +170,22 @@ class LookupService:
                 return
 
             parts = [part for _, part in pending]
+            # A batch is usually one request, but a client may split it — Nexar
+            # falls back to per-part queries on a plan without the batched one.
+            # A client that counts its own requests is believed, because the
+            # number people read this for is quota spent, not batches sent.
+            before = getattr(client, 'requests_made', None)
+
+            def requests_spent():
+                after = getattr(client, 'requests_made', None)
+                if isinstance(before, int) and isinstance(after, int):
+                    return max(1, after - before)
+                return 1
+
             try:
                 records = client.fetch_records(parts) or {}
                 with lock:
-                    stats['apiCalls'] += 1
+                    stats['apiCalls'] += requests_spent()
                 for key, part in pending:
                     entry = _entry_for(records.get(part.get('mpn')))
                     if self.cache is not None:
@@ -183,7 +195,7 @@ class LookupService:
             except Exception as err:
                 message = str(err) or repr(err)
                 with lock:
-                    stats['apiCalls'] += 1
+                    stats['apiCalls'] += requests_spent()
                     stats['errors'] += 1
                     # One failed request fails every part it carried, but the
                     # failure is not cached, so the next run retries them.

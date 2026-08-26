@@ -596,5 +596,63 @@ class ApprovedAlternateTests(unittest.TestCase):
         self.assertEqual(with_alt['comparison']['inStockSuppliers'], ['DigiKey'])
 
 
+class QueryAccountingTests(unittest.TestCase):
+    """What "Queries" reports is quota spent, not batches sent.
+
+    A batched client that splits its work — Nexar drops to per-part queries on
+    a plan without the batched one — would otherwise report one call for
+    eighteen, which is exactly the number somebody watching a metered plan is
+    reading.
+    """
+
+    class Batched:
+        id, name, configured = 'agg', 'Aggregator', True
+        batch_size = 20
+
+        def __init__(self, per_part=False):
+            self.per_part = per_part
+            self.requests_made = 0
+
+        def record(self, mpn):
+            return {'supplier': 'Aggregator', 'manufacturerPartNumber': mpn,
+                    'manufacturer': 'Acme', 'totalStock': 100, 'currency': 'USD',
+                    'exactMatch': True, 'variations': [{
+                        'supplierPartNumber': mpn, 'stock': 100,
+                        'minimumOrderQuantity': 1, 'orderMultiple': 1,
+                        'priceBreaks': [{'quantity': 1, 'unitPrice': 1.0}]}]}
+
+        def fetch_records(self, parts):
+            self.requests_made += len(parts) if self.per_part else 1
+            return {p['mpn']: self.record(p['mpn']) for p in parts}
+
+    def spent(self, client, count):
+        service = LookupService(clients=[client], cache=None)
+        parts = [{'row': i, 'mpn': 'PART-%d' % i, 'quantity': 1} for i in range(count)]
+        return service.lookup_parts(parts)['stats']['apiCalls']
+
+    def test_one_request_for_the_batch_counts_as_one(self):
+        self.assertEqual(self.spent(self.Batched(), 6), 1)
+
+    def test_a_client_that_split_the_batch_reports_what_it_really_sent(self):
+        self.assertEqual(self.spent(self.Batched(per_part=True), 6), 6)
+
+    def test_a_client_that_does_not_count_still_counts_as_one(self):
+        client = self.Batched()
+        del client.requests_made
+        self.assertEqual(self.spent(client, 6), 1)
+
+    def test_a_failed_batch_still_counts_against_the_quota(self):
+        class Failing(self.Batched):
+            def fetch_records(self, parts):
+                self.requests_made += len(parts)
+                raise RuntimeError('nope')
+
+        service = LookupService(clients=[Failing(per_part=True)], cache=None)
+        stats = service.lookup_parts(
+            [{'row': i, 'mpn': 'P%d' % i, 'quantity': 1} for i in range(4)])['stats']
+        self.assertEqual(stats['apiCalls'], 4)
+        self.assertEqual(stats['errors'], 1)
+
+
 if __name__ == '__main__':
     unittest.main()

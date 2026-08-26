@@ -357,5 +357,228 @@ class EnvTests(unittest.TestCase):
         self.assertIn('supSearchMpn', client.query)
 
 
+# ── Part search ─────────────────────────────────────────────────────────────
+
+
+def seller(name, sku, stock, unit=1.0, moq=1, multiple=1, packaging='Cut Tape',
+           authorized=True, currency='USD', lead=None):
+    return {
+        'company': {'name': name},
+        'isAuthorized': authorized,
+        'offers': [{
+            'sku': sku,
+            'inventoryLevel': stock,
+            'moq': moq,
+            'orderMultiple': multiple,
+            'packaging': packaging,
+            'clickUrl': 'https://example.com/%s' % sku,
+            'factoryLeadDays': lead,
+            'prices': [
+                {'quantity': 1, 'price': unit, 'currency': currency},
+                {'quantity': 100, 'price': round(unit * 0.7, 5), 'currency': currency},
+            ],
+        }],
+    }
+
+
+def sold_part(mpn, sellers, manufacturer='Acme', **extra):
+    node = part_node(mpn, manufacturer)
+    node.pop('similarParts', None)
+    node['sellers'] = sellers
+    node.update(extra)
+    return node
+
+
+def multi_match(*hits):
+    """A supMultiMatch answer: one entry per query, in reference order."""
+    return {'data': {'supMultiMatch': [
+        {'reference': 'line-%d' % index, 'hits': len(parts), 'parts': list(parts)}
+        for index, parts in enumerate(hits)
+    ]}}
+
+
+class PartSearchTests(ClientTests):
+    """Nexar as a supplier column: sellers and offers, not similar parts."""
+
+    def test_a_bom_goes_out_as_one_batched_request(self):
+        client, transport = self.client(multi_match(
+            (sold_part('AAA', [seller('Arrow', 'AR-AAA', 5000)]),),
+            (sold_part('BBB', [seller('Avnet', 'AV-BBB', 12)]),),
+        ))
+        records = client.fetch_records([{'mpn': 'AAA', 'quantity': 10},
+                                        {'mpn': 'BBB', 'quantity': 10}])
+        # Token, then one query for both parts.
+        self.assertEqual(len(transport.calls), 2)
+        body = json.loads(transport.calls[1]['body'])
+        self.assertIn('supMultiMatch', body['query'])
+        self.assertEqual([q['mpn'] for q in body['variables']['queries']], ['AAA', 'BBB'])
+        self.assertEqual(sorted(records), ['AAA', 'BBB'])
+        self.assertEqual(records['AAA']['manufacturerPartNumber'], 'AAA')
+
+    def test_the_manufacturer_narrows_the_query_as_its_own_field(self):
+        client, transport = self.client(multi_match((sold_part('AAA', [seller('Arrow', 'A', 1)]),)))
+        client.fetch_records([{'mpn': 'AAA', 'manufacturer': 'Yageo'}])
+        query = json.loads(transport.calls[1]['body'])['variables']['queries'][0]
+        self.assertEqual(query['manufacturer'], 'Yageo')
+        self.assertEqual(query['mpn'], 'AAA')
+
+    def test_every_seller_offer_becomes_a_packaging_option(self):
+        node = sold_part('AAA', [
+            seller('Arrow', 'AR-AAA', 5000, unit=0.5),
+            seller('Avnet', 'AV-AAA', 250, unit=0.4, moq=1000, packaging='Reel'),
+        ])
+        client, _ = self.client(multi_match((node,)))
+        record = client.fetch_records([{'mpn': 'AAA'}])['AAA']
+        self.assertTrue(record['aggregator'])
+        self.assertEqual([v['distributor'] for v in record['variations']], ['Arrow', 'Avnet'])
+        self.assertEqual(record['variations'][1]['minimumOrderQuantity'], 1000)
+        self.assertEqual(record['variations'][0]['priceBreaks'][0]['unitPrice'], 0.5)
+
+    def test_a_converted_price_is_preferred_so_the_column_is_one_currency(self):
+        node = sold_part('AAA', [seller('Arrow', 'A', 10, currency='EUR')])
+        node['sellers'][0]['offers'][0]['prices'][0].update(
+            {'convertedPrice': 1.11, 'convertedCurrency': 'USD'})
+        client, _ = self.client(multi_match((node,)))
+        record = client.fetch_records([{'mpn': 'AAA'}])['AAA']
+        first = record['variations'][0]['priceBreaks'][0]
+        self.assertEqual((first['unitPrice'], first['currency']), (1.11, 'USD'))
+
+    def test_an_unauthorized_seller_is_kept_but_ranked_last(self):
+        node = sold_part('AAA', [seller('Broker Co', 'BR-A', 9, authorized=False)])
+        client, _ = self.client(multi_match((node,)))
+        record = client.fetch_records([{'mpn': 'AAA'}])['AAA']
+        self.assertTrue(record['variations'][0]['marketPlace'])
+
+    def test_a_part_nobody_is_selling_is_not_carried(self):
+        client, _ = self.client(multi_match((sold_part('AAA', []),)))
+        record = client.fetch_records([{'mpn': 'AAA'}])['AAA']
+        self.assertIsInstance(record, nexar.NoMatch)
+
+    def test_nothing_returned_at_all_is_a_plain_miss(self):
+        client, _ = self.client(multi_match(()))
+        record = client.fetch_records([{'mpn': 'AAA'}])['AAA']
+        self.assertIsInstance(record, nexar.NoMatch)
+        self.assertIsNone(record.closest)
+
+    def test_a_near_miss_is_rejected_and_named(self):
+        client, _ = self.client(multi_match((sold_part('AAA-T', [seller('Arrow', 'A', 5)]),)))
+        record = client.fetch_records([{'mpn': 'AAA'}])['AAA']
+        self.assertIsInstance(record, nexar.NoMatch)
+        self.assertEqual(record.closest, 'AAA-T')
+
+    def test_relaxed_mode_accepts_the_closest_instead(self):
+        client, _ = self.client(multi_match((sold_part('AAA-T', [seller('Arrow', 'A', 5)]),)),
+                                match_mode='relaxed')
+        record = client.fetch_records([{'mpn': 'AAA'}])['AAA']
+        self.assertEqual(record['manufacturerPartNumber'], 'AAA-T')
+        self.assertFalse(record['exactMatch'])
+
+    def test_punctuation_and_case_are_not_identity(self):
+        client, _ = self.client(multi_match((sold_part('rc0603fr0710kl', [seller('A', 'x', 5)]),)))
+        record = client.fetch_records([{'mpn': 'RC0603FR-0710KL'}])['RC0603FR-0710KL']
+        self.assertTrue(record['exactMatch'])
+
+    def test_lifecycle_is_read_from_the_specs_when_it_says_a_status(self):
+        node = sold_part('AAA', [seller('Arrow', 'A', 5)])
+        node['specs'].append({'attribute': {'shortname': 'lifecyclestatus'},
+                              'displayValue': 'Obsolete'})
+        client, _ = self.client(multi_match((node,)))
+        self.assertEqual(client.fetch_records([{'mpn': 'AAA'}])['AAA']['lifecycle'], 'Obsolete')
+
+    def test_a_spec_that_is_not_a_status_is_not_rendered_as_one(self):
+        node = sold_part('AAA', [seller('Arrow', 'A', 5)])
+        node['specs'].append({'attribute': {'shortname': 'lifecyclestatus'},
+                              'displayValue': 'Tier 2'})
+        client, _ = self.client(multi_match((node,)))
+        self.assertIsNone(client.fetch_records([{'mpn': 'AAA'}])['AAA']['lifecycle'])
+
+    def test_lead_time_is_said_in_words_the_parser_understands(self):
+        node = sold_part('AAA', [seller('Arrow', 'A', 5)], estimatedFactoryLeadDays=56)
+        client, _ = self.client(multi_match((node,)))
+        self.assertEqual(client.fetch_records([{'mpn': 'AAA'}])['AAA']['leadTime'], '56 Days')
+
+    def test_an_offers_own_lead_time_is_used_when_the_part_quotes_none(self):
+        node = sold_part('AAA', [seller('Arrow', 'A', 5, lead=21)])
+        node['estimatedFactoryLeadDays'] = None
+        client, _ = self.client(multi_match((node,)))
+        self.assertEqual(client.fetch_records([{'mpn': 'AAA'}])['AAA']['leadTime'], '21 Days')
+
+    def test_no_lead_time_anywhere_claims_none(self):
+        node = sold_part('AAA', [seller('Arrow', 'A', 5)])
+        node['estimatedFactoryLeadDays'] = None
+        client, _ = self.client(multi_match((node,)))
+        self.assertIsNone(client.fetch_records([{'mpn': 'AAA'}])['AAA']['leadTime'])
+
+    def test_octopart_is_credited_on_every_record(self):
+        client, _ = self.client(multi_match((sold_part('AAA', [seller('Arrow', 'A', 5)]),)))
+        attribution = client.fetch_records([{'mpn': 'AAA'}])['AAA']['attribution']
+        self.assertEqual(attribution['url'], 'https://octopart.com/AAA')
+        self.assertIn('Octopart', attribution['name'])
+
+    def test_a_single_part_lookup_uses_the_query_every_plan_has(self):
+        client, transport = self.client(response(sold_part('AAA', [seller('Arrow', 'A', 5)])))
+        record = client.fetch_record({'mpn': 'AAA'})
+        self.assertIn('supSearchMpn', json.loads(transport.calls[1]['body'])['query'])
+        self.assertEqual(record['manufacturerPartNumber'], 'AAA')
+
+    def test_the_batch_is_never_bigger_than_the_api_accepts(self):
+        client = nexar.NexarClient(client_id='id', client_secret='s')
+        self.assertEqual(client.batch_size, nexar.MAX_QUERIES_PER_REQUEST)
+
+
+class BatchFallbackTests(ClientTests):
+    """A plan without supMultiMatch must still get a supplier column.
+
+    Reporting every line as "not carried" because one query is missing would
+    be a lie about availability, so the client drops to the query that does
+    exist and stays there for the rest of the run.
+    """
+
+    def rejection(self, message):
+        return {'errors': [{'message': message}]}
+
+    def test_a_missing_batch_query_falls_back_to_per_part_search(self):
+        client, transport = self.client(
+            self.rejection("Cannot query field 'supMultiMatch' on type 'Query'."),
+            response(sold_part('AAA', [seller('Arrow', 'A', 5)])),
+            response(sold_part('BBB', [seller('Avnet', 'B', 7)])),
+        )
+        records = client.fetch_records([{'mpn': 'AAA'}, {'mpn': 'BBB'}])
+        self.assertEqual(records['AAA']['manufacturerPartNumber'], 'AAA')
+        self.assertEqual(records['BBB']['manufacturerPartNumber'], 'BBB')
+
+    def test_the_fallback_is_remembered_rather_than_retried_every_batch(self):
+        client, transport = self.client(
+            self.rejection("Cannot query field 'supMultiMatch' on type 'Query'."),
+            response(sold_part('AAA', [seller('Arrow', 'A', 5)])),
+            response(sold_part('BBB', [seller('Avnet', 'B', 7)])),
+        )
+        client.fetch_records([{'mpn': 'AAA'}])
+        self.assertTrue(client._batch_unsupported)
+        client.fetch_records([{'mpn': 'BBB'}])
+        bodies = [json.loads(c['body'])['query'] for c in transport.calls[1:]]
+        # One rejected batch, then nothing but the per-part query.
+        self.assertEqual(sum('supMultiMatch' in b for b in bodies), 1)
+
+    def test_a_real_query_error_is_raised_rather_than_worked_around(self):
+        client, _ = self.client(self.rejection('Variable "$queries" of required type was not provided'))
+        with self.assertRaises(HttpError) as caught:
+            client.fetch_records([{'mpn': 'AAA'}])
+        self.assertIn('$queries', str(caught.exception))
+        self.assertFalse(client._batch_unsupported)
+
+    def test_alternatives_still_work_after_search_fell_back(self):
+        # The two queries are independent: one being absent says nothing about
+        # the other.
+        client, _ = self.client(
+            self.rejection("Cannot query field 'supMultiMatch' on type 'Query'."),
+            response(sold_part('AAA', [seller('Arrow', 'A', 5)])),
+            response(part_node('AAA', similar=[part_node('BBB')])),
+        )
+        client.fetch_records([{'mpn': 'AAA'}])
+        found = client.find_alternatives({'mpn': 'AAA'})
+        self.assertEqual([a['mpn'] for a in found['alternatives']], ['BBB'])
+
+
 if __name__ == '__main__':
     unittest.main()

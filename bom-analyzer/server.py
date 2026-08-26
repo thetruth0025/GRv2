@@ -124,9 +124,18 @@ trustedparts = TrustedPartsClient(
     use_cached_data=_bool_env('TRUSTEDPARTS_USE_CACHED_DATA'),
 )
 
-# Not a supplier: Nexar answers "what could I use instead", and only for parts
-# already found to be in trouble. It is never part of a BOM run.
-nexar = nexar_module.client_from_env()
+# Nexar wears two hats. As a supplier it is an aggregator like TrustedParts,
+# quoting every seller it knows for a part, and it joins the comparison
+# whenever credentials are present. Separately it answers "what could I use
+# instead", on demand and only for parts already found to be in trouble — a
+# different query, on a plan that may or may not carry it, which is why one
+# failing does not take the other down with it.
+nexar = nexar_module.client_from_env(match_mode=MPN_MATCH)
+
+# Anyone who set Nexar credentials for alternatives alone would otherwise find
+# it quoting every line of every BOM from now on, which is their metered quota
+# being spent on a change they did not ask for. On by default, off in one word.
+NEXAR_AS_SUPPLIER = not _bool_env('SKIP_NEXAR_SUPPLIER')
 MAX_ALTERNATIVE_PARTS = _int_env('MAX_ALTERNATIVE_PARTS', 50)
 ALTERNATIVES_CONCURRENCY = _int_env('NEXAR_CONCURRENCY', 2)
 
@@ -142,7 +151,7 @@ cache = PartCache(
 )
 
 lookup_service = LookupService(
-    clients=[digikey, mouser, trustedparts],
+    clients=[digikey, mouser, trustedparts] + ([nexar] if NEXAR_AS_SUPPLIER else []),
     cache=cache,
     concurrency=_int_env('LOOKUP_CONCURRENCY', 3),
     include_alternates=LOOKUP_ALTERNATES,
@@ -520,7 +529,13 @@ class Handler(BaseHTTPRequestHandler):
         answers = {}
 
         def resolve(part):
-            key = 'nexar %s %s' % (part['mpn'].upper(), (part['manufacturer'] or '').upper())
+            # Namespaced away from the supplier lookup's key, which is
+            # "<client id> <mpn> <manufacturer>" and would otherwise be exactly
+            # this string now that Nexar is also a supplier. A catalog record
+            # read back as an alternatives answer has no `alternatives` key, so
+            # the collision would quietly report "none found" without asking.
+            key = 'nexar:alternatives %s %s' % (
+                part['mpn'].upper(), (part['manufacturer'] or '').upper())
             cached = cache.get(key) if cache is not None else None
             if cached is not None:
                 with lock:

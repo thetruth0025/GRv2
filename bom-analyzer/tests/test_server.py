@@ -274,6 +274,15 @@ class ScreeningTests(unittest.TestCase):
         self.assertEqual(result['data']['ignorePrefixes'],
                          ['ASY0', 'CBL0', 'DES0', 'PCB0'])
 
+    def test_nexar_is_a_supplier_column_when_it_is_configured(self):
+        # Off in this run — no credentials — but the wiring is what is pinned:
+        # the flag decides, and it defaults to on.
+        self.assertTrue(server.NEXAR_AS_SUPPLIER)
+        self.assertEqual(server.nexar.id, 'nexar')
+        self.assertEqual(server.nexar.match_mode, server.MPN_MATCH)
+        self.assertFalse(server.nexar.configured)
+        self.assertNotIn('nexar', [c.id for c in server.lookup_service.clients])
+
     def test_health_says_whether_bom_alternates_are_looked_up(self):
         self.assertIs(call('/api/health')['data']['lookupAlternates'], True)
 
@@ -667,3 +676,67 @@ class ReportTests(unittest.TestCase):
         disposition = result['headers']['Content-Disposition']
         self.assertNotIn('"', disposition[len('attachment; filename='):].strip('"'))
         self.assertNotIn('/', disposition)
+
+
+class AlternativesCacheTests(unittest.TestCase):
+    """The alternatives cache must not collide with the supplier cache.
+
+    Both are about the same part and the same client id. Sharing a key means a
+    BOM run leaves a catalog record exactly where the alternatives endpoint
+    looks — and a catalog record has no `alternatives`, so the endpoint would
+    report "none found" as a cache hit without ever asking Nexar.
+    """
+
+    class FakeNexar:
+        configured = True
+
+        def __init__(self):
+            self.asked = []
+
+        def find_alternatives(self, part):
+            self.asked.append(part['mpn'])
+            return {'matched': {'mpn': part['mpn']},
+                    'alternatives': [{'mpn': part['mpn'] + '-ALT'}]}
+
+    def setUp(self):
+        self.original = server.nexar
+        self.fake = self.FakeNexar()
+        server.nexar = self.fake
+        server.cache.clear()
+
+    def tearDown(self):
+        server.nexar = self.original
+        server.cache.clear()
+
+    def ask(self, mpn, manufacturer=None):
+        return call('/api/alternatives', 'POST', json.dumps({
+            'parts': [{'mpn': mpn, 'manufacturer': manufacturer}],
+        }), {'Content-Type': 'application/json'})
+
+    def test_a_supplier_record_in_the_cache_does_not_answer_for_alternatives(self):
+        from bomlib.lookup import cache_key
+        part = {'mpn': 'LM358DR', 'manufacturer': 'TI'}
+        # What a BOM run leaves behind now that Nexar is a supplier.
+        server.cache.set(cache_key('nexar', part), {
+            'record': {'supplier': 'Nexar', 'manufacturerPartNumber': 'LM358DR'},
+        })
+
+        result = self.ask('LM358DR', 'TI')
+        self.assertEqual(result['status'], 200)
+        self.assertEqual(result['data']['stats']['cacheHits'], 0)
+        self.assertEqual(self.fake.asked, ['LM358DR'])
+        self.assertEqual([a['mpn'] for a in result['data']['results'][0]['alternatives']],
+                         ['LM358DR-ALT'])
+
+    def test_its_own_answer_is_still_cached_and_reused(self):
+        first = self.ask('LM358DR', 'TI')
+        second = self.ask('LM358DR', 'TI')
+        self.assertEqual(first['data']['stats']['apiCalls'], 1)
+        self.assertEqual(second['data']['stats']['cacheHits'], 1)
+        self.assertEqual(self.fake.asked, ['LM358DR'])
+
+    def test_the_supplier_lookup_is_not_poisoned_by_an_alternatives_answer(self):
+        from bomlib.lookup import cache_key
+        self.ask('LM358DR', 'TI')
+        self.assertIsNone(server.cache.get(cache_key('nexar', {'mpn': 'LM358DR',
+                                                              'manufacturer': 'TI'})))

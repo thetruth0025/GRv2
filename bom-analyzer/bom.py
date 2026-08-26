@@ -86,7 +86,8 @@ def build_parser():
         help='Number of units being built; multiplies every BOM quantity by N (default: 1).',
     )
     parser.add_argument(
-        '-s', '--supplier', action='append', choices=['digikey', 'mouser', 'trustedparts'],
+        '-s', '--supplier', action='append',
+        choices=['digikey', 'mouser', 'trustedparts', 'nexar'],
         help='Query only this supplier. Repeatable.',
     )
     parser.add_argument(
@@ -257,7 +258,7 @@ def main(argv=None):
     if not service.clients:
         print('error: no supplier credentials found. Copy .env.example to .env and add your '
               'API keys, or set DIGIKEY_CLIENT_ID / DIGIKEY_CLIENT_SECRET / MOUSER_API_KEY / '
-              'TRUSTEDPARTS_API_KEY.',
+              'TRUSTEDPARTS_API_KEY / NEXAR_CLIENT_ID + NEXAR_CLIENT_SECRET.',
               file=sys.stderr)
         return EXIT_ERROR
 
@@ -353,19 +354,45 @@ def check_nexar(paint):
         print('Note: "%s" was refused, so the token was requested without a scope. '
               'Set NEXAR_SCOPE= in .env to make that the default.' % client.scope)
 
+    # Two queries, checked separately because they fail separately: part search
+    # is what puts Nexar in the comparison, and similarParts is an extra that
+    # not every plan carries. A plan without the second is still worth having.
+    print()
+    print('Trying the part search query…')
+    try:
+        record = client.fetch_records([{'mpn': 'LM358DR', 'quantity': 10}]).get('LM358DR')
+    except Exception as err:
+        print(paint('Part search failed.', 'red'), err)
+        print()
+        print('Auth is fine, so this is the GraphQL query rather than the credentials. '
+              'NEXAR_SEARCH_QUERY_FILE can point at a corrected one.')
+        return EXIT_ERROR
+
+    if isinstance(record, dict):
+        print(paint('Part search works.', 'green'), 'Matched %s from %d seller offer(s)%s.' % (
+            record.get('manufacturerPartNumber') or '(nothing)',
+            len(record.get('variations') or []),
+            ', via the per-part query' if client._batch_unsupported else ''))
+    else:
+        # A miss is a working query with nothing to say, not a broken one.
+        print(paint('Part search works.', 'green'),
+              'Nexar had no seller for the test part, which is an answer, not a failure.')
+
     print()
     print('Trying the alternatives query…')
     try:
         found = client.find_alternatives({'mpn': 'LM358'})
     except Exception as err:
-        print(paint('The query failed.', 'red'), err)
+        print(paint('Alternatives are not available.', 'yellow'), err)
         print()
-        print('Auth is fine, so this is the GraphQL query rather than the credentials. '
-              'NEXAR_QUERY_FILE can point at a corrected one.')
-        return EXIT_ERROR
+        print('Part search above still works, so Nexar will appear as a supplier column; '
+              'only Find alternatives is affected. similarParts is not on every Nexar plan. '
+              'NEXAR_QUERY_FILE can point at a corrected query if it is the query rather '
+              'than the plan.')
+        return EXIT_OK
 
     matched = found.get('matched')
-    print(paint('The query works.', 'green'), 'Matched %s, %d alternative(s).' % (
+    print(paint('Alternatives work.', 'green'), 'Matched %s, %d alternative(s).' % (
         (matched or {}).get('mpn') or '(nothing)', len(found.get('alternatives') or [])))
     return EXIT_OK
 
@@ -586,7 +613,16 @@ def build_service(args):
         use_cached_data=str(os.environ.get('TRUSTEDPARTS_USE_CACHED_DATA', '')).strip().lower() in ('1', 'true', 'yes'),
     )
 
-    clients = [digikey, mouser, trustedparts]
+    # Nexar is both a supplier column and, separately, where --alternatives
+    # comes from. Only the first is built here.
+    nexar = nexar_module.client_from_env(match_mode=match_mode)
+
+    # Credentials set for --alternatives alone should not silently start
+    # spending a metered quota on every line of every BOM.
+    if str(os.environ.get('SKIP_NEXAR_SUPPLIER', '')).strip().lower() in ('1', 'true', 'yes'):
+        clients = [digikey, mouser, trustedparts]
+    else:
+        clients = [digikey, mouser, trustedparts, nexar]
     if args.supplier:
         wanted = set(args.supplier)
         clients = [c for c in clients if c.id in wanted]
