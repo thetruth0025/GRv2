@@ -128,6 +128,9 @@
   var missing = Object.keys(el).filter(function (id) { return !el[id]; });
   if (missing.length) {
     reportStaleShell(missing);
+    // This script has taken charge and said what is wrong, so the watchdog in
+    // index.html has nothing to add.
+    window.__bomAppReady = true;
     return;
   }
 
@@ -167,27 +170,14 @@
   }
 
   // Unregisters any service worker and empties every cache it left behind.
-  // Reloads afterwards only when asked, so the ordinary startup call can do its
-  // cleanup without throwing the page away underneath the user.
+  // index.html owns the implementation, because it has to work even when this
+  // script is the stale thing being cleared.
   function clearBrowserCopy(reload) {
-    var jobs = [];
-
-    if (window.caches && caches.keys) {
-      jobs.push(caches.keys().then(function (keys) {
-        return Promise.all(keys.map(function (key) { return caches.delete(key); }));
-      }));
+    if (typeof window.__bomClearBrowserCopy === 'function') {
+      return window.__bomClearBrowserCopy(reload);
     }
-    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
-      jobs.push(navigator.serviceWorker.getRegistrations().then(function (registrations) {
-        return Promise.all(registrations.map(function (r) { return r.unregister(); }));
-      }));
-    }
-
-    return Promise.all(jobs)
-      .catch(function () {})
-      .then(function () {
-        if (reload) location.reload();
-      });
+    if (reload) location.reload();
+    return Promise.resolve();
   }
 
   // ── Small helpers ────────────────────────────────────────────────────────
@@ -2120,4 +2110,9 @@
   // over from an earlier version is removed here as well, for browsers that
   // would not otherwise re-fetch the worker for a while.
   clearBrowserCopy(false);
+
+  // Tells the watchdog in index.html that a current script is running the page.
+  // Last line of the startup path on purpose: anything that throws before here
+  // leaves the flag unset, and the watchdog explains the blank page.
+  window.__bomAppReady = true;
 })();

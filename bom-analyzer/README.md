@@ -341,11 +341,16 @@ Serve `index.html`, `app.js` and `styles.css` with the same caching policy — `
 browser ends up running last week's script against this week's page. If that ever happens the app
 says so and offers to clear the old copy, rather than dying silently.
 
-### If the page never gets past "Checking backend…"
+### If the page does not respond
 
-The browser is holding an old copy of `app.js`. Reload with **Ctrl+Shift+R** (**Cmd+Shift+R** on a
-Mac), or use **Clear browser copy** in Settings. Versions before this one installed a service worker
-that caused exactly this; opening the app once removes it for good.
+A page whose script never started looks like a page with a slow backend: the status pill sits on
+"Checking backend…" and no button does anything. `index.html` watches for that — it is the one file
+a stale cache cannot hide — and puts up a notice with a button that clears the old copy and reloads.
+**Ctrl+Shift+R** (**Cmd+Shift+R** on a Mac) does the same thing by hand, as does **Clear browser
+copy** in Settings.
+
+Versions before this one installed a service worker that caused exactly this after every update.
+Opening the app once removes it for good.
 
 ---
 

@@ -13,26 +13,73 @@
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="styles.css" />
 <script>
-// Older versions installed a service worker that fetched index.html from the
-// network but served app.js from a cache, so every update left the two out of
-// step and the page died before it could say why. index.html is the one file
-// that worker always fetched fresh — which makes this the only place a fix can
-// reach a browser that is already stuck. Evict it, then reload once.
+// index.html is the only file guaranteed to be fresh: the service worker older
+// versions installed fetched it from the network while serving app.js from a
+// cache. So the recovery for a browser stuck on an old script has to live here,
+// where a stale app.js cannot stop it running.
 (function () {
-  if (!('serviceWorker' in navigator) || !navigator.serviceWorker.getRegistrations) return;
-  navigator.serviceWorker.getRegistrations().then(function (registrations) {
-    if (!registrations.length) return;
-    var jobs = registrations.map(function (registration) { return registration.unregister(); });
+  var NOTICE_ID = 'shellNotice';
+
+  // Unregisters any legacy worker and drops its caches. Reloads afterwards only
+  // when asked, so the startup sweep can clean up without pulling the page out
+  // from under the reader.
+  function clearBrowserCopy(reload) {
+    var jobs = [];
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+      jobs.push(navigator.serviceWorker.getRegistrations().then(function (registrations) {
+        return Promise.all(registrations.map(function (r) { return r.unregister(); }));
+      }));
+    }
     if (window.caches && caches.keys) {
       jobs.push(caches.keys().then(function (keys) {
         return Promise.all(keys.map(function (key) { return caches.delete(key); }));
       }));
     }
-    Promise.all(jobs).then(function () {
-      // Nothing is registered on the next load, so this cannot loop.
-      location.reload();
+    return Promise.all(jobs)['catch'](function () {}).then(function () {
+      if (reload) location.reload();
     });
-  }).catch(function () {});
+  }
+  window.__bomClearBrowserCopy = clearBrowserCopy;
+
+  function showNotice() {
+    if (document.getElementById(NOTICE_ID)) return;
+    var notice = document.createElement('section');
+    notice.id = NOTICE_ID;
+    notice.className = 'card setup';
+    notice.innerHTML =
+      '<h2><span class="num">!</span> The browser is holding an old copy</h2>' +
+      '<p class="sub">This page loaded with a script from an earlier version, so nothing on it ' +
+      'responds. Your data and the server are fine.</p>' +
+      '<div class="btn-row"><button type="button" id="shellResetBtn" class="btn primary">' +
+      'Clear the old copy and reload</button></div>' +
+      '<div class="hint">Or reload with <strong>Ctrl+Shift+R</strong> ' +
+      '(<strong>Cmd+Shift+R</strong> on a Mac).</div>';
+    var app = document.getElementById('app');
+    (app || document.body).insertBefore(notice, (app || document.body).firstChild);
+    document.getElementById('shellResetBtn').addEventListener('click', function () {
+      this.disabled = true;
+      this.textContent = 'Clearing…';
+      clearBrowserCopy(true);
+    });
+  }
+
+  // Evict a legacy worker, then reload once so the fresh script is fetched.
+  // Nothing is registered on the next load, so this cannot loop.
+  if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+    navigator.serviceWorker.getRegistrations().then(function (registrations) {
+      if (registrations.length) clearBrowserCopy(true);
+    })['catch'](function () {});
+  }
+
+  // app.js announces itself once it has taken charge of the page. An old script
+  // predates that flag and a broken one never reaches it, so either way the
+  // silence is the signal — and the notice comes from here, not from the script
+  // that is the problem.
+  window.addEventListener('load', function () {
+    setTimeout(function () {
+      if (!window.__bomAppReady) showNotice();
+    }, 4000);
+  });
 })();
 </script>
 </head>
