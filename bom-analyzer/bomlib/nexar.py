@@ -80,8 +80,11 @@ TOKEN_HINTS = {
         'the application is not granted the scope being asked for. Set NEXAR_SCOPE to a '
         'scope it does have, or leave NEXAR_SCOPE empty to ask for none.',
     'unauthorized_client':
-        'the application exists but is not allowed the client-credentials grant. Check '
-        'its type in the Nexar portal.',
+        'the credentials are real, but this application is not allowed to authenticate as '
+        'itself. A Nexar Design application signs a user in instead, which is a different '
+        'grant and a different API. Alternatives come from the Supply API, so what is '
+        'needed is an application with Supply access — add it to this one in the Nexar '
+        'portal, or create a second application for it.',
     'unsupported_grant_type':
         'the token endpoint did not accept client_credentials. Check NEXAR_TOKEN_URL.',
     'invalid_request':

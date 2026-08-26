@@ -146,7 +146,7 @@ All are free to start. Any one supplier alone is enough — the app just shows f
 | DigiKey | [developer.digikey.com](https://developer.digikey.com/) | Create an organization and an app, add the **Product Information** API to it, then copy the **Client ID** and **Client Secret** |
 | Mouser | [mouser.com/api-hub](https://www.mouser.com/api-hub/) | Request a **Search API** key (not the Order API key) |
 | TrustedParts | [trustedparts.com](https://www.trustedparts.com/) | Register, then request API access under **My Account → Additional Features**. The key arrives as *Trial* with an expiry — email `user-requests@trustedparts.com` to move it to *Active* |
-| Nexar *(optional)* | [nexar.com](https://nexar.com/) | Create an application and copy its **Client ID** and **Client Secret**. Only needed for **Find alternatives** — the rest of the app works without it |
+| Nexar *(optional)* | [nexar.com](https://nexar.com/) | Create an application **with Supply access** and copy its **Client ID** and **Client Secret**. A Design application will not work: it signs a user in rather than authenticating itself, and the part data lives in the Supply API. Only needed for **Find alternatives** — the rest of the app works without it |
 
 DigiKey issues both Sandbox and Production keys. Sandbox returns fixed demo data, so use the
 Production pair unless you are specifically testing against the sandbox.
@@ -378,7 +378,7 @@ nothing else runs. A failure there is one of:
 | --- | --- |
 | `invalid_client` | The ID or secret is wrong. A secret truncated on paste looks exactly like this |
 | `invalid_scope` | The application was not granted the scope being asked for. The app retries once without a scope on its own; if that fails too, set `NEXAR_SCOPE` to a scope your application does have, or `NEXAR_SCOPE=` (empty) to ask for none |
-| `unauthorized_client` | The application is not allowed the client-credentials grant — check its type in the Nexar portal |
+| `unauthorized_client` | The credentials are real, but the application cannot authenticate as itself. Most often it is a **Design** application, which signs a *user* in instead — a different grant and a different API. Alternatives come from the **Supply** API, so the application needs Supply access |
 
 The scope defaults to `supply.domain`. Setting `NEXAR_SCOPE=` to an empty value is different from
 leaving it out: empty means *ask for no scope at all*, which is what some Nexar applications want.
@@ -491,7 +491,7 @@ Opening the app once removes it for good.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 311 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 313 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py --part STM32F103C8T6          # look one part up
 python3 bom.py samples/sample-bom.csv        # or a whole BOM

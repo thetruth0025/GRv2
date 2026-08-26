@@ -233,6 +233,31 @@ class TokenFailureTests(unittest.TestCase):
             client.get_token()
         self.assertIn('design.domain', str(caught.exception))
 
+    def test_the_wrong_kind_of_application_is_named_as_such(self):
+        # "Check its type in the portal" is not an answer when the type is what
+        # you already looked at: say which type is needed and why.
+        self.refuse({'error': 'unauthorized_client'})
+        client = nexar.NexarClient(client_id='id', client_secret='s')
+        with self.assertRaises(HttpError) as caught:
+            client.get_token()
+        message = str(caught.exception)
+        self.assertIn('Supply', message)
+        self.assertIn('Design', message)
+
+    def test_a_refused_grant_is_not_retried_without_the_scope(self):
+        # The grant itself was refused, so the scope is beside the point.
+        asked = []
+
+        def transport(url, method='GET', headers=None, body=None, **kwargs):
+            asked.append(body)
+            raise HttpError('HTTP 400', 400, {'error': 'unauthorized_client'})
+
+        nexar.request_json = transport
+        client = nexar.NexarClient(client_id='id', client_secret='s')
+        with self.assertRaises(HttpError):
+            client.get_token()
+        self.assertEqual(len(asked), 1)
+
     def test_an_unparseable_body_still_says_what_came_back(self):
         self.refuse('Bad Request')
         client = nexar.NexarClient(client_id='id', client_secret='s')
