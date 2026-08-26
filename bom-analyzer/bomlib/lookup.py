@@ -5,12 +5,32 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .normalize import (
     Lifecycle,
+    NoMatch,
     compare_offers,
     error_offer,
     missing_offer,
     record_to_offer,
     round_to,
 )
+
+
+def _entry_for(record):
+    """A cache entry for whatever the client returned.
+
+    A NoMatch is not a record but it is not nothing either: it says the search
+    ran and the requested part was not among the answers, and it carries what
+    came back instead. Stored as plain data so it survives the cache.
+    """
+    if isinstance(record, NoMatch):
+        return {'notFound': True, 'miss': record.as_dict()}
+    return {'record': record} if record else {'notFound': True}
+
+
+def _miss_reason(entry, supplier, mpn):
+    miss = entry.get('miss') if isinstance(entry, dict) else None
+    if isinstance(miss, dict):
+        return NoMatch(**miss).describe(supplier, mpn)
+    return 'No %s match for %s' % (supplier, mpn)
 
 
 def cache_key(supplier_id, part):
@@ -89,8 +109,7 @@ class LookupService:
                 with lock:
                     stats['apiCalls'] += 1
                 for key, part in pending:
-                    record = records.get(part.get('mpn'))
-                    entry = {'record': record} if record else {'notFound': True}
+                    entry = _entry_for(records.get(part.get('mpn')))
                     if self.cache is not None:
                         self.cache.set(key, entry)
                     with lock:
@@ -120,7 +139,7 @@ class LookupService:
                         return
                 try:
                     record = client.fetch_record(part)
-                    entry = {'record': record} if record else {'notFound': True}
+                    entry = _entry_for(record)
                     if self.cache is not None:
                         self.cache.set(key, entry)
                     with lock:
@@ -173,7 +192,7 @@ class LookupService:
                     offers[client.id] = error_offer(client.name, entry['error'])
                 elif entry.get('notFound'):
                     offers[client.id] = missing_offer(
-                        client.name, 'No %s match for %s' % (client.name, part.get('mpn'))
+                        client.name, _miss_reason(entry, client.name, part.get('mpn'))
                     )
                 else:
                     offers[client.id] = record_to_offer(entry['record'], part)

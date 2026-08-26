@@ -30,6 +30,7 @@ load_env()
 from bomlib.cache import PartCache  # noqa: E402
 from bomlib.digikey import DigiKeyClient  # noqa: E402
 from bomlib.lookup import LookupService, summarize_bom  # noqa: E402
+from bomlib.normalize import MATCH_EXACT, MATCH_MODES  # noqa: E402
 from bomlib.mouser import MouserClient  # noqa: E402
 from bomlib import trustedparts as tp_module  # noqa: E402
 from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
@@ -73,6 +74,19 @@ MAX_PARTS_PER_REQUEST = _int_env('MAX_PARTS_PER_REQUEST', 500)
 # in-house part numbers is not rejected for parts nobody would look up.
 MAX_RAW_PARTS_PER_REQUEST = _int_env('MAX_RAW_PARTS_PER_REQUEST', 5000)
 IGNORE_PREFIXES = parse_prefixes(os.environ.get('IGNORE_PART_PREFIXES'))
+
+
+def _match_mode():
+    """How closely a supplier's answer has to match the part number asked for.
+
+    Exact by default: a keyword search will happily return a near neighbour,
+    and a near neighbour priced as the real thing is worse than no answer.
+    """
+    mode = str(os.environ.get('MPN_MATCH') or MATCH_EXACT).strip().lower()
+    return mode if mode in MATCH_MODES else MATCH_EXACT
+
+
+MPN_MATCH = _match_mode()
 ALLOWED_ORIGINS = [o.strip() for o in str(os.environ.get('ALLOWED_ORIGINS') or '*').split(',') if o.strip()]
 
 digikey = DigiKeyClient(
@@ -82,11 +96,13 @@ digikey = DigiKeyClient(
     site=os.environ.get('DIGIKEY_SITE'),
     language=os.environ.get('DIGIKEY_LANGUAGE'),
     currency=os.environ.get('DIGIKEY_CURRENCY'),
+    match_mode=MPN_MATCH,
 )
 
 mouser = MouserClient(
     api_key=os.environ.get('MOUSER_API_KEY'),
     currency=os.environ.get('MOUSER_CURRENCY'),
+    match_mode=MPN_MATCH,
 )
 
 trustedparts = TrustedPartsClient(
@@ -229,6 +245,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
                 'maxPartsPerRequest': MAX_PARTS_PER_REQUEST,
                 'ignorePrefixes': IGNORE_PREFIXES,
+                'mpnMatch': MPN_MATCH,
                 'dmsms': {
                     'statuses': list(dmsms_module.DMSMS_STATUSES),
                     'defaultSelected': list(dmsms_module.DEFAULT_SELECTED_STATUSES),

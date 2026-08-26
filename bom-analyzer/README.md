@@ -45,6 +45,13 @@ delete, and the part matches nothing. A padded part number and a clean one are t
 which is the difference between one line at the full quantity and two lookups that each half-price
 the buy.
 
+**Matches on the part number, not on something like it.** A keyword search returns neighbours: ask
+for `LM358` and `LM358DR` comes back, which is a different device in a different package. Only the
+number asked for counts — case and punctuation are folded, because `RC0603FR-0710KL` and
+`RC0603FR0710KL` are one part, but nothing else is. When a supplier's nearest answer is rejected the
+table says so and names it, so a part that is merely spelled differently never reads as one nobody
+carries.
+
 **Looks each part up at every supplier.** One query per distinct part number per supplier, run
 with bounded parallelism and cached, so a 200-line BOM with repeated part numbers does not burn
 through a free-tier quota. TrustedParts accepts up to 50 parts per request, so that whole BOM
@@ -217,6 +224,7 @@ the whole analysis, screened-out lines included, for scripting.
 | `-p MPN` / `--part MPN` | Look up a part number directly, no BOM file (repeatable; `--part "STM32F103C8T6,25"` sets a quantity) |
 | `-s digikey` / `-s mouser` / `-s trustedparts` | Query one supplier only (repeatable) |
 | `--limit N` | Analyze just the first N parts, e.g. to sanity-check a big BOM |
+| `--match exact` / `--match relaxed` | Whether a supplier answer must be the same part number, or may be the closest returned (default: `exact`) |
 | `--ignore-prefix PREFIX` | Skip part numbers starting with PREFIX (repeatable); replaces the `ASY0`/`CBL0`/`DES0`/`PCB0` default |
 | `--no-ignore-prefixes` | Look up in-house part numbers too |
 | `--no-merge-duplicates` | Keep repeated part numbers as separate lines instead of adding their quantities |
@@ -342,6 +350,28 @@ column in the browser does the same.
 Typed lookups ignore the column entirely, as they ignore every other screening rule: a part number
 you entered by hand is a direct question, and it gets answered.
 
+### How a part number is matched
+
+Exact, by default. A supplier's answer counts only when its manufacturer part number is the one you
+asked for, after folding case and punctuation:
+
+| Asked for | Supplier returned | |
+| --- | --- | --- |
+| `RC0603FR-0710KL` | `RC0603FR0710KL` | **match** — same number, punctuated differently |
+| `LM358DR` | `lm358dr` | **match** — case is not identity |
+| `LM358` | `LM358DR` | **rejected** — a different device in a different package |
+| `LM358DR` | `LM358` | **rejected** — the suffix is part of the number |
+| `LM358DR` | `LM358DR/NOPB` | **rejected** — decide for yourself whether that substitution is safe |
+
+A rejection is reported, not hidden: the cell reads *"DigiKey has no exact match for LM358 — closest
+was LM358DR (Texas Instruments)"*, so a part spelled differently is distinguishable from one nobody
+carries. That matters for the last row above: strict matching can turn a legitimate part into a
+miss, and the message is what makes it obvious rather than silent.
+
+If you would rather see the nearest thing than nothing, `MPN_MATCH=relaxed` in `.env` or `--match
+relaxed` on the command line restores the old behaviour, and the detail panel marks such a row
+*closest match*. TrustedParts is always exact — its API is keyed on the part number.
+
 ### Finding alternatives
 
 **Find alternatives** lists every analyzed part worth replacing — obsolete, discontinued, end of
@@ -450,6 +480,7 @@ All settings live in `.env`; `.env.example` documents each one. The ones worth k
 | `TRUSTEDPARTS_DISTRIBUTORS` | *(all)* | Comma-separated distributor names to restrict TrustedParts to |
 | `TRUSTEDPARTS_IN_STOCK_ONLY` | `false` | Return only distributors holding stock |
 | `TRUSTEDPARTS_USE_CACHED_DATA` | `false` | Use TrustedParts' cached data instead of real-time distributor feeds |
+| `MPN_MATCH` | `exact` | `exact` accepts only the part number asked for, ignoring case and punctuation; `relaxed` accepts the closest match the search returned |
 | `IGNORE_PART_PREFIXES` | `ASY0,CBL0,DES0,PCB0` | Part-number prefixes treated as in-house and never sent to a supplier. Empty value looks up everything |
 | `MAX_PARTS_PER_REQUEST` | `500` | Largest BOM accepted in one run, counted **after** screening |
 | `ALLOWED_ORIGINS` | `*` | Restrict which origins may call the API if you host the frontend separately |
@@ -491,7 +522,7 @@ Opening the app once removes it for good.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 313 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 329 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py --part STM32F103C8T6          # look one part up
 python3 bom.py samples/sample-bom.csv        # or a whole BOM
@@ -536,7 +567,8 @@ The tests cover the parts that are easy to get quietly wrong: price break select
 minimum-order and packaging-multiple arithmetic, the lead time and lifecycle vocabularies of both
 suppliers, packaging choice, header detection against four different BOM dialects, `.xlsx`
 container reading, `.xlsx` writing, the CSV formula-injection guard, the CLI's column overrides
-and exit codes, the comparison verdicts, screening — that a prefix only counts at the start of
+and exit codes, the comparison verdicts, exact part-number matching — that a suffix counts and
+punctuation does not, and that a rejection names what came back — screening — that a prefix only counts at the start of
 a part number, that `ASY1` is not `ASY0`, that merging adds quantities without mutating the caller's
 lines, and that a BOM of nothing but in-house numbers costs zero API calls — and cell cleaning,
 including every flavour of padding through both readers and the fact that a padded part and a clean
@@ -551,9 +583,13 @@ shapes, so no network access is needed.
   detail panel links straight to it.
 - **Lead time is what the supplier publishes**, which is usually the manufacturer's factory quote,
   not a promise for your order.
-- **Matching is by manufacturer part number.** A part is only reported when the returned MPN is a
-  credible match, and the detail panel says when the match was not exact — but verify anything
-  surprising.
+- **Matching is by manufacturer part number, and by nothing else.** Package, temperature grade and
+  tolerance live in the suffix, so they are compared as part of the number. What this cannot do is
+  know that two differently numbered parts are interchangeable — that is what **Find alternatives**
+  is for, and it is a decision rather than a lookup.
+- **Strict matching can produce a miss where a match exists.** A packaging or lead-free suffix
+  (`/NOPB`, `-TR`) makes a different number, so it is rejected. The message names what came back, so
+  the case is visible; `MPN_MATCH=relaxed` accepts it if you would rather judge each one.
 - **Which BOM owns a shared part depends on the order you analyze them.** A part quoted for one BOM
   is not quoted again for the others, so its price and lead time reflect the quantity of whichever
   BOM you ran first. The report names the other BOMs and what they need, but it does not reprice

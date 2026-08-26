@@ -47,6 +47,59 @@ LIFECYCLE_SEVERITY = {
 }
 
 
+# ── Matching a supplier's answer to the part that was asked for ─────────────
+
+MATCH_EXACT = 'exact'
+MATCH_RELAXED = 'relaxed'
+MATCH_MODES = (MATCH_EXACT, MATCH_RELAXED)
+
+
+def normalize_mpn_key(text):
+    """The form two manufacturer part numbers are compared in.
+
+    Case and punctuation are folded, because distributors punctuate the same
+    part differently — RC0603FR-0710KL and RC0603FR0710KL are one part. Nothing
+    else is folded: a suffix is part of the number, and LM358 is not LM358DR.
+    """
+    return re.sub(r'[^A-Z0-9]', '', str(text or '').upper())
+
+
+def mpn_equal(a, b):
+    key_a = normalize_mpn_key(a)
+    return bool(key_a) and key_a == normalize_mpn_key(b)
+
+
+class NoMatch:
+    """Nothing the supplier returned was the part that was asked for.
+
+    Carries the nearest thing it did return, because "no match" and "no match,
+    but it came back with this" are different amounts of help — the second says
+    whether the part is absent or merely spelled differently.
+    """
+
+    __slots__ = ('closest', 'manufacturer', 'considered')
+
+    def __init__(self, closest=None, manufacturer=None, considered=0):
+        self.closest = closest or None
+        self.manufacturer = manufacturer or None
+        self.considered = considered or 0
+
+    def as_dict(self):
+        return {
+            'closest': self.closest,
+            'manufacturer': self.manufacturer,
+            'considered': self.considered,
+        }
+
+    def describe(self, supplier, mpn):
+        if self.closest:
+            return '%s has no exact match for %s — closest was %s%s' % (
+                supplier, mpn, self.closest,
+                ' (%s)' % self.manufacturer if self.manufacturer else '',
+            )
+        return 'No %s match for %s' % (supplier, mpn)
+
+
 def round_to(value, decimals):
     """Round half-up, matching the arithmetic the frontend does on the same numbers."""
     factor = 10 ** decimals

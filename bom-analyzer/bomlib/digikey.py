@@ -12,7 +12,14 @@ import time
 import urllib.parse
 
 from .http_client import HttpError, request_json
-from .normalize import parse_money, parse_quantity
+from .normalize import (
+    MATCH_EXACT,
+    NoMatch,
+    mpn_equal,
+    normalize_mpn_key,
+    parse_money,
+    parse_quantity,
+)
 
 SUPPLIER = 'DigiKey'
 PROD_BASE = 'https://api.digikey.com'
@@ -21,7 +28,7 @@ SANDBOX_BASE = 'https://sandbox-api.digikey.com'
 
 class DigiKeyClient:
     def __init__(self, client_id=None, client_secret=None, sandbox=False,
-                 site='US', language='en', currency='USD'):
+                 site='US', language='en', currency='USD', match_mode=MATCH_EXACT):
         self.client_id = client_id
         self.client_secret = client_secret
         self.sandbox = bool(sandbox)
@@ -29,6 +36,7 @@ class DigiKeyClient:
         self.site = site or 'US'
         self.language = language or 'en'
         self.currency = currency or 'USD'
+        self.match_mode = match_mode or MATCH_EXACT
         self._token = None
         self._token_expires_at = 0.0
         self._token_lock = threading.Lock()
@@ -89,14 +97,19 @@ class DigiKeyClient:
         return result.get('data') or {}
 
     def to_record(self, data, part):
-        """Return a catalog record, or None when nothing in the response is a
-        credible match for the requested part."""
+        """A catalog record, or a NoMatch naming what came back instead."""
         products = collect_products(data)
         if not products:
-            return None
-        product = pick_best_product(products, part.get('mpn'), part.get('manufacturer'))
+            return NoMatch(considered=0)
+        product = pick_best_product(
+            products, part.get('mpn'), part.get('manufacturer'), self.match_mode)
         if not product:
-            return None
+            near = nearest_product(products, part.get('mpn'))
+            return NoMatch(
+                closest=mpn_of(near) if near else None,
+                manufacturer=manufacturer_of(near) if near else None,
+                considered=len(products),
+            )
         return build_record(product, part, self.currency, len(products))
 
     def fetch_record(self, part):
@@ -168,13 +181,19 @@ def status_of(product):
     return None
 
 
-def normalize_key(text):
-    return re.sub(r'[^A-Z0-9]', '', str(text or '').upper())
+# Kept as a module name because it is what this file has always called it.
+normalize_key = normalize_mpn_key
 
 
-def pick_best_product(products, keyword, manufacturer=None):
-    """A keyword search happily returns loosely related parts, so a candidate
-    has to clear a similarity floor before it is reported as a match."""
+def pick_best_product(products, keyword, manufacturer=None, mode=MATCH_EXACT):
+    """Choose the product that is the requested part, or say none was.
+
+    A keyword search returns loosely related parts — ask for LM358 and LM358DR
+    comes back, which is a different device in a different package. In exact
+    mode only the part number itself will do; the manufacturer and stock break
+    ties between several spellings of the same number, and never promote a
+    different number.
+    """
     want_mpn = normalize_key(keyword)
     if not want_mpn:
         return None
@@ -188,6 +207,9 @@ def pick_best_product(products, keyword, manufacturer=None):
         score = 0
         if mpn and mpn == want_mpn:
             score += 100
+        elif mode == MATCH_EXACT:
+            # Anything that is not the number asked for is not the part.
+            continue
         elif mpn and (mpn.startswith(want_mpn) or want_mpn.startswith(mpn)):
             score += 50
         elif mpn and (want_mpn in mpn or mpn in want_mpn):
@@ -199,7 +221,34 @@ def pick_best_product(products, keyword, manufacturer=None):
         if score > best_score:
             best_score = score
             best = product
-    return best if best_score >= 20 else None
+
+    floor = 100 if mode == MATCH_EXACT else 20
+    return best if best_score >= floor else None
+
+
+def nearest_product(products, keyword):
+    """The returned part number closest to what was asked for, for the message.
+
+    Only used to explain a rejection, so "closest" here means longest shared
+    opening — enough to tell a missing part from one spelled differently.
+    """
+    want = normalize_key(keyword)
+    best = None
+    best_shared = -1
+    for product in products:
+        mpn = mpn_of(product)
+        key = normalize_key(mpn)
+        if not key:
+            continue
+        shared = 0
+        for a, b in zip(key, want):
+            if a != b:
+                break
+            shared += 1
+        if shared > best_shared:
+            best_shared = shared
+            best = product
+    return best
 
 
 def price_breaks_of(items):

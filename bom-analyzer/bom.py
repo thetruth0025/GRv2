@@ -24,6 +24,7 @@ load_env()
 from bomlib.cache import PartCache  # noqa: E402
 from bomlib.digikey import DigiKeyClient  # noqa: E402
 from bomlib.lookup import LookupService, summarize_bom  # noqa: E402
+from bomlib.normalize import MATCH_EXACT, MATCH_MODES  # noqa: E402
 from bomlib.mouser import MouserClient  # noqa: E402
 from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.report import (  # noqa: E402
@@ -90,6 +91,12 @@ def build_parser():
     )
     parser.add_argument(
         '--limit', type=int, metavar='N', help='Analyze only the first N parts.',
+    )
+    parser.add_argument(
+        '--match', choices=list(MATCH_MODES), default=None,
+        help='How closely a supplier answer must match the part number. "exact" (the '
+             'default) accepts only the same number, ignoring case and punctuation. '
+             '"relaxed" also accepts the closest thing the search returned.',
     )
 
     screening = parser.add_argument_group(
@@ -544,6 +551,11 @@ def parse_pasted(text):
 
 
 def build_service(args):
+    match_mode = args.match or str(
+        os.environ.get('MPN_MATCH') or MATCH_EXACT).strip().lower()
+    if match_mode not in MATCH_MODES:
+        match_mode = MATCH_EXACT
+
     digikey = DigiKeyClient(
         client_id=os.environ.get('DIGIKEY_CLIENT_ID'),
         client_secret=os.environ.get('DIGIKEY_CLIENT_SECRET'),
@@ -551,10 +563,12 @@ def build_service(args):
         site=os.environ.get('DIGIKEY_SITE'),
         language=os.environ.get('DIGIKEY_LANGUAGE'),
         currency=os.environ.get('DIGIKEY_CURRENCY'),
+        match_mode=match_mode,
     )
     mouser = MouserClient(
         api_key=os.environ.get('MOUSER_API_KEY'),
         currency=os.environ.get('MOUSER_CURRENCY'),
+        match_mode=match_mode,
     )
 
     trustedparts = TrustedPartsClient(

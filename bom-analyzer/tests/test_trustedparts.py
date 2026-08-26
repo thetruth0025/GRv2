@@ -2,7 +2,7 @@ import unittest
 
 from bomlib.http_client import HttpError
 from bomlib.lookup import LookupService, summarize_bom
-from bomlib.normalize import Lifecycle, record_to_offer
+from bomlib.normalize import Lifecycle, NoMatch, record_to_offer
 from bomlib.report import build_distributor_rows, has_distributor_detail
 from bomlib.trustedparts import TrustedPartsClient, stock_of
 
@@ -354,6 +354,43 @@ class ExportTests(unittest.TestCase):
         service = LookupService(clients=[Single()], cache=None)
         result = service.lookup_parts([{'row': 1, 'mpn': 'ABC', 'quantity': 1}])
         self.assertFalse(has_distributor_detail(result))
+
+
+class ExactMatchTests(unittest.TestCase):
+    """TrustedParts is keyed on the part number, so a miss is already exact.
+
+    What it did not do was say so: a part number that came back spelled
+    differently was indistinguishable from one nobody carries.
+    """
+
+    def response(self, *numbers):
+        return {'PartResults': [{
+            'PartNumber': number,
+            'Manufacturer': 'Texas Instruments',
+            'Distributors': [],
+        } for number in numbers]}
+
+    def client(self):
+        return TrustedPartsClient(api_key='key')
+
+    def test_a_different_number_is_not_the_part(self):
+        records = self.client().to_records(
+            self.response('LM358DR'), [{'mpn': 'LM358', 'quantity': 1}])
+        answer = records.get('LM358')
+        self.assertIsInstance(answer, NoMatch)
+        self.assertEqual(answer.closest, 'LM358DR')
+
+    def test_punctuation_is_still_the_same_part(self):
+        records = self.client().to_records(
+            self.response('RC0603FR0710KL'), [{'mpn': 'RC0603FR-0710KL', 'quantity': 1}])
+        self.assertNotIsInstance(records.get('RC0603FR-0710KL'), NoMatch)
+
+    def test_an_empty_response_carries_no_near_miss(self):
+        records = self.client().to_records(
+            {'PartResults': []}, [{'mpn': 'LM358', 'quantity': 1}])
+        answer = records.get('LM358')
+        self.assertIsInstance(answer, NoMatch)
+        self.assertIsNone(answer.closest)
 
 
 if __name__ == '__main__':

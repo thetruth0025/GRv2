@@ -260,6 +260,15 @@ if __name__ == '__main__':
 class ScreeningTests(unittest.TestCase):
     """In-house and repeated part numbers must not reach a supplier."""
 
+    def test_health_publishes_the_match_mode(self):
+        # Exact by default: a near neighbour priced as the real part is worse
+        # than no answer at all.
+        self.assertEqual(call('/api/health')['data']['mpnMatch'], 'exact')
+
+    def test_the_configured_clients_are_built_in_that_mode(self):
+        self.assertEqual(server.digikey.match_mode, 'exact')
+        self.assertEqual(server.mouser.match_mode, 'exact')
+
     def test_health_publishes_the_prefixes_so_the_ui_can_warn_first(self):
         result = call('/api/health')
         self.assertEqual(result['data']['ignorePrefixes'],

@@ -9,16 +9,23 @@ import re
 import urllib.parse
 
 from .http_client import HttpError, request_json
-from .normalize import parse_money, parse_quantity
+from .normalize import (
+    MATCH_EXACT,
+    NoMatch,
+    normalize_mpn_key,
+    parse_money,
+    parse_quantity,
+)
 
 SUPPLIER = 'Mouser'
 BASE = 'https://api.mouser.com/api/v1'
 
 
 class MouserClient:
-    def __init__(self, api_key=None, currency='USD'):
+    def __init__(self, api_key=None, currency='USD', match_mode=MATCH_EXACT):
         self.api_key = api_key
         self.currency = currency or 'USD'
+        self.match_mode = match_mode or MATCH_EXACT
 
     id = 'mouser'
     name = SUPPLIER
@@ -56,18 +63,23 @@ class MouserClient:
         results = (data or {}).get('SearchResults') or {}
         parts = results.get('Parts')
         if not isinstance(parts, list) or not parts:
-            return None
-        match = pick_best_part(parts, part.get('mpn'), part.get('manufacturer'))
+            return NoMatch(considered=0)
+        match = pick_best_part(
+            parts, part.get('mpn'), part.get('manufacturer'), self.match_mode)
         if not match:
-            return None
+            near = nearest_part(parts, part.get('mpn'))
+            return NoMatch(
+                closest=(near or {}).get('ManufacturerPartNumber'),
+                manufacturer=(near or {}).get('Manufacturer'),
+                considered=len(parts),
+            )
         return build_record(match, part, self.currency, len(parts))
 
     def fetch_record(self, part):
         return self.to_record(self.search(part.get('mpn')), part)
 
 
-def normalize_key(text):
-    return re.sub(r'[^A-Z0-9]', '', str(text or '').upper())
+normalize_key = normalize_mpn_key
 
 
 def stock_of(part):
@@ -83,7 +95,13 @@ def stock_of(part):
     return parsed if parsed is not None else 0
 
 
-def pick_best_part(parts, mpn, manufacturer=None):
+def pick_best_part(parts, mpn, manufacturer=None, mode=MATCH_EXACT):
+    """Choose the part that is the requested part, or say none was.
+
+    Mouser's search widens to related parts, so in exact mode only the part
+    number itself will do. Manufacturer and stock break ties between several
+    spellings of the same number; they never promote a different number.
+    """
     want_mpn = normalize_key(mpn)
     if not want_mpn:
         return None
@@ -97,6 +115,8 @@ def pick_best_part(parts, mpn, manufacturer=None):
         score = 0
         if candidate_mpn and candidate_mpn == want_mpn:
             score += 100
+        elif mode == MATCH_EXACT:
+            continue
         elif candidate_mpn and (candidate_mpn.startswith(want_mpn) or want_mpn.startswith(candidate_mpn)):
             score += 50
         elif candidate_mpn and (want_mpn in candidate_mpn or candidate_mpn in want_mpn):
@@ -110,7 +130,29 @@ def pick_best_part(parts, mpn, manufacturer=None):
         if score > best_score:
             best_score = score
             best = candidate
-    return best if best_score >= 20 else None
+
+    floor = 100 if mode == MATCH_EXACT else 20
+    return best if best_score >= floor else None
+
+
+def nearest_part(parts, mpn):
+    """The returned part number closest to the request, for the message only."""
+    want = normalize_key(mpn)
+    best = None
+    best_shared = -1
+    for candidate in parts:
+        key = normalize_key(candidate.get('ManufacturerPartNumber'))
+        if not key:
+            continue
+        shared = 0
+        for a, b in zip(key, want):
+            if a != b:
+                break
+            shared += 1
+        if shared > best_shared:
+            best_shared = shared
+            best = candidate
+    return best
 
 
 def price_breaks_of(part):

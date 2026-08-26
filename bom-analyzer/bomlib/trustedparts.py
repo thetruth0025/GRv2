@@ -23,7 +23,13 @@ import json
 import re
 
 from .http_client import HttpError, request_json
-from .normalize import normalize_lifecycle, parse_money, parse_quantity, Lifecycle
+from .normalize import (
+    Lifecycle,
+    NoMatch,
+    normalize_lifecycle,
+    parse_money,
+    parse_quantity,
+)
 
 SUPPLIER = 'TrustedParts'
 BASE = 'https://api.trustedparts.com'
@@ -140,6 +146,13 @@ class TrustedPartsClient:
             candidates = by_key.get(want) or []
             best = pick_best_result(candidates, part.get('manufacturer'))
             if best is None:
+                # Already exact — this lookup is keyed on the normalized part
+                # number, so a miss means the number was not among the results.
+                # Say which numbers were, so a near miss is not read as absent.
+                records[part.get('mpn')] = NoMatch(
+                    closest=nearest_result(results, part.get('mpn')),
+                    considered=len(results),
+                )
                 continue
             record = build_record(best, part, self.currency, links)
             if record:
@@ -206,6 +219,27 @@ def collect_attribution_links(payload):
                 absorb(result.get('Links'))
 
     return {'primary': primary, 'byToken': by_token}
+
+
+def nearest_result(results, mpn):
+    """The returned part number closest to the request, for the message only."""
+    want = normalize_key(mpn)
+    best = None
+    best_shared = -1
+    for result in results or []:
+        number = (result or {}).get('PartNumber')
+        key = normalize_key(number)
+        if not key:
+            continue
+        shared = 0
+        for a, b in zip(key, want):
+            if a != b:
+                break
+            shared += 1
+        if shared > best_shared:
+            best_shared = shared
+            best = number
+    return best
 
 
 def pick_best_result(results, manufacturer=None):

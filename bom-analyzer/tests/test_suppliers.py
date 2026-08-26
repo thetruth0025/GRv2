@@ -5,7 +5,7 @@ from bomlib.digikey import DigiKeyClient
 from bomlib.http_client import HttpError
 from bomlib.lookup import LookupService, summarize_bom
 from bomlib.mouser import MouserClient
-from bomlib.normalize import Lifecycle, record_to_offer
+from bomlib.normalize import Lifecycle, NoMatch, record_to_offer
 
 # Fixtures follow the shapes DigiKey Product Information V4 and the Mouser
 # Search API v1 actually return, trimmed to the fields this app reads.
@@ -139,6 +139,158 @@ class DigiKeyTests(unittest.TestCase):
         self.assertEqual(offer['unitPrice'], 0.1)
 
 
+class MissReasonTests(unittest.TestCase):
+    """What the comparison table says when a supplier had a near miss."""
+
+    def run_one(self, answer):
+        class Client:
+            id, name, configured = 'digikey', 'DigiKey', True
+
+            def fetch_record(self, part):
+                return answer
+
+        service = LookupService(clients=[Client()], cache=None)
+        result = service.lookup_parts([{'row': 1, 'mpn': 'LM358', 'quantity': 1}])
+        return result['rows'][0]['offers']['digikey']
+
+    def test_a_rejected_near_miss_says_what_came_back(self):
+        offer = self.run_one(NoMatch(closest='LM358DR', manufacturer='TI', considered=3))
+        self.assertFalse(offer['found'])
+        self.assertIn('no exact match for LM358', offer['reason'])
+        self.assertIn('LM358DR', offer['reason'])
+
+    def test_nothing_at_all_reads_as_nothing_at_all(self):
+        offer = self.run_one(NoMatch())
+        self.assertEqual(offer['reason'], 'No DigiKey match for LM358')
+
+    def test_a_client_returning_plain_none_still_works(self):
+        # The older contract, still honoured.
+        offer = self.run_one(None)
+        self.assertEqual(offer['reason'], 'No DigiKey match for LM358')
+
+    def test_the_near_miss_survives_the_cache(self):
+        calls = []
+
+        class Client:
+            id, name, configured = 'digikey', 'DigiKey', True
+
+            def fetch_record(self, part):
+                calls.append(part['mpn'])
+                return NoMatch(closest='LM358DR', manufacturer='TI')
+
+        cache = PartCache(ttl_seconds=60, path=None)
+        service = LookupService(clients=[Client()], cache=cache)
+        parts = [{'row': 1, 'mpn': 'LM358', 'quantity': 1}]
+        first = service.lookup_parts(parts)['rows'][0]['offers']['digikey']['reason']
+        second = service.lookup_parts(parts)['rows'][0]['offers']['digikey']['reason']
+        self.assertEqual(calls, ['LM358'])
+        self.assertEqual(first, second)
+        self.assertIn('LM358DR', second)
+
+
+class ExactMatchTests(unittest.TestCase):
+    """A supplier answer only counts when it is the part that was asked for.
+
+    Keyword searches return neighbours: ask DigiKey for LM358 and LM358DR comes
+    back, which is a different device in a different package. Pricing a
+    neighbour as though it were the part is worse than reporting nothing.
+    """
+
+    def digikey_response(self, *mpns):
+        return {'Products': [{
+            'ManufacturerProductNumber': mpn,
+            'Manufacturer': {'Name': 'Texas Instruments'},
+            'ProductDescription': 'Op amp',
+            'QuantityAvailable': 5000,
+            'ProductStatus': {'Status': 'Active'},
+            'ProductVariations': [{
+                'DigiKeyProductNumber': 'DK-' + mpn,
+                'QuantityAvailableforPackageType': 5000,
+                'MinimumOrderQuantity': 1,
+                'StandardPricing': [{'BreakQuantity': 1, 'UnitPrice': 0.5}],
+            }],
+        } for mpn in mpns]}
+
+    def mouser_response(self, *mpns):
+        return {'SearchResults': {'Parts': [{
+            'ManufacturerPartNumber': mpn,
+            'Manufacturer': 'Texas Instruments',
+            'Availability': '5000 In Stock',
+            'PriceBreaks': [{'Quantity': 1, 'Price': '$0.50'}],
+        } for mpn in mpns]}}
+
+    def test_digikey_refuses_a_longer_part_number(self):
+        client = DigiKeyClient(client_id='id', client_secret='s')
+        answer = client.to_record(self.digikey_response('LM358DR'),
+                                  {'mpn': 'LM358', 'quantity': 1})
+        self.assertIsInstance(answer, NoMatch)
+        self.assertEqual(answer.closest, 'LM358DR')
+
+    def test_mouser_refuses_a_longer_part_number(self):
+        client = MouserClient(api_key='key')
+        answer = client.to_record(self.mouser_response('LM358DR'),
+                                  {'mpn': 'LM358', 'quantity': 1})
+        self.assertIsInstance(answer, NoMatch)
+        self.assertEqual(answer.closest, 'LM358DR')
+
+    def test_a_shorter_part_number_is_refused_too(self):
+        client = MouserClient(api_key='key')
+        answer = client.to_record(self.mouser_response('LM358'),
+                                  {'mpn': 'LM358DR', 'quantity': 1})
+        self.assertIsInstance(answer, NoMatch)
+
+    def test_a_suffix_is_part_of_the_number(self):
+        # LM358DR and LM358DR/NOPB are not interchangeable without a decision.
+        client = MouserClient(api_key='key')
+        answer = client.to_record(self.mouser_response('LM358DR/NOPB'),
+                                  {'mpn': 'LM358DR', 'quantity': 1})
+        self.assertIsInstance(answer, NoMatch)
+
+    def test_punctuation_and_case_do_not_make_a_different_part(self):
+        # Distributors punctuate the same number differently; that is spelling,
+        # not identity.
+        client = MouserClient(api_key='key')
+        for returned in ('RC0603FR-0710KL', 'rc0603fr0710kl', 'RC0603FR 0710KL'):
+            record = client.to_record(self.mouser_response(returned),
+                                      {'mpn': 'RC0603FR-0710KL', 'quantity': 1})
+            self.assertNotIsInstance(record, NoMatch, returned)
+            self.assertIsNotNone(record, returned)
+
+    def test_the_exact_one_is_chosen_out_of_a_crowd(self):
+        client = MouserClient(api_key='key')
+        record = client.to_record(
+            self.mouser_response('LM358', 'LM358DR', 'LM358PWR'),
+            {'mpn': 'LM358DR', 'quantity': 1})
+        self.assertNotIsInstance(record, NoMatch)
+        self.assertEqual(record['manufacturerPartNumber'], 'LM358DR')
+
+    def test_relaxed_mode_still_takes_the_closest(self):
+        # Kept for anyone who would rather see a neighbour than nothing.
+        client = MouserClient(api_key='key', match_mode='relaxed')
+        record = client.to_record(self.mouser_response('LM358DR'),
+                                  {'mpn': 'LM358', 'quantity': 1})
+        self.assertNotIsInstance(record, NoMatch)
+        self.assertEqual(record['manufacturerPartNumber'], 'LM358DR')
+        self.assertFalse(record_to_offer(record, {'mpn': 'LM358', 'quantity': 1})['exactMatch'])
+
+    def test_the_rejection_names_what_came_back(self):
+        client = DigiKeyClient(client_id='id', client_secret='s')
+        answer = client.to_record(self.digikey_response('LM358DR', 'LM358PWR'),
+                                  {'mpn': 'LM358', 'quantity': 1})
+        message = answer.describe('DigiKey', 'LM358')
+        self.assertIn('no exact match for LM358', message)
+        self.assertIn('LM358DR', message)
+        self.assertIn('Texas Instruments', message)
+
+    def test_an_empty_response_says_nothing_came_back_at_all(self):
+        client = MouserClient(api_key='key')
+        answer = client.to_record({'SearchResults': {'Parts': []}},
+                                  {'mpn': 'LM358', 'quantity': 1})
+        self.assertIsInstance(answer, NoMatch)
+        self.assertIsNone(answer.closest)
+        self.assertEqual(answer.describe('Mouser', 'LM358'), 'No Mouser match for LM358')
+
+
 class MouserTests(unittest.TestCase):
     def setUp(self):
         self.client = MouserClient(api_key='key')
@@ -166,7 +318,11 @@ class MouserTests(unittest.TestCase):
             'Availability': '5000 In Stock',
             'PriceBreaks': [{'Quantity': 1, 'Price': '$0.02'}],
         }]}}
-        self.assertIsNone(self.client.to_record(noise, {'mpn': 'STM32F103C8T6', 'quantity': 1}))
+        answer = self.client.to_record(noise, {'mpn': 'STM32F103C8T6', 'quantity': 1})
+        # Not a record, and not a bare None either: it names what did come back,
+        # so a rejected near miss reads differently from an absent part.
+        self.assertIsInstance(answer, NoMatch)
+        self.assertEqual(answer.closest, 'CC0805KRX7R9BB104')
 
     def test_obsolete_part_keeps_its_status_through_to_the_offer(self):
         response = {'SearchResults': {'Parts': [{

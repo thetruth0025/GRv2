@@ -396,6 +396,30 @@ class NameJoiningTests(unittest.TestCase):
         )
 
 
+class MatchModeCliTests(unittest.TestCase):
+    """--match decides how closely a supplier answer has to match."""
+
+    def test_exact_is_the_default(self):
+        args = bom.build_parser().parse_args(['bom.csv'])
+        self.assertIsNone(args.match)
+
+    def test_the_mode_reaches_the_clients(self):
+        import os as _os
+        service, _ = bom.build_service(bom.build_parser().parse_args(['bom.csv']))
+        modes = [c.match_mode for c in
+                 [bom.DigiKeyClient(client_id='i', client_secret='s'),
+                  bom.MouserClient(api_key='k')]]
+        self.assertEqual(modes, ['exact', 'exact'])
+
+    def test_relaxed_can_be_asked_for(self):
+        args = bom.build_parser().parse_args(['bom.csv', '--match', 'relaxed'])
+        self.assertEqual(args.match, 'relaxed')
+
+    def test_an_unknown_mode_is_refused_by_the_parser(self):
+        with self.assertRaises(SystemExit):
+            bom.build_parser().parse_args(['bom.csv', '--match', 'fuzzy'])
+
+
 class ScreeningCliTests(unittest.TestCase):
     """The CLI screens the same lines the web app does."""
 
