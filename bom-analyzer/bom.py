@@ -143,6 +143,11 @@ def build_parser():
              'NEXAR_CLIENT_SECRET in .env.',
     )
     obsolescence.add_argument(
+        '--nexar-check', action='store_true',
+        help='Test the Nexar credentials on their own and print exactly what the token '
+             'endpoint said. Nothing else runs.',
+    )
+    obsolescence.add_argument(
         '--dmsms-status', action='append', metavar='STATUS', dest='dmsms_statuses',
         help='Limit the form to these lifecycle statuses, e.g. --dmsms-status Obsolete. '
              'Repeatable. Defaults to every at-risk status.',
@@ -171,6 +176,9 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     paint = Palette(_use_color(args))
     log = _make_logger(args.quiet)
+
+    if args.nexar_check:
+        return check_nexar(paint)
 
     try:
         lines, source = read_bom(args)
@@ -296,6 +304,59 @@ def main(argv=None):
             return code
 
     return check_exit(args.fail_on, summary)
+
+
+def check_nexar(paint):
+    """Exchange the credentials for a token and say what happened.
+
+    Worth its own command because an alternatives run reaches the token
+    endpoint through two layers of UI, and this is the question you actually
+    want answered: do these credentials work, and if not, what did Nexar say.
+    """
+    client = nexar_module.client_from_env()
+    print('Token endpoint: %s' % client.token_url)
+    print('Client ID:      %s' % (
+        (client.client_id[:6] + '…') if client.client_id else paint('(not set)', 'red')))
+    print('Secret:         %s' % (
+        'set (%d characters)' % len(client.client_secret) if client.client_secret
+        else paint('(not set)', 'red')))
+    print('Scope asked:    %s' % (client.scope or '(none)'))
+    print()
+
+    if not client.configured:
+        print('error: set NEXAR_CLIENT_ID and NEXAR_CLIENT_SECRET in .env first',
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    try:
+        token = client.get_token()
+    except Exception as err:
+        print(paint('Failed.', 'red'), err)
+        print()
+        print('If the scope is the problem, NEXAR_SCOPE= (empty) asks for none at all.')
+        return EXIT_ERROR
+
+    print(paint('Token received.', 'green'), '%d characters, scope %s.' % (
+        len(token), client.scope_used or '(none)'))
+    if client.scope_used != client.scope:
+        print('Note: "%s" was refused, so the token was requested without a scope. '
+              'Set NEXAR_SCOPE= in .env to make that the default.' % client.scope)
+
+    print()
+    print('Trying the alternatives query…')
+    try:
+        found = client.find_alternatives({'mpn': 'LM358'})
+    except Exception as err:
+        print(paint('The query failed.', 'red'), err)
+        print()
+        print('Auth is fine, so this is the GraphQL query rather than the credentials. '
+              'NEXAR_QUERY_FILE can point at a corrected one.')
+        return EXIT_ERROR
+
+    matched = found.get('matched')
+    print(paint('The query works.', 'green'), 'Matched %s, %d alternative(s).' % (
+        (matched or {}).get('mpn') or '(nothing)', len(found.get('alternatives') or [])))
+    return EXIT_OK
 
 
 def attach_alternatives(result, log, paint):

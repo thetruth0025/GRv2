@@ -194,6 +194,113 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(transport.calls, [])
 
 
+class TokenFailureTests(unittest.TestCase):
+    """A 400 from the token endpoint has to say which 400 it was."""
+
+    def setUp(self):
+        self._original = nexar.request_json
+
+    def tearDown(self):
+        nexar.request_json = self._original
+
+    def refuse(self, body, status=400):
+        def transport(url, **kwargs):
+            raise HttpError('HTTP %d from identity.nexar.com' % status, status, body)
+        nexar.request_json = transport
+
+    def test_the_reason_reaches_the_message_not_just_the_status(self):
+        # "HTTP 400 from identity.nexar.com" is the one thing nobody can act on.
+        self.refuse({'error': 'invalid_client'})
+        client = nexar.NexarClient(client_id='id', client_secret='wrong')
+        with self.assertRaises(HttpError) as caught:
+            client.get_token()
+        message = str(caught.exception)
+        self.assertIn('invalid_client', message)
+        self.assertIn('NEXAR_CLIENT_SECRET', message)
+        self.assertNotEqual(message, 'HTTP 400 from identity.nexar.com')
+
+    def test_the_endpoints_own_description_is_kept(self):
+        self.refuse({'error': 'invalid_client', 'error_description': 'Client is disabled'})
+        client = nexar.NexarClient(client_id='id', client_secret='s')
+        with self.assertRaises(HttpError) as caught:
+            client.get_token()
+        self.assertIn('Client is disabled', str(caught.exception))
+
+    def test_the_scope_asked_for_is_named(self):
+        self.refuse({'error': 'invalid_scope'})
+        client = nexar.NexarClient(client_id='id', client_secret='s', scope='design.domain')
+        with self.assertRaises(HttpError) as caught:
+            client.get_token()
+        self.assertIn('design.domain', str(caught.exception))
+
+    def test_an_unparseable_body_still_says_what_came_back(self):
+        self.refuse('Bad Request')
+        client = nexar.NexarClient(client_id='id', client_secret='s')
+        with self.assertRaises(HttpError) as caught:
+            client.get_token()
+        self.assertIn('Bad Request', str(caught.exception))
+
+    def test_a_refused_scope_is_retried_without_one(self):
+        # The commonest cause: the application was never granted the scope.
+        # Nexar issues a usable token without one, so the run should continue.
+        asked = []
+
+        def transport(url, method='GET', headers=None, body=None, **kwargs):
+            asked.append(body)
+            if 'scope=' in body:
+                raise HttpError('HTTP 400', 400, {'error': 'invalid_scope'})
+            return {'status': 200, 'data': {'access_token': 'tok', 'expires_in': 3600}}
+
+        nexar.request_json = transport
+        client = nexar.NexarClient(client_id='id', client_secret='s')
+        self.assertEqual(client.get_token(), 'tok')
+        self.assertEqual(len(asked), 2)
+        self.assertIn('scope=supply.domain', asked[0])
+        self.assertNotIn('scope=', asked[1])
+        # And it records which one worked, so the app can say so.
+        self.assertIsNone(client.scope_used)
+
+    def test_any_other_refusal_is_not_retried(self):
+        # Retrying bad credentials without a scope would only fail again, more
+        # slowly and with a less useful message.
+        asked = []
+
+        def transport(url, method='GET', headers=None, body=None, **kwargs):
+            asked.append(body)
+            raise HttpError('HTTP 400', 400, {'error': 'invalid_client'})
+
+        nexar.request_json = transport
+        client = nexar.NexarClient(client_id='id', client_secret='s')
+        with self.assertRaises(HttpError):
+            client.get_token()
+        self.assertEqual(len(asked), 1)
+
+    def test_no_scope_is_asked_for_when_there_is_none(self):
+        sent = []
+
+        def transport(url, method='GET', headers=None, body=None, **kwargs):
+            sent.append(body)
+            return {'status': 200, 'data': {'access_token': 'tok', 'expires_in': 60}}
+
+        nexar.request_json = transport
+        client = nexar.NexarClient(client_id='id', client_secret='s', scope='')
+        client.get_token()
+        self.assertNotIn('scope', sent[0])
+
+
+class ScopeConfigTests(unittest.TestCase):
+    def test_an_unset_scope_uses_the_default(self):
+        self.assertEqual(nexar.client_from_env({}).scope, nexar.SCOPE)
+
+    def test_an_empty_scope_means_ask_for_none(self):
+        # Distinct from unset, exactly as the ignore-prefix list is.
+        self.assertIsNone(nexar.client_from_env({'NEXAR_SCOPE': ''}).scope)
+
+    def test_a_named_scope_is_used_as_given(self):
+        self.assertEqual(nexar.client_from_env({'NEXAR_SCOPE': ' user.access '}).scope,
+                         'user.access')
+
+
 class EnvTests(unittest.TestCase):
     def test_the_client_is_built_from_the_documented_variables(self):
         client = nexar.client_from_env({

@@ -239,6 +239,11 @@
     }
   }
 
+  function truncateText(value, limit) {
+    var text = String(value === null || value === undefined ? '' : value);
+    return text.length <= limit ? text : text.slice(0, limit - 1) + '…';
+  }
+
   function count(value) {
     if (!isFinite(value) || value === null) return '—';
     return Number(value).toLocaleString();
@@ -2419,6 +2424,7 @@
       '<button type="button" class="icon-btn" data-alt="close" aria-label="Close">&times;</button>' +
       '</div></div>' +
       '<div class="report-body">' +
+      altFailureNotice() +
       '<section class="report-section"><h3>Parts worth replacing ' +
       '<span class="aside" data-alt-count></span></h3>' +
       '<div class="btn-row compact">' +
@@ -2441,9 +2447,27 @@
     syncAlternatives();
   }
 
+  // Credentials failing is one problem, not one problem per part. When every
+  // answer carries the same message it belongs at the top, said once, where
+  // there is room to read it.
+  function altFailureNotice() {
+    var answers = Object.keys(altState.answers).map(function (k) { return altState.answers[k]; });
+    if (!answers.length) return '';
+    var errors = answers.filter(function (a) { return a.error; });
+    if (errors.length !== answers.length) return '';
+    var shared = errors[0].error;
+    if (!errors.every(function (a) { return a.error === shared; })) return '';
+
+    return '<section class="report-section"><div class="alt-failure">' +
+      '<strong>' + esc(altState.provider) + ' could not answer</strong>' +
+      '<p>' + esc(shared) + '</p></div></section>';
+  }
+
   function altAnswerCell(answer) {
     if (!answer) return '<span class="muted">—</span>';
-    if (answer.error) return '<span class="err-text">' + esc(answer.error) + '</span>';
+    if (answer.error) {
+      return '<span class="err-text">' + esc(truncateText(answer.error, 90)) + '</span>';
+    }
     var n = (answer.alternatives || []).length;
     if (!n) return '<span class="miss">none found</span>';
     return '<span class="badge info">' + n + '</span>';

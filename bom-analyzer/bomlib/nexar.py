@@ -70,6 +70,65 @@ query BomAlternatives($q: String!, $limit: Int!) {
 """
 
 
+# What an OAuth error code from the token endpoint actually means for someone
+# holding a .env file. RFC 6749 names the codes; none of them say what to do.
+TOKEN_HINTS = {
+    'invalid_client':
+        'NEXAR_CLIENT_ID or NEXAR_CLIENT_SECRET is wrong. Copy both again from the '
+        'application page — a secret truncated on paste looks exactly like this.',
+    'invalid_scope':
+        'the application is not granted the scope being asked for. Set NEXAR_SCOPE to a '
+        'scope it does have, or leave NEXAR_SCOPE empty to ask for none.',
+    'unauthorized_client':
+        'the application exists but is not allowed the client-credentials grant. Check '
+        'its type in the Nexar portal.',
+    'unsupported_grant_type':
+        'the token endpoint did not accept client_credentials. Check NEXAR_TOKEN_URL.',
+    'invalid_request':
+        'the token request was malformed — if NEXAR_TOKEN_URL is set, check it points at '
+        "Nexar's /connect/token endpoint.",
+}
+
+
+def oauth_error_code(error):
+    """The `error` field of an OAuth failure body, if there is one."""
+    body = getattr(error, 'body', None)
+    if isinstance(body, dict):
+        return str(body.get('error') or '').strip()
+    return ''
+
+
+def describe_token_failure(error, scope):
+    """Turn "HTTP 400 from identity.nexar.com" into something actionable.
+
+    The token endpoint answers a failure with a body naming the reason. Raising
+    only the status throws that away and leaves nothing to act on, which is the
+    one thing this wrapper exists to prevent.
+    """
+    body = getattr(error, 'body', None)
+    body = body if isinstance(body, dict) else {}
+    code = str(body.get('error') or '').strip()
+    detail = str(body.get('error_description') or '').strip()
+
+    pieces = ['Nexar refused the credentials']
+    if code:
+        pieces.append('(%s)' % code)
+    if scope:
+        pieces.append('while asking for scope "%s"' % scope)
+    message = ' '.join(pieces) + '.'
+
+    if detail:
+        message += ' ' + detail.rstrip('.') + '.'
+    hint = TOKEN_HINTS.get(code)
+    if hint:
+        message += ' ' + hint[0].upper() + hint[1:]
+    elif not code:
+        # No parseable body: say what came back so it is not a bare status.
+        raw = body or getattr(error, 'body', None)
+        message += ' The endpoint returned: %s' % (raw if raw else str(error))
+    return message
+
+
 def _text(value):
     return str(value).strip() if value not in (None, '') else None
 
@@ -136,7 +195,9 @@ class NexarClient:
                  timeout=25.0):
         self.client_id = client_id
         self.client_secret = client_secret
-        self.scope = scope or SCOPE
+        # None means "not configured", so use the default. An empty string is
+        # somebody saying "ask for no scope", which is a real answer.
+        self.scope = SCOPE if scope is None else (scope.strip() or None)
         self.limit = max(1, int(limit or 1))
         self.alternatives_limit = max(1, int(alternatives_limit or 12))
         self.token_url = token_url or TOKEN_URL
@@ -146,6 +207,8 @@ class NexarClient:
         self._token = None
         self._token_expires_at = 0.0
         self._token_lock = threading.Lock()
+        # Which scope actually produced a token, once one has been minted.
+        self.scope_used = None
 
     id = 'nexar'
     name = SUPPLIER
@@ -154,6 +217,29 @@ class NexarClient:
     def configured(self):
         return bool(self.client_id and self.client_secret)
 
+    def request_token(self, scope):
+        """One token exchange. Omits the scope entirely when there is none."""
+        fields = {
+            'grant_type': 'client_credentials',
+            'client_id': self.client_id,
+            'client_secret': self.client_secret,
+        }
+        if scope:
+            fields['scope'] = scope
+
+        try:
+            result = request_json(
+                self.token_url,
+                method='POST',
+                headers={'Content-Type': 'application/x-www-form-urlencoded'},
+                body=urllib.parse.urlencode(fields),
+                timeout=self.timeout,
+                retries=1,
+            )
+        except HttpError as err:
+            raise HttpError(describe_token_failure(err, scope), err.status, err.body)
+        return result.get('data') or {}
+
     def get_token(self):
         # Collapse concurrent refreshes so a burst of lookups mints one token,
         # exactly as the DigiKey client does.
@@ -161,21 +247,27 @@ class NexarClient:
             if self._token and time.time() < self._token_expires_at:
                 return self._token
 
-            body = urllib.parse.urlencode({
-                'grant_type': 'client_credentials',
-                'client_id': self.client_id,
-                'client_secret': self.client_secret,
-                'scope': self.scope,
-            })
-            result = request_json(
-                self.token_url,
-                method='POST',
-                headers={'Content-Type': 'application/x-www-form-urlencoded'},
-                body=body,
-                timeout=self.timeout,
-                retries=1,
-            )
-            data = result.get('data') or {}
+            try:
+                data = self.request_token(self.scope)
+                self.scope_used = self.scope
+            except HttpError as err:
+                # Much the commonest 400 here: the application was never granted
+                # the scope being asked for. Nexar issues a usable token without
+                # one, so that is worth trying before giving up on the run.
+                if not (self.scope and oauth_error_code(err) == 'invalid_scope'):
+                    raise
+                try:
+                    data = self.request_token(None)
+                except HttpError as second:
+                    # Report the refusal that names the scope, since that is the
+                    # actionable one, and say the fallback was tried as well.
+                    raise HttpError(
+                        '%s Requesting a token with no scope failed too (%s).'
+                        % (err, oauth_error_code(second) or 'no reason given'),
+                        second.status, second.body,
+                    )
+                self.scope_used = None
+
             if not data.get('access_token'):
                 raise HttpError('Nexar token response did not contain an access_token', 0, data)
 
@@ -286,7 +378,7 @@ def client_from_env(env=None):
     return NexarClient(
         client_id=env.get('NEXAR_CLIENT_ID'),
         client_secret=env.get('NEXAR_CLIENT_SECRET'),
-        scope=env.get('NEXAR_SCOPE'),
+        scope=env['NEXAR_SCOPE'] if 'NEXAR_SCOPE' in env else None,
         alternatives_limit=int(env.get('NEXAR_ALTERNATIVES_LIMIT') or 12),
         token_url=env.get('NEXAR_TOKEN_URL'),
         api_url=env.get('NEXAR_API_URL'),

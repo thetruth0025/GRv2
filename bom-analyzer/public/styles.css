@@ -980,3 +980,14 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
   white-space: nowrap;
 }
 .spec b { color: var(--text2); font-weight: 600; }
+
+/* A shared failure — bad credentials, most often — said once with room to
+   read it, rather than repeated into every row of the table. */
+.alt-failure {
+  border: 1px solid rgba(248, 113, 113, .45);
+  background: rgba(248, 113, 113, .07);
+  border-radius: 10px;
+  padding: 13px 15px;
+}
+.alt-failure strong { display: block; color: var(--red); font-size: 0.88rem; }
+.alt-failure p { margin-top: 6px; color: var(--text2); font-size: 0.8rem; line-height: 1.6; }

@@ -225,6 +225,7 @@ the whole analysis, screened-out lines included, for scripting.
 | `--dmsms FILE --program NAME` | Write a DMSMS case form for every at-risk part |
 | `--dmsms-status STATUS` | Narrow the form to given lifecycle statuses (repeatable) |
 | `--alternatives` | Ask Nexar what could replace each at-risk part, and fill in Suggested Replacement |
+| `--nexar-check` | Test the Nexar credentials on their own and print what the token endpoint said |
 | `--list-columns` | Show the detected headers and mapping, then exit |
 | `--mpn-column COL` | Force a column by header name or 0-based index (one flag per field) |
 | `--fail-on risk` | Exit non-zero when any line is flagged — for CI and scripts |
@@ -364,6 +365,24 @@ python3 bom.py my-bom.csv --dmsms falcon-ii.xlsx --program "Falcon II" --alterna
 Nexar needs its own credentials (`NEXAR_CLIENT_ID`, `NEXAR_CLIENT_SECRET`); the button says so if
 they are missing. It is never called during a BOM analysis.
 
+#### If Nexar refuses the credentials
+
+```bash
+python3 bom.py --nexar-check
+```
+
+That exchanges the credentials for a token on their own and prints what the endpoint actually said —
+nothing else runs. A failure there is one of:
+
+| What it says | What it means |
+| --- | --- |
+| `invalid_client` | The ID or secret is wrong. A secret truncated on paste looks exactly like this |
+| `invalid_scope` | The application was not granted the scope being asked for. The app retries once without a scope on its own; if that fails too, set `NEXAR_SCOPE` to a scope your application does have, or `NEXAR_SCOPE=` (empty) to ask for none |
+| `unauthorized_client` | The application is not allowed the client-credentials grant — check its type in the Nexar portal |
+
+The scope defaults to `supply.domain`. Setting `NEXAR_SCOPE=` to an empty value is different from
+leaving it out: empty means *ask for no scope at all*, which is what some Nexar applications want.
+
 ### The DMSMS form
 
 **DMSMS form** collects every at-risk part across all analyzed BOMs — obsolete, discontinued, end of
@@ -472,7 +491,7 @@ Opening the app once removes it for good.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 301 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 311 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py --part STM32F103C8T6          # look one part up
 python3 bom.py samples/sample-bom.csv        # or a whole BOM
