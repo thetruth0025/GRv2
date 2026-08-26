@@ -11,6 +11,49 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 
+# ── Cleaning cells ─────────────────────────────────────────────────────────
+
+# Characters that take up no space on screen and so cannot be seen or deleted
+# in a spreadsheet, but stop a part number matching anything. They arrive by
+# the usual routes: a part number copied out of a PDF datasheet or a web page,
+# an ERP export, a file that has been through a translation tool.
+#
+# Ordinary spaces are not in here — str.strip() already removes those, along
+# with tabs, non-breaking spaces and the rest of the Unicode space characters.
+# These are the ones it leaves behind, because Unicode does not classify them
+# as whitespace at all.
+_INVISIBLE = re.compile(
+    '['
+    '\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f'  # control codes
+    '\u00ad'                                                     # soft hyphen
+    '\u200b-\u200f'                                             # zero-width, bidi marks
+    '\u2028\u2029'                                               # line, paragraph separators
+    '\u202a-\u202e'                                             # bidi embedding
+    '\u2060-\u2064'                                             # word joiner, invisible operators
+    '\ufeff'                                                     # byte-order mark
+    '\ufff9-\ufffb'                                             # interlinear annotation
+    ']'
+)
+
+
+def clean_cell(value):
+    """What a spreadsheet cell actually meant, with the invisible parts gone.
+
+    Leading and trailing space of every Unicode kind is removed, invisible
+    characters are dropped wherever they sit, and a run of spaces inside the
+    value collapses to one. Interior single spaces are kept: a few real part
+    numbers contain one, and guessing which is which would break more than it
+    fixed.
+    """
+    if value is None:
+        return ''
+    text = _INVISIBLE.sub('', str(value))
+    # Runs of horizontal space collapse; a newline inside a quoted CSV field is
+    # part of the value and stays, and str.strip() then takes whitespace of
+    # every Unicode kind off both ends, \xa0 included.
+    return re.sub(r'[^\S\n\r]+', ' ', text).strip()
+
+
 # ── Delimited text ─────────────────────────────────────────────────────────
 
 
@@ -61,7 +104,7 @@ def parse_delimited(text, delimiter=None):
         text = text[1:]
     sep = delimiter or detect_delimiter(text)
     reader = csv.reader(io.StringIO(text, newline=''), delimiter=sep, quotechar='"')
-    return [[cell.strip() for cell in row] for row in reader]
+    return [[clean_cell(cell) for cell in row] for row in reader]
 
 
 # ── XLSX ───────────────────────────────────────────────────────────────────
@@ -173,9 +216,9 @@ def parse_xlsx(data, sheet=0):
             while len(cells) < index:
                 cells.append('')
             if index < len(cells):
-                cells[index] = str(value).strip()
+                cells[index] = clean_cell(value)
             else:
-                cells.append(str(value).strip())
+                cells.append(clean_cell(value))
         rows.append(cells)
     return rows
 
@@ -285,7 +328,9 @@ def line_from_row(row, mapping, row_index):
         index = mapping.get(field)
         if index is None or index >= len(row):
             return ''
-        return str(row[index] if row[index] is not None else '').strip()
+        # The readers clean the grid already; this covers a grid handed back by
+        # a client when a column mapping is corrected.
+        return clean_cell(row[index])
 
     quantity_raw = cell('quantity')
     digits = re.sub(r'[^0-9-]', '', quantity_raw)

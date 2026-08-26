@@ -45,6 +45,7 @@ from bomlib.prepare import (
 )
 from bomlib.spreadsheet import (  # noqa: E402
     FIELD_ORDER,
+    clean_cell,
     extract_bom,
     line_from_row,
     parse_workbook,
@@ -403,7 +404,7 @@ def parse_pasted(text):
         stripped = raw.strip()
         if not stripped or stripped.startswith('#'):
             continue
-        parts = [p.strip() for p in stripped.replace('\t', ',').split(',')]
+        parts = [clean_cell(p) for p in stripped.replace('\t', ',').split(',')]
         mpn = parts[0]
         if not mpn:
             continue

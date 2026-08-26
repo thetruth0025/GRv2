@@ -35,7 +35,7 @@ from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.prepare import normalize_mpn, parse_prefixes, prepare_lines  # noqa: E402
 from bomlib.report import write_report_workbook  # noqa: E402
 from bomlib import dmsms as dmsms_module  # noqa: E402
-from bomlib.spreadsheet import extract_bom, line_from_row, parse_workbook  # noqa: E402
+from bomlib.spreadsheet import clean_cell, extract_bom, line_from_row, parse_workbook  # noqa: E402
 
 PUBLIC_DIR = os.path.join(BASE_DIR, 'public')
 
@@ -290,7 +290,10 @@ class Handler(BaseHTTPRequestHandler):
         for i, entry in enumerate(raw_parts):
             if not isinstance(entry, dict):
                 continue
-            mpn = str(entry.get('mpn') or '').strip()
+            # Cleaned here as well as at parse time, so a part number typed
+            # into the lookup grid or posted by any other client cannot carry
+            # an invisible character into a supplier query.
+            mpn = clean_cell(entry.get('mpn'))
             if not mpn:
                 continue
             quantity = entry.get('quantity')
@@ -300,9 +303,9 @@ class Handler(BaseHTTPRequestHandler):
                 'row': row if isinstance(row, int) else i + 1,
                 'mpn': mpn,
                 'quantity': quantity,
-                'manufacturer': str(entry['manufacturer']).strip() if entry.get('manufacturer') else None,
-                'reference': str(entry['reference']).strip() if entry.get('reference') else None,
-                'description': str(entry['description']).strip() if entry.get('description') else None,
+                'manufacturer': clean_cell(entry.get('manufacturer')) or None,
+                'reference': clean_cell(entry.get('reference')) or None,
+                'description': clean_cell(entry.get('description')) or None,
             })
 
         if not parts:

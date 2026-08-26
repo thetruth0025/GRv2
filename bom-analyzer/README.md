@@ -36,6 +36,15 @@ automatically — `Qty`, `MPN`, `Mfr. Part #`, `RefDes` and the other spellings 
 map to the right field, and a title block above the header row does not confuse it. If a guess is
 wrong you can remap any column from a dropdown without re-uploading.
 
+**Cleans the cells on the way in.** Part numbers arrive padded: indented in the cell, copied out of
+a datasheet PDF, exported from an ERP. Spaces and tabs either side are trimmed, and so are the
+characters that only *look* like spaces — zero-width space, byte-order mark, soft hyphen, word
+joiner, the bidi marks. Those are the ones that matter, because Unicode does not classify them as
+whitespace, so nothing strips them and they are invisible in a spreadsheet: you cannot find them to
+delete, and the part matches nothing. A padded part number and a clean one are then the same part,
+which is the difference between one line at the full quantity and two lookups that each half-price
+the buy.
+
 **Looks each part up at every supplier.** One query per distinct part number per supplier, run
 with bounded parallelism and cached, so a 200-line BOM with repeated part numbers does not burn
 through a free-tier quota. TrustedParts accepts up to 50 parts per request, so that whole BOM
@@ -402,7 +411,7 @@ Opening the app once removes it for good.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 236 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 250 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py --part STM32F103C8T6          # look one part up
 python3 bom.py samples/sample-bom.csv        # or a whole BOM
@@ -411,7 +420,7 @@ python3 bom.py samples/sample-bom.csv        # or a whole BOM
 ```
 server.py                 HTTP server, static hosting, API routes, SSE streaming
 bom.py                    Command-line front end: argument parsing, terminal output
-bomlib/spreadsheet.py     CSV/TSV parsing, .xlsx reading, header detection, column mapping
+bomlib/spreadsheet.py     CSV/TSV parsing, .xlsx reading, cell cleaning, header detection, column mapping
 bomlib/digikey.py         OAuth 2.0 + Product Information V4 → catalog record
 bomlib/mouser.py          Search API v1 → catalog record
 bomlib/trustedparts.py    Inventory API v2 (aggregator, batched) → catalog record
@@ -446,9 +455,11 @@ The tests cover the parts that are easy to get quietly wrong: price break select
 minimum-order and packaging-multiple arithmetic, the lead time and lifecycle vocabularies of both
 suppliers, packaging choice, header detection against four different BOM dialects, `.xlsx`
 container reading, `.xlsx` writing, the CSV formula-injection guard, the CLI's column overrides
-and exit codes, the comparison verdicts, and screening — that a prefix only counts at the start of
+and exit codes, the comparison verdicts, screening — that a prefix only counts at the start of
 a part number, that `ASY1` is not `ASY0`, that merging adds quantities without mutating the caller's
-lines, and that a BOM of nothing but in-house numbers costs zero API calls. Supplier clients are tested against recorded response
+lines, and that a BOM of nothing but in-house numbers costs zero API calls — and cell cleaning,
+including every flavour of padding through both readers and the fact that a padded part and a clean
+one merge rather than splitting in two. Supplier clients are tested against recorded response
 shapes, so no network access is needed.
 
 ---
@@ -470,6 +481,9 @@ shapes, so no network access is needed.
   said today, which can lag a manufacturer's PCN and can differ between distributors for the same
   part. The form names its source and the date so the entry can be checked; confirm against the
   manufacturer before a case turns into a buy.
+- **Cell cleaning keeps one interior space.** A run of spaces inside a value collapses to one, but a
+  single space between characters is left alone: a few real part numbers carry one, and guessing
+  which is which would break more than it fixed.
 - **Screening is by prefix, not by meaning.** `ASY0`, `CBL0`, `DES0` and `PCB0` are assumed to be
   in-house numbering. If a real manufacturer part number starts with one of those, set
   `IGNORE_PART_PREFIXES` to something narrower, clear it to let everything through, or just look the

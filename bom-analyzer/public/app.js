@@ -182,6 +182,21 @@
 
   // ── Small helpers ────────────────────────────────────────────────────────
 
+  // The same invisible characters bomlib/spreadsheet.py strips out of an
+  // uploaded cell. A part number pasted from a datasheet PDF or a web page
+  // routinely carries one, it cannot be seen or deleted in a text box, and it
+  // stops the part matching anything. Ordinary spaces are handled by trim().
+  var INVISIBLE = new RegExp(
+    '[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f' +
+    '\u00ad\u200b-\u200f\u2028\u2029\u202a-\u202e' +
+    '\u2060-\u2064\ufeff\ufff9-\ufffb]', 'g'
+  );
+
+  function cleanCell(value) {
+    if (value === null || value === undefined) return '';
+    return String(value).replace(INVISIBLE, '').replace(/[^\S\n\r]+/g, ' ').trim();
+  }
+
   function esc(value) {
     if (value === null || value === undefined) return '';
     return String(value)
@@ -370,7 +385,7 @@
       if (!line || line.charAt(0) === '#') return;
 
       var fields = line.split(line.indexOf('\t') !== -1 ? /\t/ : /[,;]/)
-        .map(function (piece) { return piece.trim(); })
+        .map(cleanCell)
         .filter(function (piece) { return piece; });
       if (!fields.length) return;
 
@@ -456,9 +471,9 @@
   function readLookupRows() {
     var lines = [];
     lookupRowElements().forEach(function (row) {
-      var mpn = row.querySelector('.mpn').value.trim();
+      var mpn = cleanCell(row.querySelector('.mpn').value);
       if (!mpn) return;
-      var description = row.querySelector('.desc').value.trim();
+      var description = cleanCell(row.querySelector('.desc').value);
       var quantity = parseQuantity(row.querySelector('.qty').value);
       lines.push({
         row: lines.length + 1,

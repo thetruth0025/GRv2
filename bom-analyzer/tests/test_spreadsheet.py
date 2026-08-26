@@ -3,6 +3,7 @@ import unittest
 import zipfile
 
 from bomlib.spreadsheet import (
+    clean_cell,
     detect_delimiter,
     extract_bom,
     find_header_row,
@@ -191,3 +192,112 @@ class XlsxTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CleanCellTests(unittest.TestCase):
+    """Whitespace and invisible characters around a part number.
+
+    A part number arrives padded far more often than not — copied from a
+    datasheet PDF, an ERP export, an indented BOM. Some of that padding is
+    ordinary space, and some of it is characters Unicode does not call
+    whitespace at all, which are invisible in a spreadsheet and so cannot be
+    found and deleted by hand. They are written as escapes here for the same
+    reason: in a source file they would be just as invisible.
+    """
+
+    # Space characters. str.strip() already knows about all of these.
+    SPACES = (' ', '\t', '\xa0', ' ', ' ', '　', ' ')
+
+    # Not whitespace to Unicode, so nothing strips them: zero-width space,
+    # byte-order mark, word joiner, soft hyphen, left-to-right mark, and a
+    # bidi embedding control.
+    HIDDEN = ('​', '﻿', '⁠', '\xad', '‎', '‪')
+
+    def test_ordinary_space_before_and_after_goes(self):
+        self.assertEqual(clean_cell('   RC0603FR-0710KL'), 'RC0603FR-0710KL')
+        self.assertEqual(clean_cell('RC0603FR-0710KL   '), 'RC0603FR-0710KL')
+        self.assertEqual(clean_cell('\tRC0603FR-0710KL\t'), 'RC0603FR-0710KL')
+
+    def test_every_unicode_space_counts_as_space(self):
+        for space in self.SPACES:
+            self.assertEqual(clean_cell(space + 'ABC123' + space), 'ABC123', repr(space))
+
+    def test_invisible_characters_go_too(self):
+        for hidden in self.HIDDEN:
+            self.assertEqual(clean_cell(hidden + 'ABC123'), 'ABC123', repr(hidden))
+            self.assertEqual(clean_cell('ABC123' + hidden), 'ABC123', repr(hidden))
+
+    def test_an_invisible_character_in_the_middle_goes_as_well(self):
+        self.assertEqual(clean_cell('ABC​123'), 'ABC123')
+
+    def test_a_run_of_spaces_inside_collapses_to_one(self):
+        self.assertEqual(clean_cell('RES   SMD   10K'), 'RES SMD 10K')
+
+    def test_a_single_interior_space_is_left_alone(self):
+        # A few real part numbers carry one, and guessing which would break
+        # more than it fixed.
+        self.assertEqual(clean_cell('RES SMD 10K'), 'RES SMD 10K')
+
+    def test_a_newline_inside_a_quoted_field_survives(self):
+        self.assertEqual(clean_cell('two\nlines'), 'two\nlines')
+
+    def test_a_cell_of_nothing_but_padding_comes_back_empty(self):
+        for blank in ('', '   ', '​', '\xa0​ '):
+            self.assertEqual(clean_cell(blank), '', repr(blank))
+
+    def test_non_text_values_are_handled(self):
+        self.assertEqual(clean_cell(None), '')
+        self.assertEqual(clean_cell(42), '42')
+
+
+class PaddedPartNumberTests(unittest.TestCase):
+    """The same padding, arriving through each reader."""
+
+    def csv_mpn(self, raw):
+        text = 'Manufacturer Part Number,Qty\n"%s",100\n' % raw
+        lines = extract_bom(parse_delimited(text))['lines']
+        return lines[0]['mpn'] if lines else None
+
+    def test_a_padded_part_number_in_a_csv_is_read_clean(self):
+        for raw in ('   RC0603FR-0710KL', '​RC0603FR-0710KL',
+                    '\xa0 RC0603FR-0710KL ', '﻿RC0603FR-0710KL'):
+            self.assertEqual(self.csv_mpn(raw), 'RC0603FR-0710KL', repr(raw))
+
+    def test_a_padded_part_number_in_a_workbook_is_read_clean(self):
+        from bomlib.xlsx_writer import write_xlsx
+        buffer = io.BytesIO()
+        write_xlsx(buffer, [
+            ['Manufacturer Part Number', 'Qty'],
+            ['   RC0603FR-0710KL', 100],
+            ['​STM32F103C8T6', 25],
+            ['\xa0LM358DR ', 50],
+        ])
+        lines = extract_bom(parse_workbook(buffer.getvalue(), 'bom.xlsx'))['lines']
+        self.assertEqual([line['mpn'] for line in lines],
+                         ['RC0603FR-0710KL', 'STM32F103C8T6', 'LM358DR'])
+
+    def test_a_row_padded_into_looking_full_is_still_skipped(self):
+        # A cell holding only invisible characters is an empty cell.
+        text = 'Manufacturer Part Number,Qty\n"​   ",100\nABC123,5\n'
+        parsed = extract_bom(parse_delimited(text))
+        self.assertEqual([line['mpn'] for line in parsed['lines']], ['ABC123'])
+
+    def test_padding_does_not_split_one_part_into_two(self):
+        # The point of all of it: a padded part and a clean one are the same
+        # part, so they merge rather than costing two lookups.
+        from bomlib.prepare import prepare_lines
+        text = ('Manufacturer Part Number,Qty\n'
+                '"  ABC123",10\n'
+                '"​ABC123",20\n'
+                'ABC123,30\n')
+        lines = extract_bom(parse_delimited(text))['lines']
+        screened = prepare_lines(lines)
+        self.assertEqual([line['mpn'] for line in screened['lines']], ['ABC123'])
+        self.assertEqual(screened['lines'][0]['quantity'], 60)
+
+    def test_other_columns_are_cleaned_the_same_way(self):
+        text = ('Manufacturer Part Number,Qty,Manufacturer,Description\n'
+                'ABC123,5,"​ Yageo ","  RES   SMD  "\n')
+        line = extract_bom(parse_delimited(text))['lines'][0]
+        self.assertEqual(line['manufacturer'], 'Yageo')
+        self.assertEqual(line['description'], 'RES SMD')
