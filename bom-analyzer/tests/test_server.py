@@ -455,6 +455,112 @@ class DmsmsTests(unittest.TestCase):
                                     'rows': [{'quantity': 1}]})['status'], 400)
 
 
+class AlternativesTests(unittest.TestCase):
+    """Nexar runs only when asked, and only for the parts named."""
+
+    def post(self, payload):
+        return call('/api/alternatives', 'POST', json.dumps(payload),
+                    {'Content-Type': 'application/json'})
+
+    def test_health_says_whether_alternatives_can_be_looked_up(self):
+        data = call('/api/health')['data']['alternatives']
+        self.assertEqual(data['provider'], 'Nexar')
+        # No credentials in this environment.
+        self.assertFalse(data['configured'])
+        self.assertTrue(data['maxParts'] > 0)
+
+    def test_without_credentials_it_says_so_rather_than_failing_obscurely(self):
+        result = self.post({'parts': [{'mpn': 'ABC123'}]})
+        self.assertEqual(result['status'], 400)
+        self.assertIn('NEXAR_CLIENT_ID', result['data']['error'])
+
+    def test_alternatives_are_never_part_of_a_bom_lookup(self):
+        # A BOM run must not spend a Nexar call: the endpoint is separate on
+        # purpose, and /api/lookup knows nothing about it.
+        result = call('/api/lookup', 'POST',
+                      json.dumps({'parts': [{'row': 1, 'mpn': 'ASY0-1', 'quantity': 1}]}),
+                      {'Content-Type': 'application/json'})
+        self.assertNotIn('alternatives', result['data'])
+
+
+class ConfiguredAlternativesTests(unittest.TestCase):
+    """With a client in place, driven through the real endpoint."""
+
+    def setUp(self):
+        self.original = server.nexar
+        self.asked = []
+
+        class Stub:
+            configured = True
+
+            def find_alternatives(inner, part):
+                self.asked.append(part['mpn'])
+                if part['mpn'] == 'BOOM':
+                    raise RuntimeError("Cannot query field 'similarParts'")
+                if part['mpn'] == 'NOMATCH':
+                    return {'matched': None, 'alternatives': []}
+                return {
+                    'matched': {'mpn': part['mpn'], 'manufacturer': 'Acme'},
+                    'alternatives': [{'mpn': part['mpn'] + '-ALT', 'manufacturer': 'Beta',
+                                      'stock': 100, 'specs': []}],
+                }
+
+        server.nexar = Stub()
+
+    def tearDown(self):
+        server.nexar = self.original
+        server.cache.clear()
+
+    def post(self, parts):
+        return call('/api/alternatives', 'POST', json.dumps({'parts': parts}),
+                    {'Content-Type': 'application/json'})
+
+    def test_each_part_comes_back_with_what_was_found_for_it(self):
+        data = self.post([{'mpn': 'ABC123', 'manufacturer': 'Acme'}])['data']
+        self.assertEqual(data['provider'], 'Nexar')
+        result = data['results'][0]
+        self.assertEqual(result['mpn'], 'ABC123')
+        self.assertEqual(result['matched']['mpn'], 'ABC123')
+        self.assertEqual([a['mpn'] for a in result['alternatives']], ['ABC123-ALT'])
+        self.assertIsNone(result['error'])
+
+    def test_a_failure_on_one_part_does_not_lose_the_others(self):
+        data = self.post([{'mpn': 'AAA'}, {'mpn': 'BOOM'}, {'mpn': 'CCC'}])['data']
+        by_mpn = {r['mpn']: r for r in data['results']}
+        self.assertEqual(len(by_mpn['AAA']['alternatives']), 1)
+        self.assertIn('similarParts', by_mpn['BOOM']['error'])
+        self.assertEqual(len(by_mpn['CCC']['alternatives']), 1)
+        self.assertEqual(data['stats']['errors'], 1)
+
+    def test_a_part_with_no_match_is_reported_plainly(self):
+        result = self.post([{'mpn': 'NOMATCH'}])['data']['results'][0]
+        self.assertIsNone(result['matched'])
+        self.assertEqual(result['alternatives'], [])
+        self.assertIsNone(result['error'])
+
+    def test_a_second_ask_for_the_same_part_is_served_from_cache(self):
+        self.post([{'mpn': 'ABC123'}])
+        again = self.post([{'mpn': 'ABC123'}])['data']
+        self.assertEqual(self.asked, ['ABC123'])
+        self.assertEqual(again['stats']['cacheHits'], 1)
+        self.assertEqual(again['stats']['apiCalls'], 0)
+
+    def test_a_failure_is_not_cached_so_the_next_run_retries(self):
+        self.post([{'mpn': 'BOOM'}])
+        self.post([{'mpn': 'BOOM'}])
+        self.assertEqual(self.asked, ['BOOM', 'BOOM'])
+
+    def test_part_numbers_are_cleaned_before_being_asked_about(self):
+        self.post([{'mpn': '  \u200bABC123 '}])
+        self.assertEqual(self.asked, ['ABC123'])
+
+    def test_an_empty_or_oversized_request_is_refused(self):
+        self.assertEqual(self.post([])['status'], 400)
+        self.assertEqual(self.post([{'mpn': ''}])['status'], 400)
+        too_many = [{'mpn': 'P%d' % i} for i in range(server.MAX_ALTERNATIVE_PARTS + 1)]
+        self.assertEqual(self.post(too_many)['status'], 400)
+
+
 class ReportTests(unittest.TestCase):
     """The workbook is built from results the client already holds."""
 

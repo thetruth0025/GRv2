@@ -199,6 +199,7 @@
       <div class="chips" id="filterChips" role="group" aria-label="Result filters"></div>
       <button type="button" id="reportBtn" class="btn primary small">Summary report</button>
       <button type="button" id="dmsmsBtn" class="btn ghost small">DMSMS form</button>
+      <button type="button" id="altBtn" class="btn ghost small">Find alternatives</button>
       <button type="button" id="exportBtn" class="btn ghost small">Export CSV</button>
     </div>
 
@@ -226,7 +227,7 @@
     <h2><span class="num">!</span> Backend not reachable</h2>
     <p class="sub">This app needs its Python backend running. Neither supplier API can be called straight from a browser: DigiKey requires an OAuth client secret and Mouser requires an API key, and neither sends the CORS headers a browser would need.</p>
     <ol class="steps">
-      <li>Get free API credentials: a client ID and secret from <a href="https://developer.digikey.com/" target="_blank" rel="noopener">developer.digikey.com</a>, an API key from <a href="https://www.mouser.com/api-hub/" target="_blank" rel="noopener">mouser.com/api-hub</a>, and one from <a href="https://www.trustedparts.com/" target="_blank" rel="noopener">trustedparts.com</a> under My Account &rarr; Additional Features. Any one alone is enough to start.</li>
+      <li>Get free API credentials: a client ID and secret from <a href="https://developer.digikey.com/" target="_blank" rel="noopener">developer.digikey.com</a>, an API key from <a href="https://www.mouser.com/api-hub/" target="_blank" rel="noopener">mouser.com/api-hub</a>, and one from <a href="https://www.trustedparts.com/" target="_blank" rel="noopener">trustedparts.com</a> under My Account &rarr; Additional Features. Any one alone is enough to start. <a href="https://nexar.com/" target="_blank" rel="noopener">Nexar</a> is optional and only powers <strong>Find alternatives</strong>.</li>
       <li>In <code>bom-analyzer/</code>, copy <code>.env.example</code> to <code>.env</code> and fill in the credentials you have.</li>
       <li>Run <code>python3 server.py</code> — or <code>py server.py</code> on Windows (Python 3.8 or newer, standard library only, nothing to install).</li>
       <li>Open <code>http://localhost:8787</code>, or set the backend URL in Settings if you are running it elsewhere.</li>
@@ -243,6 +244,9 @@
 
 <div id="dmsmsOverlay" class="report-overlay" role="dialog" aria-modal="true"
      aria-labelledby="dmsmsTitle" hidden></div>
+
+<div id="altOverlay" class="report-overlay" role="dialog" aria-modal="true"
+     aria-labelledby="altTitle" hidden></div>
 
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 

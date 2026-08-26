@@ -159,6 +159,16 @@ def preferred_offer(row):
 
 
 def suggested_replacement(row):
+    """What to use instead, if anything has said so.
+
+    An alternative found through Nexar wins over a supplier's own suggestion:
+    it was looked up deliberately for this part, whereas the supplier field is
+    whatever happened to be attached to the catalogue entry.
+    """
+    named = row.get('suggestedReplacement')
+    if named:
+        return str(named)
+
     for offer in (row.get('offers') or {}).values():
         if offer and offer.get('suggestedReplacement'):
             return offer['suggestedReplacement']

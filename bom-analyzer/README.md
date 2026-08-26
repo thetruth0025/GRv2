@@ -79,6 +79,12 @@ stock, so part numbers starting with `ASY0`, `CBL0`, `DES0` or `PCB0` never reac
 list is configurable, nothing is silently dropped, and every skipped line stays visible with the
 reason it was skipped.
 
+**Finds alternatives to a part in trouble.** Nexar (Altium) answers a different question from the
+three suppliers: not what a part costs, but what could be used instead. It runs only for parts the
+comparison has already found to be obsolete, NRND, end of life or simply unavailable — and only for
+the ones you tick — so a free-tier quota is spent on the parts that need it rather than on every
+line of a healthy BOM. What it finds fills the DMSMS form's Suggested Replacement column.
+
 **Fills a DMSMS form per program.** Parts whose supply is ending — obsolete, discontinued, end of
 life, last time buy, NRND — are collected across every analyzed BOM into a picker. Tick the ones
 belonging to a program, name it, and out comes a DMSMS case form as Excel. A part can sit on three
@@ -133,13 +139,14 @@ needs nothing but Python 3.8 or newer, which macOS and every Linux distribution 
 
 ### 1. Get API credentials
 
-Both are free. Either one alone is enough to start — the app just shows one supplier column.
+All are free to start. Any one supplier alone is enough — the app just shows fewer columns.
 
 | Supplier | Where | What you need |
 | --- | --- | --- |
 | DigiKey | [developer.digikey.com](https://developer.digikey.com/) | Create an organization and an app, add the **Product Information** API to it, then copy the **Client ID** and **Client Secret** |
 | Mouser | [mouser.com/api-hub](https://www.mouser.com/api-hub/) | Request a **Search API** key (not the Order API key) |
 | TrustedParts | [trustedparts.com](https://www.trustedparts.com/) | Register, then request API access under **My Account → Additional Features**. The key arrives as *Trial* with an expiry — email `user-requests@trustedparts.com` to move it to *Active* |
+| Nexar *(optional)* | [nexar.com](https://nexar.com/) | Create an application and copy its **Client ID** and **Client Secret**. Only needed for **Find alternatives** — the rest of the app works without it |
 
 DigiKey issues both Sandbox and Production keys. Sandbox returns fixed demo data, so use the
 Production pair unless you are specifically testing against the sandbox.
@@ -217,6 +224,7 @@ the whole analysis, screened-out lines included, for scripting.
 | `--show-skipped` | List every skipped line and why |
 | `--dmsms FILE --program NAME` | Write a DMSMS case form for every at-risk part |
 | `--dmsms-status STATUS` | Narrow the form to given lifecycle statuses (repeatable) |
+| `--alternatives` | Ask Nexar what could replace each at-risk part, and fill in Suggested Replacement |
 | `--list-columns` | Show the detected headers and mapping, then exit |
 | `--mpn-column COL` | Force a column by header name or 0-based index (one flag per field) |
 | `--fail-on risk` | Exit non-zero when any line is flagged — for CI and scripts |
@@ -333,6 +341,29 @@ column in the browser does the same.
 Typed lookups ignore the column entirely, as they ignore every other screening rule: a part number
 you entered by hand is a direct question, and it gets answered.
 
+### Finding alternatives
+
+**Find alternatives** lists every analyzed part worth replacing — obsolete, discontinued, end of
+life, NRND, last time buy, plus any part no supplier carries or nobody holds the quantity for —
+with the reason beside it. The ones that are gone are ticked; a part that is merely short on stock
+is listed and left for you, because that is a judgement call.
+
+Tick what you want asked about and the selected parts go to Nexar in one request. Each comes back
+with the part Nexar matched — shown on purpose, since a suggestion is only worth as much as the
+match it came from — and its alternatives, with manufacturer, stock, median price, factory lead time
+and the key specifications, so you can see *why* something is being offered rather than taking the
+word for it. Answers are cached like every other lookup, so asking twice is free.
+
+What it finds flows into the DMSMS form's **Suggested Replacement** column, which is the point of
+going looking. On the command line, `--alternatives` does the same for every at-risk part:
+
+```bash
+python3 bom.py my-bom.csv --dmsms falcon-ii.xlsx --program "Falcon II" --alternatives
+```
+
+Nexar needs its own credentials (`NEXAR_CLIENT_ID`, `NEXAR_CLIENT_SECRET`); the button says so if
+they are missing. It is never called during a BOM analysis.
+
 ### The DMSMS form
 
 **DMSMS form** collects every at-risk part across all analyzed BOMs — obsolete, discontinued, end of
@@ -441,7 +472,7 @@ Opening the app once removes it for good.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 269 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 301 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py --part STM32F103C8T6          # look one part up
 python3 bom.py samples/sample-bom.csv        # or a whole BOM
@@ -454,6 +485,7 @@ bomlib/spreadsheet.py     CSV/TSV parsing, .xlsx reading, cell cleaning, header 
 bomlib/digikey.py         OAuth 2.0 + Product Information V4 → catalog record
 bomlib/mouser.py          Search API v1 → catalog record
 bomlib/trustedparts.py    Inventory API v2 (aggregator, batched) → catalog record
+bomlib/nexar.py           Nexar GraphQL: what could be used instead of a part in trouble
 bomlib/normalize.py       Lead time, lifecycle and price-break normalization; cross-supplier comparison
 bomlib/prepare.py         Screening: the BOM's skip column, in-house prefixes, duplicates, parts another BOM owns
 bomlib/lookup.py          Deduplication, caching, concurrency, BOM roll-up
@@ -507,6 +539,14 @@ shapes, so no network access is needed.
   is not quoted again for the others, so its price and lead time reflect the quantity of whichever
   BOM you ran first. The report names the other BOMs and what they need, but it does not reprice
   the line at the combined quantity — buying the total in one order would usually be cheaper still.
+- **The Nexar query has not been run against a live schema.** It was written from Nexar's Supply
+  schema in a sandbox with no route to `api.nexar.com`, so the field names are documented rather
+  than verified. GraphQL fails loudly — a wrong field comes back as *"Cannot query field X"* — and
+  that message is shown as-is rather than swallowed, so a mismatch is visible immediately. Point
+  `NEXAR_QUERY_FILE` at your own query to fix one without waiting for a code change.
+- **An alternative is a suggestion, not a substitute.** Nexar's `similarParts` is matched on
+  attributes, not on your circuit. The specs travel with each suggestion so you can judge it, and
+  nothing here has been checked against your board.
 - **The DMSMS form reports, it does not adjudicate.** Lifecycle status is what a distributor's API
   said today, which can lag a manufacturer's PCN and can differ between distributors for the same
   part. The form names its source and the date so the entry can be checked; confirm against the

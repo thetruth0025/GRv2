@@ -40,6 +40,9 @@
     health: null,
     boms: [],
     activeId: null,
+    // Alternatives found for a part number, keyed by the normalized number.
+    // Not per BOM: the same part on two boards has the same replacements.
+    alternatives: {},
   };
 
   var nextBomId = 1;
@@ -118,6 +121,7 @@
     'setupCard', 'toast', 'attribution',
     'bomBar', 'bomTabs', 'bomCount', 'analyzeAllBtn', 'closeAllBtn',
     'reportBtn', 'skippedNote', 'reportOverlay', 'dmsmsBtn', 'dmsmsOverlay',
+    'altBtn', 'altOverlay',
   ].forEach(function (id) {
     el[id] = document.getElementById(id);
   });
@@ -2042,6 +2046,7 @@
             lifecycle: candidate.status, lifecycleSeverity: candidate.severity,
           }) + '</td>' +
           '<td class="num">' + count(dmsmsStock(row)) + '</td>' +
+          '<td>' + dmsmsReplacementCell(row) + '</td>' +
           '<td><span class="risk ' + esc(dmsmsRisk(row).toLowerCase()) + '">' +
           esc(dmsmsRisk(row)) + '</span></td>' +
           '</tr>';
@@ -2056,7 +2061,8 @@
         '<div class="report-scroll"><table class="report-table dmsms-table">' +
         '<thead><tr><th class="tick"></th><th>Part</th><th>Reference</th>' +
         '<th class="num">Qty</th><th>Status</th><th class="num">Stock</th>' +
-        '<th>Suggested risk</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+        '<th>Replacement</th><th>Suggested risk</th></tr></thead><tbody>' +
+        rows + '</tbody></table></div></div>';
     }).join('');
 
     el.dmsmsOverlay.innerHTML =
@@ -2125,6 +2131,23 @@
         if (aside) aside.textContent = picked + ' of ' + rows.length + ' selected';
       }
     );
+  }
+
+  // Whether anything has been found to put in the form's Suggested Replacement
+  // column yet, so it is visible that running Find alternatives fills it in.
+  function dmsmsReplacementCell(row) {
+    var found = state.alternatives[normalizeMpn(row.mpn)];
+    if (found && found.length) {
+      return '<span class="mpn-cell">' + esc(found[0].mpn) + '</span>' +
+        (found.length > 1 ? '<span class="muted"> +' + (found.length - 1) + '</span>' : '');
+    }
+    var offered = null;
+    Object.keys(row.offers).forEach(function (id) {
+      var offer = row.offers[id];
+      if (!offered && offer && offer.suggestedReplacement) offered = offer.suggestedReplacement;
+    });
+    if (offered) return '<span class="mpn-cell">' + esc(offered) + '</span>';
+    return '<span class="muted">—</span>';
   }
 
   function dmsmsStock(row) {
@@ -2241,7 +2264,16 @@
         // Which board a part sits on is the form's Next Higher Assembly, and
         // only the browser knows which BOM each selected row came from.
         rows: chosen.map(function (candidate) {
-          return Object.assign({}, candidate.row, { assembly: candidate.bom });
+          var extra = { assembly: candidate.bom };
+          var found = state.alternatives[normalizeMpn(candidate.row.mpn)];
+          if (found && found.length) {
+            // The first two: a case form wants a lead to follow, not a
+            // catalogue. The rest stay in the alternatives panel.
+            extra.suggestedReplacement = found.slice(0, 2).map(function (alt) {
+              return alt.mpn + (alt.manufacturer ? ' (' + alt.manufacturer + ')' : '');
+            }).join('; ');
+          }
+          return Object.assign({}, candidate.row, extra);
         }),
       }),
     })
@@ -2256,6 +2288,310 @@
       })
       .catch(function (err) {
         toast(err.message || 'Could not build the form', true);
+      });
+  }
+
+  // ── Alternative parts ────────────────────────────────────────────────────
+  //
+  // Nexar answers a different question from the three suppliers: not "what does
+  // this cost" but "what could I use instead". It runs only for parts already
+  // found to be in trouble, and only when asked, so a free-tier quota is spent
+  // on the parts that need it rather than on every line of a healthy BOM.
+
+  var altState = null;
+
+  // A part is worth asking about when its lifecycle says its supply is ending,
+  // or when nobody can supply it today whatever its status says.
+  function altCandidates() {
+    var found = [];
+    state.boms.forEach(function (entry) {
+      if (!entry.results) return;
+      entry.results.rows.forEach(function (row) {
+        var comparison = row.comparison;
+        var carried = entry.results.suppliers.some(function (s) {
+          return row.offers[s.id] && row.offers[s.id].found;
+        });
+        var reason = null;
+        if (!carried) reason = 'No supplier carries it';
+        else if (comparison.lifecycleSeverity === 'bad') reason = comparison.lifecycle;
+        else if (comparison.lifecycleSeverity === 'warn') reason = comparison.lifecycle;
+        else if (!comparison.inStockSuppliers.length) reason = 'Nobody holds the quantity';
+        if (!reason) return;
+
+        found.push({
+          key: entry.id + '::' + row.index,
+          bom: entry.name,
+          bomId: entry.id,
+          row: row,
+          reason: reason,
+          // Obsolete and friends are ticked; a part that is merely short on
+          // stock is listed, because that is a judgement call.
+          ticked: comparison.lifecycleSeverity === 'bad' || !carried,
+        });
+      });
+    });
+    return found;
+  }
+
+  function openAlternatives() {
+    var provider = (state.health && state.health.alternatives) || {};
+    if (!provider.configured) {
+      toast((provider.provider || 'Nexar') + ' is not configured — add the credentials to .env', true);
+      return;
+    }
+
+    var candidates = altCandidates();
+    if (!candidates.length) {
+      toast(state.boms.some(function (b) { return b.results; })
+        ? 'Nothing analyzed needs an alternative'
+        : 'Analyze a BOM first', true);
+      return;
+    }
+
+    altState = {
+      provider: provider.provider || 'Nexar',
+      maxParts: provider.maxParts || 50,
+      candidates: candidates,
+      selected: {},
+      answers: {},
+      running: false,
+      stats: null,
+      returnFocus: document.activeElement,
+    };
+    candidates.forEach(function (candidate) {
+      altState.selected[candidate.key] = candidate.ticked;
+    });
+
+    el.altOverlay.hidden = false;
+    document.body.style.overflow = 'hidden';
+    renderAlternatives();
+  }
+
+  function closeAlternatives() {
+    el.altOverlay.hidden = true;
+    el.altOverlay.innerHTML = '';
+    document.body.style.overflow = '';
+    var focus = altState && altState.returnFocus;
+    if (focus && focus.focus) focus.focus();
+    altState = null;
+  }
+
+  function altSelected() {
+    return altState.candidates.filter(function (c) { return altState.selected[c.key]; });
+  }
+
+  function renderAlternatives() {
+    var rows = altState.candidates.map(function (candidate) {
+      var row = candidate.row;
+      var answer = altState.answers[row.mpn];
+      var checked = altState.selected[candidate.key] ? ' checked' : '';
+      return '<tr data-alt-row="' + esc(candidate.key) + '" class="' + (checked ? 'picked' : '') + '">' +
+        '<td class="tick"><input type="checkbox" data-alt-pick="' + esc(candidate.key) + '"' +
+        checked + ' aria-label="Look up alternatives for ' + esc(row.mpn) + '" /></td>' +
+        '<td class="mpn-cell">' + esc(row.mpn) +
+        '<div class="desc">' + esc(candidate.bom) +
+        (row.description ? ' · ' + esc(row.description) : '') + '</div></td>' +
+        '<td class="num">' + count(row.quantity) + '</td>' +
+        '<td>' + lifecycleBadge({
+          lifecycle: row.comparison.lifecycle,
+          lifecycleSeverity: row.comparison.lifecycleSeverity,
+        }) + '</td>' +
+        '<td class="desc">' + esc(candidate.reason) + '</td>' +
+        '<td>' + altAnswerCell(answer) + '</td>' +
+        '</tr>';
+    }).join('');
+
+    var panels = altState.candidates.map(function (candidate) {
+      var answer = altState.answers[candidate.row.mpn];
+      if (!answer || answer.error || !(answer.alternatives || []).length) return '';
+      return renderAltPanel(candidate.row.mpn, answer);
+    }).join('');
+
+    el.altOverlay.innerHTML =
+      '<div class="report-sheet">' +
+      '<div class="report-head">' +
+      '<div><h2 id="altTitle">Alternative parts</h2>' +
+      '<div class="sub">Asked of ' + esc(altState.provider) +
+      ' &mdash; only for the parts you tick</div></div>' +
+      '<div class="report-actions">' +
+      '<button type="button" class="btn primary small" data-alt="run"' +
+      (altState.running ? ' disabled' : '') + '></button>' +
+      '<button type="button" class="icon-btn" data-alt="close" aria-label="Close">&times;</button>' +
+      '</div></div>' +
+      '<div class="report-body">' +
+      '<section class="report-section"><h3>Parts worth replacing ' +
+      '<span class="aside" data-alt-count></span></h3>' +
+      '<div class="btn-row compact">' +
+      '<button type="button" class="btn ghost small" data-alt="all">Select all</button>' +
+      '<button type="button" class="btn ghost small" data-alt="none">Select none</button>' +
+      '</div>' +
+      '<div class="report-scroll"><table class="report-table dmsms-table">' +
+      '<thead><tr><th class="tick"></th><th>Part</th><th class="num">Qty</th>' +
+      '<th>Status</th><th>Why</th><th>Alternatives</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table></div></section>' +
+      (panels ? '<section class="report-section"><h3>What ' + esc(altState.provider) +
+        ' suggests</h3>' + panels + '</section>' : '') +
+      '<div class="report-foot">Alternatives are ' + esc(altState.provider) +
+      '&rsquo;s own suggestions, matched on the part it found for your number &mdash; check the ' +
+      'specification and the datasheet before designing one in. Nothing here has been checked ' +
+      'against your board.</div>' +
+      '</div></div>';
+
+    wireAlternatives();
+    syncAlternatives();
+  }
+
+  function altAnswerCell(answer) {
+    if (!answer) return '<span class="muted">—</span>';
+    if (answer.error) return '<span class="err-text">' + esc(answer.error) + '</span>';
+    var n = (answer.alternatives || []).length;
+    if (!n) return '<span class="miss">none found</span>';
+    return '<span class="badge info">' + n + '</span>';
+  }
+
+  function renderAltPanel(mpn, answer) {
+    var matched = answer.matched;
+    var rows = (answer.alternatives || []).map(function (alt) {
+      var url = safeUrl(alt.url);
+      var datasheet = safeUrl(alt.datasheetUrl);
+      var links = [];
+      if (url) links.push('<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">Part ↗</a>');
+      if (datasheet) links.push('<a href="' + esc(datasheet) + '" target="_blank" rel="noopener noreferrer">Datasheet ↗</a>');
+      var specs = (alt.specs || []).slice(0, 6).map(function (spec) {
+        return '<span class="spec">' + esc(spec.name) + ' <b>' + esc(spec.value) + '</b></span>';
+      }).join('');
+
+      return '<tr>' +
+        '<td class="mpn-cell">' + esc(alt.mpn) +
+        (alt.description ? '<div class="desc">' + esc(alt.description) + '</div>' : '') +
+        (specs ? '<div class="specs">' + specs + '</div>' : '') + '</td>' +
+        '<td>' + esc(alt.manufacturer || '—') + '</td>' +
+        '<td class="num">' + (alt.stock === null || alt.stock === undefined
+          ? '<span class="muted">—</span>' : count(alt.stock)) + '</td>' +
+        '<td class="num">' + esc(money(alt.medianPrice, alt.currency) || '—') + '</td>' +
+        '<td class="num">' + (isFinite(alt.leadDays) && alt.leadDays !== null
+          ? count(alt.leadDays) + ' d' : '<span class="muted">—</span>') + '</td>' +
+        '<td class="desc">' + (links.join(' · ') || '—') + '</td>' +
+        '</tr>';
+    }).join('');
+
+    return '<div class="alt-group">' +
+      '<div class="alt-head"><strong>' + esc(mpn) + '</strong>' +
+      (matched ? '<span class="aside">matched ' + esc(matched.mpn) +
+        (matched.manufacturer ? ' · ' + esc(matched.manufacturer) : '') + '</span>' : '') +
+      '</div>' +
+      '<div class="report-scroll"><table class="report-table">' +
+      '<thead><tr><th>Alternative</th><th>Manufacturer</th><th class="num">Stock</th>' +
+      '<th class="num">Median price</th><th class="num">Lead</th><th>Links</th></tr></thead>' +
+      '<tbody>' + rows + '</tbody></table></div></div>';
+  }
+
+  function syncAlternatives() {
+    var chosen = altSelected().length;
+    var run = el.altOverlay.querySelector('[data-alt="run"]');
+    if (run) {
+      run.textContent = altState.running
+        ? 'Asking ' + altState.provider + '…'
+        : 'Find alternatives (' + chosen + ')';
+      run.disabled = altState.running;
+    }
+    var aside = el.altOverlay.querySelector('[data-alt-count]');
+    if (aside) {
+      aside.textContent = altState.stats
+        ? chosen + ' of ' + altState.candidates.length + ' selected · ' +
+          altState.stats.apiCalls + ' live, ' + altState.stats.cacheHits + ' cached'
+        : chosen + ' of ' + altState.candidates.length + ' selected';
+    }
+    Array.prototype.forEach.call(
+      el.altOverlay.querySelectorAll('[data-alt-row]'),
+      function (tr) {
+        var on = !!altState.selected[tr.getAttribute('data-alt-row')];
+        tr.classList.toggle('picked', on);
+        var box = tr.querySelector('[data-alt-pick]');
+        if (box && box.checked !== on) box.checked = on;
+      }
+    );
+  }
+
+  function wireAlternatives() {
+    Array.prototype.forEach.call(
+      el.altOverlay.querySelectorAll('[data-alt-pick]'),
+      function (box) {
+        box.addEventListener('change', function () {
+          altState.selected[box.getAttribute('data-alt-pick')] = box.checked;
+          syncAlternatives();
+        });
+      }
+    );
+    Array.prototype.forEach.call(
+      el.altOverlay.querySelectorAll('[data-alt]'),
+      function (button) {
+        button.addEventListener('click', function () {
+          var action = button.getAttribute('data-alt');
+          if (action === 'close') return closeAlternatives();
+          if (action === 'run') return runAlternatives();
+          altState.candidates.forEach(function (candidate) {
+            altState.selected[candidate.key] = action === 'all';
+          });
+          syncAlternatives();
+        });
+      }
+    );
+  }
+
+  function runAlternatives() {
+    var chosen = altSelected();
+    if (!chosen.length) {
+      toast('Tick at least one part', true);
+      return;
+    }
+    if (chosen.length > altState.maxParts) {
+      toast('Ask for at most ' + altState.maxParts + ' parts at a time', true);
+      return;
+    }
+
+    altState.running = true;
+    syncAlternatives();
+
+    // One request per distinct part number: the same part on two boards is one
+    // question, and Nexar should be asked once.
+    var asked = [];
+    var seen = {};
+    chosen.forEach(function (candidate) {
+      var key = normalizeMpn(candidate.row.mpn);
+      if (seen[key]) return;
+      seen[key] = true;
+      asked.push({ mpn: candidate.row.mpn, manufacturer: candidate.row.manufacturer || null });
+    });
+
+    fetch(api('/api/alternatives'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ parts: asked }),
+    })
+      .then(readJsonOrThrow)
+      .then(function (data) {
+        (data.results || []).forEach(function (result) {
+          altState.answers[result.mpn] = result;
+          if ((result.alternatives || []).length) {
+            state.alternatives[normalizeMpn(result.mpn)] = result.alternatives;
+          }
+        });
+        altState.stats = data.stats || null;
+        var withAny = (data.results || []).filter(function (r) {
+          return (r.alternatives || []).length;
+        }).length;
+        var failed = (data.results || []).filter(function (r) { return r.error; });
+        toast(failed.length
+          ? failed[0].error
+          : withAny + ' of ' + asked.length + ' parts have alternatives', !!failed.length);
+      })
+      .catch(function (err) {
+        toast(err.message || 'Could not reach the alternatives provider', true);
+      })
+      .then(function () {
+        altState.running = false;
+        renderAlternatives();
       });
   }
 
@@ -2475,6 +2811,11 @@
   el.exportBtn.addEventListener('click', exportCsv);
   el.reportBtn.addEventListener('click', openReport);
   el.dmsmsBtn.addEventListener('click', openDmsms);
+  el.altBtn.addEventListener('click', openAlternatives);
+
+  el.altOverlay.addEventListener('click', function (event) {
+    if (event.target === el.altOverlay) closeAlternatives();
+  });
 
   el.dmsmsOverlay.addEventListener('click', function (event) {
     if (event.target === el.dmsmsOverlay) closeDmsms();
@@ -2486,7 +2827,8 @@
   });
   document.addEventListener('keydown', function (event) {
     if (event.key !== 'Escape') return;
-    if (!el.dmsmsOverlay.hidden) closeDmsms();
+    if (!el.altOverlay.hidden) closeAlternatives();
+    else if (!el.dmsmsOverlay.hidden) closeDmsms();
     else if (!el.reportOverlay.hidden) closeReport();
   });
 

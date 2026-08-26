@@ -37,6 +37,7 @@ from bomlib.report import (  # noqa: E402
     truncate,
 )
 from bomlib import dmsms as dmsms_module
+from bomlib import nexar as nexar_module
 from bomlib.prepare import (
     DEFAULT_IGNORE_PREFIXES,
     describe_exclusions,
@@ -134,6 +135,12 @@ def build_parser():
     obsolescence.add_argument(
         '--program', metavar='NAME',
         help='Program or platform the DMSMS form is for. Required with --dmsms.',
+    )
+    obsolescence.add_argument(
+        '--alternatives', action='store_true',
+        help='Ask Nexar what could be used instead of each at-risk part, and put what it '
+             'finds in the Suggested Replacement column. Needs NEXAR_CLIENT_ID and '
+             'NEXAR_CLIENT_SECRET in .env.',
     )
     obsolescence.add_argument(
         '--dmsms-status', action='append', metavar='STATUS', dest='dmsms_statuses',
@@ -255,6 +262,12 @@ def main(argv=None):
     progress.finish()
 
     result['excluded'] = excluded
+
+    if args.alternatives:
+        code = attach_alternatives(result, log, paint)
+        if code != EXIT_OK:
+            return code
+
     summary = summarize_bom(result['rows'], result['suppliers'])
 
     if not args.quiet:
@@ -283,6 +296,48 @@ def main(argv=None):
             return code
 
     return check_exit(args.fail_on, summary)
+
+
+def attach_alternatives(result, log, paint):
+    """Ask Nexar about the at-risk parts, and only those.
+
+    A healthy part has nothing to replace, and asking about one spends a
+    free-tier call to be told so.
+    """
+    nexar = nexar_module.client_from_env()
+    if not nexar.configured:
+        print('error: --alternatives needs NEXAR_CLIENT_ID and NEXAR_CLIENT_SECRET in .env',
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    rows = dmsms_module.candidate_rows(result)
+    if not rows:
+        log(paint('No at-risk parts, so nothing to find alternatives for.', 'dim'))
+        return EXIT_OK
+
+    log('Asking %s about %s…' % (nexar.name, _plural(len(rows), 'at-risk part')))
+    found = 0
+    failures = 0
+    for row in rows:
+        try:
+            answer = nexar.find_alternatives(row)
+        except Exception as err:
+            failures += 1
+            log(paint('  %s: %s' % (row.get('mpn'), err), 'dim'))
+            continue
+        alternatives = answer.get('alternatives') or []
+        row['alternatives'] = alternatives
+        if alternatives:
+            found += 1
+            row['suggestedReplacement'] = '; '.join(
+                '%s%s' % (a['mpn'], ' (%s)' % a['manufacturer'] if a.get('manufacturer') else '')
+                for a in alternatives[:2]
+            )
+
+    log('%s of %s have alternatives%s.' % (
+        found, _plural(len(rows), 'at-risk part'),
+        ', %d lookup failed' % failures if failures else ''))
+    return EXIT_OK
 
 
 def write_dmsms_form(args, result, source, log, paint):

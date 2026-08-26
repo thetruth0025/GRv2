@@ -643,6 +643,99 @@ class DmsmsCliTests(unittest.TestCase):
         self.assertIn('no at-risk parts', errors)
 
 
+class AlternativesCliTests(unittest.TestCase):
+    """--alternatives asks Nexar about the at-risk parts and nothing else."""
+
+    def setUp(self):
+        self.paths = []
+        self._original = bom.build_service
+        bom.build_service = self._stub_service
+        self._original_client = bom.nexar_module.client_from_env
+        self.asked = []
+
+        outer = self
+
+        class Stub:
+            configured = True
+            name = 'Nexar'
+
+            def find_alternatives(self, part):
+                outer.asked.append(part['mpn'])
+                return {'matched': {'mpn': part['mpn']},
+                        'alternatives': [{'mpn': part['mpn'] + '-ALT', 'manufacturer': 'Beta'}]}
+
+        self.stub = Stub()
+        bom.nexar_module.client_from_env = lambda env=None: self.stub
+
+    def tearDown(self):
+        bom.build_service = self._original
+        bom.nexar_module.client_from_env = self._original_client
+        for path in self.paths:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def _stub_service(self, args):
+        return LookupService(clients=[
+            StubSupplier('digikey', 'DigiKey', 0.10, lifecycle='Obsolete'),
+            StubSupplier('mouser', 'Mouser', 0.20, lifecycle='Active'),
+        ], cache=None), None
+
+    def temp(self, suffix):
+        handle, path = tempfile.mkstemp(suffix=suffix)
+        os.close(handle)
+        self.paths.append(path)
+        return path
+
+    def source(self):
+        path = self.temp('.csv')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('Manufacturer Part Number,Qty\nABC123,10\nDEF456,20\n')
+        return path
+
+    def test_alternatives_land_in_the_suggested_replacement_field(self):
+        out = self.temp('.json')
+        self.assertEqual(bom.main([self.source(), '-o', out, '--alternatives',
+                                   '--quiet', '--no-color']), 0)
+        with open(out, encoding='utf-8') as handle:
+            rows = json.load(handle)['rows']
+        self.assertEqual(sorted(self.asked), ['ABC123', 'DEF456'])
+        self.assertEqual(rows[0]['suggestedReplacement'], 'ABC123-ALT (Beta)')
+        self.assertEqual([a['mpn'] for a in rows[0]['alternatives']], ['ABC123-ALT'])
+
+    def test_they_reach_the_dmsms_form(self):
+        out = self.temp('.xlsx')
+        self.assertEqual(bom.main([self.source(), '--dmsms', out, '--program', 'Falcon II',
+                                   '--alternatives', '--quiet', '--no-color']), 0)
+        with open(out, 'rb') as handle:
+            grid = parse_xlsx(handle.read())
+        index = next(i for i, line in enumerate(grid) if line and line[0] == 'Item')
+        header = grid[index]
+        record = next(line for line in grid[index + 1:] if line and str(line[0]).isdigit())
+        self.assertEqual(record[header.index('Suggested Replacement')], 'ABC123-ALT (Beta)')
+
+    def test_a_healthy_bom_asks_nothing(self):
+        # Nothing at risk means nothing to replace, and a free-tier call spent
+        # being told so is a call wasted.
+        bom.build_service = lambda args: (LookupService(clients=[
+            StubSupplier('digikey', 'DigiKey', 0.10, lifecycle='Active')], cache=None), None)
+        out = self.temp('.json')
+        self.assertEqual(bom.main([self.source(), '-o', out, '--alternatives',
+                                   '--quiet', '--no-color']), 0)
+        self.assertEqual(self.asked, [])
+
+    def test_without_credentials_it_says_which_ones_are_missing(self):
+        self.stub.configured = False
+        errors = io.StringIO()
+        original = sys.stderr
+        sys.stderr = errors
+        try:
+            code = bom.main([self.source(), '--alternatives', '--quiet', '--no-color'])
+        finally:
+            sys.stderr = original
+        self.assertEqual(code, 1)
+        self.assertIn('NEXAR_CLIENT_ID', errors.getvalue())
+
+
 class SkipColumnCliTests(unittest.TestCase):
     """The CLI honours the BOM's own skip column too."""
 

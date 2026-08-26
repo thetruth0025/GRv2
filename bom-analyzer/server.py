@@ -17,6 +17,7 @@ import re
 import sys
 import threading
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,6 +36,7 @@ from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.prepare import normalize_mpn, parse_prefixes, prepare_lines  # noqa: E402
 from bomlib.report import write_report_workbook  # noqa: E402
 from bomlib import dmsms as dmsms_module  # noqa: E402
+from bomlib import nexar as nexar_module  # noqa: E402
 from bomlib.spreadsheet import clean_cell, extract_bom, line_from_row, parse_workbook  # noqa: E402
 
 PUBLIC_DIR = os.path.join(BASE_DIR, 'public')
@@ -97,6 +99,12 @@ trustedparts = TrustedPartsClient(
     in_stock_only=_bool_env('TRUSTEDPARTS_IN_STOCK_ONLY'),
     use_cached_data=_bool_env('TRUSTEDPARTS_USE_CACHED_DATA'),
 )
+
+# Not a supplier: Nexar answers "what could I use instead", and only for parts
+# already found to be in trouble. It is never part of a BOM run.
+nexar = nexar_module.client_from_env()
+MAX_ALTERNATIVE_PARTS = _int_env('MAX_ALTERNATIVE_PARTS', 50)
+ALTERNATIVES_CONCURRENCY = _int_env('NEXAR_CONCURRENCY', 2)
 
 _cache_file = os.environ.get('CACHE_FILE')
 if _cache_file == 'none':
@@ -182,6 +190,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_report()
         if path == '/api/dmsms':
             return self._handle_dmsms()
+        if path == '/api/alternatives':
+            return self._handle_alternatives()
         return self._send_json(404, {'error': 'Unknown endpoint ' + path})
 
     def do_DELETE(self):
@@ -212,6 +222,11 @@ class Handler(BaseHTTPRequestHandler):
                          'logo': 'trustedparts-logo.svg',
                      }},
                 ],
+                'alternatives': {
+                    'provider': nexar_module.SUPPLIER,
+                    'configured': nexar.configured,
+                    'maxParts': MAX_ALTERNATIVE_PARTS,
+                },
                 'maxPartsPerRequest': MAX_PARTS_PER_REQUEST,
                 'ignorePrefixes': IGNORE_PREFIXES,
                 'dmsms': {
@@ -431,6 +446,89 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != 'HEAD':
             self.wfile.write(body)
         return None
+
+    def _handle_alternatives(self):
+        """Ask Nexar what could be used instead of the parts named.
+
+        Deliberately its own endpoint rather than part of /api/lookup: this runs
+        only for parts somebody has decided are in trouble, and only when they
+        ask for it.
+        """
+        if not nexar.configured:
+            return self._send_json(400, {
+                'error': 'Nexar is not configured. Add NEXAR_CLIENT_ID and '
+                         'NEXAR_CLIENT_SECRET to .env and restart the server.',
+            })
+
+        payload = self._read_json()
+        if payload is None:
+            return None
+
+        raw_parts = payload.get('parts') if isinstance(payload.get('parts'), list) else []
+        parts = []
+        for entry in raw_parts:
+            if not isinstance(entry, dict):
+                continue
+            mpn = clean_cell(entry.get('mpn'))
+            if not mpn:
+                continue
+            parts.append({'mpn': mpn, 'manufacturer': clean_cell(entry.get('manufacturer')) or None})
+
+        if not parts:
+            return self._send_json(400, {'error': 'No part numbers supplied'})
+        if len(parts) > MAX_ALTERNATIVE_PARTS:
+            return self._send_json(400, {
+                'error': 'Ask for at most %d parts at a time' % MAX_ALTERNATIVE_PARTS,
+            })
+
+        stats = {'apiCalls': 0, 'cacheHits': 0, 'errors': 0}
+        lock = threading.Lock()
+        answers = {}
+
+        def resolve(part):
+            key = 'nexar %s %s' % (part['mpn'].upper(), (part['manufacturer'] or '').upper())
+            cached = cache.get(key) if cache is not None else None
+            if cached is not None:
+                with lock:
+                    stats['cacheHits'] += 1
+                    answers[part['mpn']] = cached
+                return
+            try:
+                found = nexar.find_alternatives(part)
+                if cache is not None:
+                    cache.set(key, found)
+                with lock:
+                    stats['apiCalls'] += 1
+                    answers[part['mpn']] = found
+            except Exception as err:
+                # Not cached: a rate limit or a schema mismatch should not
+                # poison the next run, and the message is what makes a schema
+                # mismatch a one-line fix rather than a silent blank.
+                with lock:
+                    stats['apiCalls'] += 1
+                    stats['errors'] += 1
+                    answers[part['mpn']] = {'error': str(err) or repr(err)}
+
+        workers = max(1, min(ALTERNATIVES_CONCURRENCY, len(parts)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(resolve, parts))
+
+        results = []
+        for part in parts:
+            found = answers.get(part['mpn']) or {}
+            results.append({
+                'mpn': part['mpn'],
+                'manufacturer': part['manufacturer'],
+                'matched': found.get('matched'),
+                'alternatives': found.get('alternatives') or [],
+                'error': found.get('error'),
+            })
+
+        return self._send_json(200, {
+            'provider': nexar_module.SUPPLIER,
+            'results': results,
+            'stats': stats,
+        })
 
     def _handle_dmsms(self):
         """Build a DMSMS case form for the parts the analyst ticked.

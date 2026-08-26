@@ -954,3 +954,29 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
 /* The case-detail fields sit in the same grid the column mapping uses. */
 #dmsmsOverlay .grid { margin-bottom: 4px; }
 #dmsmsOverlay .btn-row.compact { margin: 0 0 4px; }
+
+/* ── ALTERNATIVE PARTS ── */
+.alt-group { margin-top: 18px; }
+.alt-group:first-of-type { margin-top: 8px; }
+.alt-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 2px;
+  font-size: 0.86rem;
+}
+.alt-head strong { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+.alt-head .aside { color: var(--text3); font-size: 0.74rem; }
+
+/* The specification is why an alternative is being suggested, so it travels
+   with it rather than sitting behind a link. */
+.specs { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px 6px; }
+.spec {
+  font-size: 0.68rem;
+  color: var(--text3);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+.spec b { color: var(--text2); font-weight: 600; }
