@@ -116,7 +116,7 @@
     'filterChips', 'exportBtn', 'resultsTable', 'resultsHead', 'resultsBody', 'emptyState',
     'setupCard', 'toast', 'attribution',
     'bomBar', 'bomTabs', 'bomCount', 'analyzeAllBtn', 'closeAllBtn',
-    'reportBtn', 'skippedNote', 'reportOverlay',
+    'reportBtn', 'skippedNote', 'reportOverlay', 'dmsmsBtn', 'dmsmsOverlay',
   ].forEach(function (id) {
     el[id] = document.getElementById(id);
   });
@@ -1858,6 +1858,372 @@
     reportReturnFocus = null;
   }
 
+  // ── DMSMS case form ──────────────────────────────────────────────────────
+  //
+  // A part can sit on several boards and belong to one program, so which parts
+  // go on a form is a decision only the analyst can make. Everything at risk is
+  // listed, the parts that are actually gone are ticked, and the rest is theirs.
+
+  var DMSMS_FIELDS = [
+    { key: 'program', label: 'Program / platform', placeholder: 'e.g. Falcon II', required: true },
+    { key: 'caseNumber', label: 'DMSMS case number', placeholder: 'optional' },
+    { key: 'preparedBy', label: 'Prepared by', placeholder: 'name' },
+    { key: 'organization', label: 'Organization', placeholder: 'group or division' },
+    { key: 'contract', label: 'Contract number', placeholder: 'optional' },
+    { key: 'cage', label: 'CAGE code', placeholder: 'optional' },
+  ];
+
+  // Everything except the program persists: the program is the one field that
+  // changes every time, and pre-filling it would be how the wrong name ends up
+  // on a form.
+  var DMSMS_STORAGE_KEY = 'bom-analyzer.dmsms';
+
+  function loadDmsmsMeta() {
+    var stored = {};
+    try {
+      stored = JSON.parse(localStorage.getItem(DMSMS_STORAGE_KEY) || '{}') || {};
+    } catch (err) {
+      stored = {};
+    }
+    stored.program = '';
+    return stored;
+  }
+
+  function saveDmsmsMeta(meta) {
+    try {
+      var keep = {};
+      DMSMS_FIELDS.forEach(function (field) {
+        if (field.key !== 'program' && meta[field.key]) keep[field.key] = meta[field.key];
+      });
+      localStorage.setItem(DMSMS_STORAGE_KEY, JSON.stringify(keep));
+    } catch (err) {
+      // Private-mode browsers block storage; the form still generates.
+    }
+  }
+
+  function dmsmsStatuses() {
+    var health = state.health && state.health.dmsms;
+    return {
+      qualifying: (health && health.statuses) || [],
+      ticked: (health && health.defaultSelected) || [],
+    };
+  }
+
+  // Every at-risk line across every analyzed BOM, because a program's parts do
+  // not stop at one board.
+  function dmsmsCandidates() {
+    var vocabulary = dmsmsStatuses();
+    var found = [];
+    state.boms.forEach(function (entry) {
+      if (!entry.results) return;
+      entry.results.rows.forEach(function (row) {
+        var status = row.comparison.lifecycle;
+        if (vocabulary.qualifying.indexOf(status) === -1) return;
+        found.push({
+          key: entry.id + '::' + row.index,
+          bom: entry.name,
+          bomId: entry.id,
+          row: row,
+          status: status,
+          severity: row.comparison.lifecycleSeverity,
+          ticked: vocabulary.ticked.indexOf(status) !== -1,
+        });
+      });
+    });
+    return found;
+  }
+
+  var dmsmsState = null;
+
+  function openDmsms() {
+    var candidates = dmsmsCandidates();
+    if (!candidates.length) {
+      toast(state.boms.some(function (b) { return b.results; })
+        ? 'Nothing analyzed is obsolete, end of life or NRND'
+        : 'Analyze a BOM first', true);
+      return;
+    }
+
+    dmsmsState = {
+      candidates: candidates,
+      selected: {},
+      meta: loadDmsmsMeta(),
+      returnFocus: document.activeElement,
+    };
+    candidates.forEach(function (candidate) {
+      dmsmsState.selected[candidate.key] = candidate.ticked;
+    });
+
+    el.dmsmsOverlay.hidden = false;
+    document.body.style.overflow = 'hidden';
+    renderDmsms();
+  }
+
+  function closeDmsms() {
+    el.dmsmsOverlay.hidden = true;
+    el.dmsmsOverlay.innerHTML = '';
+    document.body.style.overflow = '';
+    var focus = dmsmsState && dmsmsState.returnFocus;
+    if (focus && focus.focus) focus.focus();
+    dmsmsState = null;
+  }
+
+  function dmsmsSelectedRows() {
+    return dmsmsState.candidates.filter(function (candidate) {
+      return dmsmsState.selected[candidate.key];
+    });
+  }
+
+  function renderDmsms() {
+    var byBom = [];
+    var index = {};
+    dmsmsState.candidates.forEach(function (candidate) {
+      if (!index[candidate.bomId]) {
+        index[candidate.bomId] = { name: candidate.bom, id: candidate.bomId, rows: [] };
+        byBom.push(index[candidate.bomId]);
+      }
+      index[candidate.bomId].rows.push(candidate);
+    });
+
+    var fields = DMSMS_FIELDS.map(function (field) {
+      return '<label class="field">' + esc(field.label) + (field.required ? ' *' : '') +
+        '<input type="text" data-meta="' + field.key + '" value="' +
+        esc(dmsmsState.meta[field.key] || '') + '" placeholder="' + esc(field.placeholder) +
+        '" autocomplete="off" /></label>';
+    }).join('');
+
+    var groups = byBom.map(function (group) {
+      var rows = group.rows.map(function (candidate) {
+        var row = candidate.row;
+        var checked = dmsmsState.selected[candidate.key] ? ' checked' : '';
+        return '<tr data-row="' + esc(candidate.key) + '" class="' + (checked ? 'picked' : '') + '">' +
+          '<td class="tick"><input type="checkbox" data-pick="' + esc(candidate.key) + '"' +
+          checked + ' aria-label="Include ' + esc(row.mpn) + '" /></td>' +
+          '<td class="mpn-cell">' + esc(row.mpn) +
+          (row.description ? '<div class="desc">' + esc(row.description) + '</div>' : '') + '</td>' +
+          '<td class="desc">' + esc(row.reference || '—') + '</td>' +
+          '<td class="num">' + count(row.quantity) + '</td>' +
+          '<td>' + lifecycleBadge({
+            lifecycle: candidate.status, lifecycleSeverity: candidate.severity,
+          }) + '</td>' +
+          '<td class="num">' + count(dmsmsStock(row)) + '</td>' +
+          '<td><span class="risk ' + esc(dmsmsRisk(row).toLowerCase()) + '">' +
+          esc(dmsmsRisk(row)) + '</span></td>' +
+          '</tr>';
+      }).join('');
+
+      return '<div class="dmsms-group">' +
+        '<div class="dmsms-group-head">' +
+        '<strong>' + esc(group.name) + '</strong>' +
+        '<span class="aside" data-count="' + esc(group.id) + '"></span>' +
+        '<button type="button" class="btn ghost small" data-group="' + esc(group.id) + '"></button>' +
+        '</div>' +
+        '<div class="report-scroll"><table class="report-table dmsms-table">' +
+        '<thead><tr><th class="tick"></th><th>Part</th><th>Reference</th>' +
+        '<th class="num">Qty</th><th>Status</th><th class="num">Stock</th>' +
+        '<th>Suggested risk</th></tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+    }).join('');
+
+    el.dmsmsOverlay.innerHTML =
+      '<div class="report-sheet">' +
+      '<div class="report-head">' +
+      '<div><h2 id="dmsmsTitle">DMSMS case form</h2>' +
+      '<div class="sub">One form per program &mdash; tick the parts that belong to it</div></div>' +
+      '<div class="report-actions">' +
+      '<button type="button" class="btn primary small" data-dmsms="build"></button>' +
+      '<button type="button" class="icon-btn" data-dmsms="close" aria-label="Close">&times;</button>' +
+      '</div></div>' +
+      '<div class="report-body">' +
+      '<section class="report-section"><h3>Case details</h3>' +
+      '<div class="grid">' + fields + '</div>' +
+      '<label class="field">Notes<input type="text" data-meta="notes" value="' +
+      esc(dmsmsState.meta.notes || '') + '" placeholder="optional" autocomplete="off" /></label>' +
+      '</section>' +
+      '<section class="report-section"><h3>Parts at risk ' +
+      '<span class="aside" data-count="total"></span></h3>' +
+      '<div class="btn-row compact"><button type="button" class="btn ghost small" ' +
+      'data-dmsms="all">Select all</button><button type="button" class="btn ghost small" ' +
+      'data-dmsms="none">Select none</button><button type="button" class="btn ghost small" ' +
+      'data-dmsms="obsolete">Only obsolete &amp; EOL</button></div>' +
+      groups + '</section>' +
+      '<div class="report-foot">The form lists what the supplier APIs reported today. ' +
+      'CAGE code, lifetime buy quantity, last-time-buy date, resolution and disposition are ' +
+      'left blank for you &mdash; they are decisions, not lookups.</div>' +
+      '</div></div>';
+
+    wireDmsms();
+    syncDmsms();
+  }
+
+  // Ticking a box changes four things on screen and nothing else. Re-rendering
+  // the panel for it would throw away focus and scroll position, which on a
+  // list of a hundred at-risk parts is the difference between tabbing through
+  // and starting again after every tick.
+  function syncDmsms() {
+    var chosen = dmsmsSelectedRows().length;
+    var total = dmsmsState.candidates.length;
+
+    var build = el.dmsmsOverlay.querySelector('[data-dmsms="build"]');
+    if (build) build.textContent = 'Generate form (' + chosen + ')';
+
+    var overall = el.dmsmsOverlay.querySelector('[data-count="total"]');
+    if (overall) overall.textContent = chosen + ' of ' + total + ' selected';
+
+    Array.prototype.forEach.call(
+      el.dmsmsOverlay.querySelectorAll('[data-row]'),
+      function (tr) {
+        var on = !!dmsmsState.selected[tr.getAttribute('data-row')];
+        tr.classList.toggle('picked', on);
+        var box = tr.querySelector('[data-pick]');
+        if (box && box.checked !== on) box.checked = on;
+      }
+    );
+
+    Array.prototype.forEach.call(
+      el.dmsmsOverlay.querySelectorAll('[data-group]'),
+      function (button) {
+        var id = button.getAttribute('data-group');
+        var rows = dmsmsState.candidates.filter(function (c) { return c.bomId === id; });
+        var picked = rows.filter(function (c) { return dmsmsState.selected[c.key]; }).length;
+        button.textContent = picked === rows.length ? 'Clear this BOM' : 'Select this BOM';
+        var aside = el.dmsmsOverlay.querySelector('[data-count="' + id + '"]');
+        if (aside) aside.textContent = picked + ' of ' + rows.length + ' selected';
+      }
+    );
+  }
+
+  function dmsmsStock(row) {
+    var total = null;
+    Object.keys(row.offers).forEach(function (id) {
+      var offer = row.offers[id];
+      if (!offer || !offer.found) return;
+      var held = offer.totalStock;
+      if (held === null || held === undefined) held = offer.stock;
+      if (isFinite(held) && held !== null) total = (total || 0) + held;
+    });
+    return total;
+  }
+
+  // Mirrors bomlib/dmsms.py so the screen and the workbook agree.
+  function dmsmsRisk(row) {
+    var status = row.comparison.lifecycle;
+    var needed = row.quantity || 0;
+    var stock = dmsmsStock(row);
+    var covered = stock !== null && needed && stock >= needed;
+
+    if (status === 'Obsolete' || status === 'Discontinued' || status === 'End of Life') {
+      return covered ? 'Medium' : 'High';
+    }
+    if (status === 'Last Time Buy') return covered ? 'Medium' : 'High';
+    if (status === 'Not Recommended for New Designs') return covered ? 'Low' : 'Medium';
+    return 'Low';
+  }
+
+  function wireDmsms() {
+    Array.prototype.forEach.call(
+      el.dmsmsOverlay.querySelectorAll('[data-pick]'),
+      function (box) {
+        box.addEventListener('change', function () {
+          dmsmsState.selected[box.getAttribute('data-pick')] = box.checked;
+          syncDmsms();
+        });
+      }
+    );
+
+    Array.prototype.forEach.call(
+      el.dmsmsOverlay.querySelectorAll('[data-group]'),
+      function (button) {
+        button.addEventListener('click', function () {
+          var id = button.getAttribute('data-group');
+          var rows = dmsmsState.candidates.filter(function (c) { return c.bomId === id; });
+          var allOn = rows.every(function (c) { return dmsmsState.selected[c.key]; });
+          rows.forEach(function (c) { dmsmsState.selected[c.key] = !allOn; });
+          syncDmsms();
+        });
+      }
+    );
+
+    // Typing into a field must not repaint the panel underneath the cursor,
+    // so these write straight to the model and never re-render.
+    Array.prototype.forEach.call(
+      el.dmsmsOverlay.querySelectorAll('[data-meta]'),
+      function (input) {
+        input.addEventListener('input', function () {
+          dmsmsState.meta[input.getAttribute('data-meta')] = input.value;
+        });
+      }
+    );
+
+    Array.prototype.forEach.call(
+      el.dmsmsOverlay.querySelectorAll('[data-dmsms]'),
+      function (button) {
+        button.addEventListener('click', function () {
+          var action = button.getAttribute('data-dmsms');
+          if (action === 'close') return closeDmsms();
+          if (action === 'build') return buildDmsms();
+          var ticked = dmsmsStatuses().ticked;
+          dmsmsState.candidates.forEach(function (candidate) {
+            if (action === 'all') dmsmsState.selected[candidate.key] = true;
+            else if (action === 'none') dmsmsState.selected[candidate.key] = false;
+            else dmsmsState.selected[candidate.key] = ticked.indexOf(candidate.status) !== -1;
+          });
+          syncDmsms();
+        });
+      }
+    );
+  }
+
+  function buildDmsms() {
+    var chosen = dmsmsSelectedRows();
+    if (!chosen.length) {
+      toast('Tick at least one part for the form', true);
+      return;
+    }
+    if (!String(dmsmsState.meta.program || '').trim()) {
+      toast('Name the program this form is for', true);
+      var input = el.dmsmsOverlay.querySelector('[data-meta="program"]');
+      if (input) input.focus();
+      return;
+    }
+
+    saveDmsmsMeta(dmsmsState.meta);
+    var scope = [];
+    chosen.forEach(function (candidate) {
+      if (scope.indexOf(candidate.bom) === -1) scope.push(candidate.bom);
+    });
+
+    var meta = {};
+    Object.keys(dmsmsState.meta).forEach(function (key) { meta[key] = dmsmsState.meta[key]; });
+    meta.scope = scope.join(', ');
+    meta.date = meta.date || new Date().toISOString().slice(0, 10);
+
+    toast('Building the DMSMS form…');
+    fetch(api('/api/dmsms'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        meta: meta,
+        // Which board a part sits on is the form's Next Higher Assembly, and
+        // only the browser knows which BOM each selected row came from.
+        rows: chosen.map(function (candidate) {
+          return Object.assign({}, candidate.row, { assembly: candidate.bom });
+        }),
+      }),
+    })
+      .then(function (res) {
+        if (!res.ok) return readJsonOrThrow(res);
+        return res.blob().then(function (blob) {
+          var slug = String(meta.program).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+          download(blob, (slug || 'program') + '-dmsms-' +
+            new Date().toISOString().slice(0, 10) + '.xlsx');
+          toast('DMSMS form for ' + meta.program + ' — ' + chosen.length + ' parts');
+        });
+      })
+      .catch(function (err) {
+        toast(err.message || 'Could not build the form', true);
+      });
+  }
+
   // ── Excel export ─────────────────────────────────────────────────────────
 
   // The workbook is built on the server: it already owns a dependency-free
@@ -2073,13 +2439,20 @@
   });
   el.exportBtn.addEventListener('click', exportCsv);
   el.reportBtn.addEventListener('click', openReport);
+  el.dmsmsBtn.addEventListener('click', openDmsms);
+
+  el.dmsmsOverlay.addEventListener('click', function (event) {
+    if (event.target === el.dmsmsOverlay) closeDmsms();
+  });
 
   // Clicking the backdrop closes; clicking the sheet itself must not.
   el.reportOverlay.addEventListener('click', function (event) {
     if (event.target === el.reportOverlay) closeReport();
   });
   document.addEventListener('keydown', function (event) {
-    if (event.key === 'Escape' && !el.reportOverlay.hidden) closeReport();
+    if (event.key !== 'Escape') return;
+    if (!el.dmsmsOverlay.hidden) closeDmsms();
+    else if (!el.reportOverlay.hidden) closeReport();
   });
 
   // "Start over" closes the BOM being viewed, leaving the others alone.

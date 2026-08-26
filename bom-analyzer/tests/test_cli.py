@@ -566,3 +566,78 @@ class ReportSheetTests(unittest.TestCase):
         sheets = build_workbook_sheets(self.result, self.summary)
         parts = next(s for s in sheets if s['name'] == 'Parts')
         self.assertEqual(len(parts['widths']), len(parts['rows'][0]))
+
+
+class DmsmsCliTests(unittest.TestCase):
+    """--dmsms writes the same form the web app builds."""
+
+    def setUp(self):
+        self.paths = []
+        self._original = bom.build_service
+        bom.build_service = self._stub_service
+
+    def tearDown(self):
+        bom.build_service = self._original
+        for path in self.paths:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def _stub_service(self, args):
+        return LookupService(clients=[
+            StubSupplier('digikey', 'DigiKey', 0.10, lifecycle='Obsolete'),
+            StubSupplier('mouser', 'Mouser', 0.20, lifecycle='Active'),
+        ], cache=None), None
+
+    def temp(self, suffix):
+        handle, path = tempfile.mkstemp(suffix=suffix)
+        os.close(handle)
+        self.paths.append(path)
+        return path
+
+    def source(self):
+        path = self.temp('.csv')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('Manufacturer Part Number,Qty\nABC123,100\nDEF456,50\n')
+        return path
+
+    def run_cli(self, argv):
+        errors = io.StringIO()
+        original = sys.stderr
+        sys.stderr = errors
+        try:
+            return bom.main(argv), errors.getvalue()
+        finally:
+            sys.stderr = original
+
+    def test_a_form_is_written_for_the_at_risk_parts(self):
+        out = self.temp('.xlsx')
+        code, _ = self.run_cli([self.source(), '--dmsms', out, '--program', 'Falcon II',
+                                '--quiet', '--no-color'])
+        self.assertEqual(code, 0)
+        with open(out, 'rb') as handle:
+            grid = parse_xlsx(handle.read())
+        self.assertEqual(grid[0][0], 'DMSMS Case Form')
+        self.assertIn('Falcon II', grid[1][0])
+        index = next(i for i, line in enumerate(grid) if line and line[0] == 'Item')
+        records = [line for line in grid[index + 1:] if line and str(line[0]).isdigit()]
+        self.assertEqual(len(records), 2)
+
+    def test_the_form_needs_a_program_to_be_named_after(self):
+        out = self.temp('.xlsx')
+        code, errors = self.run_cli([self.source(), '--dmsms', out, '--quiet', '--no-color'])
+        self.assertEqual(code, 1)
+        self.assertIn('--program', errors)
+
+    def test_naming_a_program_without_a_form_is_refused_rather_than_ignored(self):
+        code, errors = self.run_cli([self.source(), '--program', 'Falcon II',
+                                     '--quiet', '--no-color'])
+        self.assertEqual(code, 1)
+        self.assertIn('--dmsms', errors)
+
+    def test_the_status_filter_narrows_what_lands_on_the_form(self):
+        out = self.temp('.xlsx')
+        code, errors = self.run_cli([self.source(), '--dmsms', out, '--program', 'X',
+                                     '--dmsms-status', 'End of Life', '--quiet', '--no-color'])
+        # The stubs report Obsolete, so filtering to End of Life leaves nothing.
+        self.assertEqual(code, 1)
+        self.assertIn('no at-risk parts', errors)

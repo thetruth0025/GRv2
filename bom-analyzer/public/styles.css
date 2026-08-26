@@ -915,3 +915,42 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
   .report-section { break-inside: avoid; }
   .report-table tr { break-inside: avoid; }
 }
+
+/* ── DMSMS FORM ── */
+.dmsms-group { margin-top: 16px; }
+.dmsms-group:first-of-type { margin-top: 10px; }
+.dmsms-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 2px;
+  font-size: 0.82rem;
+}
+.dmsms-group-head .aside { color: var(--text3); font-size: 0.75rem; margin-right: auto; }
+
+.dmsms-table th.tick, .dmsms-table td.tick { width: 34px; padding-right: 0; }
+.dmsms-table input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.dmsms-table tbody tr.picked td { background: rgba(45, 212, 191, .06); }
+.dmsms-table tbody tr.picked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+
+.risk {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  border: 1px solid var(--border);
+  color: var(--text2);
+}
+.risk.high { border-color: rgba(248, 113, 113, .5); color: var(--red); }
+.risk.medium { border-color: rgba(251, 191, 36, .5); color: var(--yellow); }
+.risk.low { border-color: rgba(74, 222, 128, .4); color: var(--green); }
+
+/* The case-detail fields sit in the same grid the column mapping uses. */
+#dmsmsOverlay .grid { margin-bottom: 4px; }
+#dmsmsOverlay .btn-row.compact { margin: 0 0 4px; }

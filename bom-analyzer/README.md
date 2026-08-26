@@ -65,6 +65,11 @@ stock, so part numbers starting with `ASY0`, `CBL0`, `DES0` or `PCB0` never reac
 list is configurable, nothing is silently dropped, and every skipped line stays visible with the
 reason it was skipped.
 
+**Fills a DMSMS form per program.** Parts whose supply is ending — obsolete, discontinued, end of
+life, last time buy, NRND — are collected across every analyzed BOM into a picker. Tick the ones
+belonging to a program, name it, and out comes a DMSMS case form as Excel. A part can sit on three
+boards and belong to one program, so which parts go on which form is yours to decide, not a rule.
+
 **Produces a report you can hand to somebody.** The **Summary report** button opens a one-page
 view: the headline numbers, what each supplier's cart would cost, the lines that need a decision,
 and a concise per-part table. It prints to PDF, or exports to a styled Excel workbook — one BOM or
@@ -195,6 +200,8 @@ the whole analysis, screened-out lines included, for scripting.
 | `--no-ignore-prefixes` | Look up in-house part numbers too |
 | `--no-merge-duplicates` | Keep repeated part numbers as separate lines instead of adding their quantities |
 | `--show-skipped` | List every skipped line and why |
+| `--dmsms FILE --program NAME` | Write a DMSMS case form for every at-risk part |
+| `--dmsms-status STATUS` | Narrow the form to given lifecycle statuses (repeatable) |
 | `--list-columns` | Show the detected headers and mapping, then exit |
 | `--mpn-column COL` | Force a column by header name or 0-based index (one flag per field) |
 | `--fail-on risk` | Exit non-zero when any line is flagged — for CI and scripts |
@@ -287,6 +294,44 @@ shorter.
 Above the table, a line reports anything that was not looked up — in-house part numbers, lines
 merged into another line, and parts an earlier BOM already claimed. Open it to see each one and why.
 
+### The DMSMS form
+
+**DMSMS form** collects every at-risk part across all analyzed BOMs — obsolete, discontinued, end of
+life, last time buy and NRND — and lists them grouped by the BOM they came from, with the part
+number, reference designators, quantity, status, distributor stock and a suggested risk.
+
+Parts that are actually gone (obsolete, discontinued, end of life) start ticked; the ones still
+buyable are listed but left for you. Tick what belongs to the program, fill in the case details, and
+**Generate form** downloads the workbook. Everything except the program name is remembered, so the
+next program is a name, a set of ticks and a click — the program is deliberately never pre-filled,
+because that is how the wrong name ends up on a form.
+
+The workbook is a DMSMS case form laid out on the SD-22 case data elements:
+
+| Filled from the analysis | Left blank for you |
+| --- | --- |
+| Part number, manufacturer, description, reference designators | CAGE code |
+| Next higher assembly, quantity per assembly | Lifetime buy quantity |
+| Lifecycle status, **which supplier reported it**, date obtained | Last-time-buy date |
+| Distributor stock, preferred source, unit and extended price | Resolution option |
+| Suggested replacement, suggested risk | Disposition / remarks |
+
+The blank columns are decisions, not lookups, so the form leaves them empty rather than inventing
+them. **Status Source** matters: the analyzer reports whichever supplier gives a part its worst
+standing, so a part DigiKey calls obsolete is never shown as active because Mouser has not caught
+up — and naming the supplier is what makes the entry checkable. **Suggested Risk** is derived from
+the reported status and whether distributor stock covers the quantity; the form says on its face
+that it is a starting point, not a determination.
+
+From the command line, `--dmsms` writes the same form with every at-risk part on it:
+
+```bash
+python3 bom.py my-bom.csv --dmsms falcon-ii.xlsx --program "Falcon II"
+python3 bom.py my-bom.csv --dmsms obsolete-only.xlsx --program "Osprey" --dmsms-status Obsolete
+```
+
+There is no picking on the command line — that is what the browser is for.
+
 ### The summary report
 
 **Summary report** opens a one-page view of the BOM you are looking at:
@@ -357,7 +402,7 @@ Opening the app once removes it for good.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -t .   # 204 tests, no network access required
+python3 -m unittest discover -s tests -t .   # 236 tests, no network access required
 python3 server.py                            # http://localhost:8787
 python3 bom.py --part STM32F103C8T6          # look one part up
 python3 bom.py samples/sample-bom.csv        # or a whole BOM
@@ -376,6 +421,7 @@ bomlib/lookup.py          Deduplication, caching, concurrency, BOM roll-up
 bomlib/cache.py           TTL cache with disk persistence
 bomlib/http_client.py     urllib with timeout, retry and backoff
 bomlib/report.py          The report and comparison layouts shared by CSV, .xlsx and terminal output
+bomlib/dmsms.py           The DMSMS case form: what is at risk, and what the analyst still decides
 bomlib/xlsx_writer.py     Minimal styled .xlsx writer (zipfile + hand-built XML)
 public/                   The web frontend (plain HTML/CSS/JS, no build step)
 public/sw.js              A service worker that exists only to uninstall an earlier one
@@ -420,6 +466,10 @@ shapes, so no network access is needed.
   is not quoted again for the others, so its price and lead time reflect the quantity of whichever
   BOM you ran first. The report names the other BOMs and what they need, but it does not reprice
   the line at the combined quantity — buying the total in one order would usually be cheaper still.
+- **The DMSMS form reports, it does not adjudicate.** Lifecycle status is what a distributor's API
+  said today, which can lag a manufacturer's PCN and can differ between distributors for the same
+  part. The form names its source and the date so the entry can be checked; confirm against the
+  manufacturer before a case turns into a buy.
 - **Screening is by prefix, not by meaning.** `ASY0`, `CBL0`, `DES0` and `PCB0` are assumed to be
   in-house numbering. If a real manufacturer part number starts with one of those, set
   `IGNORE_PART_PREFIXES` to something narrower, clear it to let everything through, or just look the

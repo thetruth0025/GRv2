@@ -34,6 +34,7 @@ from bomlib import trustedparts as tp_module  # noqa: E402
 from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.prepare import normalize_mpn, parse_prefixes, prepare_lines  # noqa: E402
 from bomlib.report import write_report_workbook  # noqa: E402
+from bomlib import dmsms as dmsms_module  # noqa: E402
 from bomlib.spreadsheet import extract_bom, line_from_row, parse_workbook  # noqa: E402
 
 PUBLIC_DIR = os.path.join(BASE_DIR, 'public')
@@ -115,10 +116,10 @@ lookup_service = LookupService(
 )
 
 
-def _download_name(label):
+def _download_name(label, suffix='-report.xlsx'):
     """A filename safe to put in a Content-Disposition header."""
     slug = re.sub(r'[^A-Za-z0-9._-]+', '-', str(label or 'bom')).strip('-') or 'bom'
-    return '%s-report.xlsx' % slug[:60]
+    return '%s%s' % (slug[:60], suffix)
 
 
 def _requested_claims(payload):
@@ -179,6 +180,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_lookup()
         if path == '/api/report':
             return self._handle_report()
+        if path == '/api/dmsms':
+            return self._handle_dmsms()
         return self._send_json(404, {'error': 'Unknown endpoint ' + path})
 
     def do_DELETE(self):
@@ -211,6 +214,11 @@ class Handler(BaseHTTPRequestHandler):
                 ],
                 'maxPartsPerRequest': MAX_PARTS_PER_REQUEST,
                 'ignorePrefixes': IGNORE_PREFIXES,
+                'dmsms': {
+                    'statuses': list(dmsms_module.DMSMS_STATUSES),
+                    'defaultSelected': list(dmsms_module.DEFAULT_SELECTED_STATUSES),
+                    'resolutionOptions': list(dmsms_module.RESOLUTION_OPTIONS),
+                },
                 'cacheEntries': len(cache),
                 'currency': os.environ.get('DIGIKEY_CURRENCY') or os.environ.get('MOUSER_CURRENCY') or 'USD',
             })
@@ -399,6 +407,56 @@ class Handler(BaseHTTPRequestHandler):
 
         body = buffer.getvalue()
         name = _download_name(books[0]['meta']['name'] if len(books) == 1 else 'all-boms')
+        self.send_response(200)
+        self.send_header(
+            'Content-Type',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        self.send_header('Content-Disposition', 'attachment; filename="%s"' % name)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        for key, value in getattr(self, '_cors', []):
+            self.send_header(key, value)
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+        return None
+
+    def _handle_dmsms(self):
+        """Build a DMSMS case form for the parts the analyst ticked.
+
+        The rows come from the browser because the selection is the whole point:
+        a part can sit on three boards and belong to one program, and only the
+        person filling the form knows which.
+        """
+        payload = self._read_json(MAX_REPORT_BYTES)
+        if payload is None:
+            return None
+
+        raw_rows = payload.get('rows')
+        if not isinstance(raw_rows, list) or not raw_rows:
+            return self._send_json(400, {'error': 'No parts selected for the form'})
+
+        rows = [row for row in raw_rows if isinstance(row, dict) and row.get('mpn')]
+        if not rows:
+            return self._send_json(400, {'error': 'None of those rows carry a part number'})
+
+        raw_meta = payload.get('meta') if isinstance(payload.get('meta'), dict) else {}
+        meta = {}
+        for key in ('program', 'caseNumber', 'preparedBy', 'organization', 'contract',
+                    'cage', 'date', 'notes', 'scope', 'obtained'):
+            value = raw_meta.get(key)
+            if value:
+                meta[key] = str(value)[:400]
+
+        buffer = io.BytesIO()
+        try:
+            dmsms_module.write_form(buffer, rows, meta)
+        except Exception as err:
+            return self._send_json(500, {'error': 'Could not build the form: %s' % err})
+
+        body = buffer.getvalue()
+        name = _download_name(meta.get('program') or 'dmsms', suffix='-dmsms.xlsx')
         self.send_response(200)
         self.send_header(
             'Content-Type',

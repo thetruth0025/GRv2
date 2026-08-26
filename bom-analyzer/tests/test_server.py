@@ -348,6 +348,87 @@ class ScreeningTests(unittest.TestCase):
         self.assertEqual(result['data']['rows'], [])
 
 
+class DmsmsTests(unittest.TestCase):
+    """The case form is built from the parts the analyst ticked, not from a rule."""
+
+    def rows(self, *specs):
+        out = []
+        for index, (mpn, lifecycle) in enumerate(specs):
+            out.append({
+                'index': index, 'row': index + 1, 'mpn': mpn, 'quantity': 50,
+                'reference': 'R%d' % (index + 1), 'manufacturer': 'Acme',
+                'description': 'A part', 'assembly': 'Main board',
+                'offers': {'digikey': {
+                    'supplier': 'DigiKey', 'found': True, 'lifecycle': lifecycle,
+                    'lifecycleSeverity': 'bad', 'stock': 500, 'totalStock': 500,
+                    'unitPrice': 1.25, 'extendedPrice': 62.5,
+                }},
+                'comparison': {
+                    'lifecycle': lifecycle, 'lifecycleSeverity': 'bad',
+                    'recommendedSupplier': 'DigiKey', 'inStockSuppliers': ['DigiKey'],
+                    'flags': [],
+                },
+            })
+        return out
+
+    def post(self, payload):
+        return call_binary('/api/dmsms', body=json.dumps(payload),
+                           headers={'Content-Type': 'application/json'})
+
+    def test_health_publishes_the_statuses_the_form_covers(self):
+        data = call('/api/health')['data']['dmsms']
+        self.assertIn('Obsolete', data['statuses'])
+        self.assertIn('Not Recommended for New Designs', data['statuses'])
+        # Still buyable, so listed but not ticked for the analyst.
+        self.assertNotIn('Not Recommended for New Designs', data['defaultSelected'])
+        self.assertTrue(data['resolutionOptions'])
+
+    def test_a_form_comes_back_named_after_the_program(self):
+        result = self.post({
+            'meta': {'program': 'Falcon II'},
+            'rows': self.rows(('ABC123', 'Obsolete')),
+        })
+        self.assertEqual(result['status'], 200)
+        self.assertIn('spreadsheetml', result['headers']['Content-Type'])
+        self.assertIn('Falcon-II-dmsms.xlsx', result['headers']['Content-Disposition'])
+
+    def test_only_the_rows_sent_appear_on_the_form(self):
+        from bomlib.spreadsheet import parse_xlsx
+        data = self.post({
+            'meta': {'program': 'Osprey'},
+            'rows': self.rows(('AAA', 'Obsolete'), ('BBB', 'End of Life')),
+        })['body']
+        grid = parse_xlsx(data)
+        index = next(i for i, line in enumerate(grid) if line and line[0] == 'Item')
+        header = grid[index]
+        records = [line for line in grid[index + 1:] if line and str(line[0]).isdigit()]
+        self.assertEqual([r[header.index('Manufacturer Part Number')] for r in records],
+                         ['AAA', 'BBB'])
+
+    def test_two_programs_get_two_different_forms_from_one_analysis(self):
+        from bomlib.spreadsheet import parse_xlsx
+
+        def parts(payload):
+            grid = parse_xlsx(payload)
+            index = next(i for i, line in enumerate(grid) if line and line[0] == 'Item')
+            header = grid[index]
+            return [line[header.index('Manufacturer Part Number')]
+                    for line in grid[index + 1:] if line and str(line[0]).isdigit()]
+
+        every = self.rows(('AAA', 'Obsolete'), ('BBB', 'Obsolete'), ('CCC', 'Obsolete'))
+        first = self.post({'meta': {'program': 'Falcon II'}, 'rows': every[:2]})
+        second = self.post({'meta': {'program': 'Osprey'}, 'rows': every[2:]})
+        self.assertEqual(parts(first['body']), ['AAA', 'BBB'])
+        self.assertEqual(parts(second['body']), ['CCC'])
+        self.assertIn('Falcon-II', first['headers']['Content-Disposition'])
+        self.assertIn('Osprey', second['headers']['Content-Disposition'])
+
+    def test_an_empty_selection_is_refused_rather_than_producing_a_blank_form(self):
+        self.assertEqual(self.post({'meta': {'program': 'X'}, 'rows': []})['status'], 400)
+        self.assertEqual(self.post({'meta': {'program': 'X'},
+                                    'rows': [{'quantity': 1}]})['status'], 400)
+
+
 class ReportTests(unittest.TestCase):
     """The workbook is built from results the client already holds."""
 

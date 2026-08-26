@@ -36,6 +36,7 @@ from bomlib.report import (  # noqa: E402
     render_table,
     truncate,
 )
+from bomlib import dmsms as dmsms_module
 from bomlib.prepare import (
     DEFAULT_IGNORE_PREFIXES,
     describe_exclusions,
@@ -118,6 +119,23 @@ def build_parser():
         help='Print the detected headers and column mapping, then exit.',
     )
 
+    obsolescence = parser.add_argument_group(
+        'obsolescence', 'DMSMS case form for the parts whose supply is ending.')
+    obsolescence.add_argument(
+        '--dmsms', metavar='FILE',
+        help='Write a DMSMS case form (.xlsx) covering every at-risk part: obsolete, '
+             'discontinued, end of life, last time buy and NRND.',
+    )
+    obsolescence.add_argument(
+        '--program', metavar='NAME',
+        help='Program or platform the DMSMS form is for. Required with --dmsms.',
+    )
+    obsolescence.add_argument(
+        '--dmsms-status', action='append', metavar='STATUS', dest='dmsms_statuses',
+        help='Limit the form to these lifecycle statuses, e.g. --dmsms-status Obsolete. '
+             'Repeatable. Defaults to every at-risk status.',
+    )
+
     output = parser.add_argument_group('output')
     output.add_argument('--table', dest='table', action='store_true', default=None,
                         help='Always print the per-part table.')
@@ -163,6 +181,12 @@ def main(argv=None):
         return EXIT_ERROR
     if args.limit is not None and args.limit < 1:
         print('error: --limit must be 1 or more', file=sys.stderr)
+        return EXIT_ERROR
+    if args.dmsms and not args.program:
+        print('error: --dmsms needs --program to name the form', file=sys.stderr)
+        return EXIT_ERROR
+    if args.program and not args.dmsms:
+        print('error: --program only applies with --dmsms', file=sys.stderr)
         return EXIT_ERROR
 
     # Screened before --limit so the limit counts parts that will really be
@@ -247,7 +271,42 @@ def main(argv=None):
             return EXIT_ERROR
         log('\nWrote %s' % paint(args.output, 'bold'))
 
+    if args.dmsms:
+        code = write_dmsms_form(args, result, source, log, paint)
+        if code != EXIT_OK:
+            return code
+
     return check_exit(args.fail_on, summary)
+
+
+def write_dmsms_form(args, result, source, log, paint):
+    """Every at-risk part goes on the form; the browser is where you pick."""
+    wanted = args.dmsms_statuses
+    rows = dmsms_module.candidate_rows(result)
+    if wanted:
+        allowed = [w.strip().lower() for w in wanted]
+        rows = [r for r in rows
+                if str(r['comparison'].get('lifecycle') or '').lower() in allowed]
+
+    if not rows:
+        print('error: no at-risk parts to put on a DMSMS form.', file=sys.stderr)
+        return EXIT_ERROR
+
+    for row in rows:
+        row['assembly'] = source
+
+    try:
+        dmsms_module.write_form(args.dmsms, rows, {
+            'program': args.program,
+            'scope': source,
+        })
+    except OSError as err:
+        print('error: could not write %s: %s' % (args.dmsms, err), file=sys.stderr)
+        return EXIT_ERROR
+
+    log('Wrote %s — %s on the DMSMS form'
+        % (paint(args.dmsms, 'bold'), _plural(len(rows), 'part')))
+    return EXIT_OK
 
 
 # ── Input ───────────────────────────────────────────────────────────────────
