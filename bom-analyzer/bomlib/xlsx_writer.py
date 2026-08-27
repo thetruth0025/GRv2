@@ -27,6 +27,42 @@ STYLE_MONEY_BOLD = 13
 STYLE_INT_BOLD = 14
 STYLE_BOLD = 15
 
+# Highlight bands for the lead-time report. Each band needs its own copy per
+# number format, because a fill and a number format are one style in Excel and
+# a shaded row still has to show money as money.
+STYLE_FILL_GREEN = 16
+STYLE_FILL_GREEN_INT = 17
+STYLE_FILL_GREEN_MONEY = 18
+STYLE_FILL_YELLOW = 19
+STYLE_FILL_YELLOW_INT = 20
+STYLE_FILL_YELLOW_MONEY = 21
+STYLE_FILL_ORANGE = 22
+STYLE_FILL_ORANGE_INT = 23
+STYLE_FILL_ORANGE_MONEY = 24
+STYLE_FILL_RED = 25
+STYLE_FILL_RED_INT = 26
+STYLE_FILL_RED_MONEY = 27
+
+# Pick the styled cell for a highlighted row: fill by band, format by content.
+FILL_STYLES = {
+    'green': (STYLE_FILL_GREEN, STYLE_FILL_GREEN_INT, STYLE_FILL_GREEN_MONEY),
+    'yellow': (STYLE_FILL_YELLOW, STYLE_FILL_YELLOW_INT, STYLE_FILL_YELLOW_MONEY),
+    'orange': (STYLE_FILL_ORANGE, STYLE_FILL_ORANGE_INT, STYLE_FILL_ORANGE_MONEY),
+    'red': (STYLE_FILL_RED, STYLE_FILL_RED_INT, STYLE_FILL_RED_MONEY),
+}
+
+
+def fill_style(colour, kind='text'):
+    """The style index for one cell of a highlighted row.
+
+    `kind` is 'text', 'int' or 'money'. An unknown colour means no highlight,
+    which is how a band that is deliberately left unshaded stays readable.
+    """
+    styles = FILL_STYLES.get(colour)
+    if not styles:
+        return {'money': STYLE_MONEY, 'int': STYLE_INT}.get(kind, STYLE_DEFAULT)
+    return styles[{'text': 0, 'int': 1, 'money': 2}.get(kind, 0)]
+
 # Excel rejects most control characters outright.
 _ILLEGAL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
 
@@ -137,7 +173,7 @@ def _styles_xml():
         '<numFmt numFmtId="164" formatCode="#,##0.00"/>'
         '<numFmt numFmtId="165" formatCode="#,##0.00000"/>'
         '</numFmts>'
-        '<fonts count="9">'
+        '<fonts count="13">'
         '<font><sz val="11"/><name val="Calibri"/></font>'
         '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
         '<font><sz val="11"/><color rgb="FFC00000"/><name val="Calibri"/></font>'
@@ -148,8 +184,13 @@ def _styles_xml():
         '<font><b/><sz val="12"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>'
         '<font><sz val="11"/><color rgb="FF1E7A46"/><name val="Calibri"/></font>'
         '<font><b/><sz val="11"/><color rgb="FF1F3B4D"/><name val="Calibri"/></font>'
+        # 9-12 dark ink for the lead-time highlight bands
+        '<font><sz val="11"/><color rgb="FF1E5B32"/><name val="Calibri"/></font>'
+        '<font><sz val="11"/><color rgb="FF6B5300"/><name val="Calibri"/></font>'
+        '<font><sz val="11"/><color rgb="FF8A3D0B"/><name val="Calibri"/></font>'
+        '<font><b/><sz val="11"/><color rgb="FF9C0006"/><name val="Calibri"/></font>'
         '</fonts>'
-        '<fills count="5">'
+        '<fills count="9">'
         '<fill><patternFill patternType="none"/></fill>'
         '<fill><patternFill patternType="gray125"/></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FF1F3B4D"/>'
@@ -159,6 +200,15 @@ def _styles_xml():
         '<bgColor indexed="64"/></patternFill></fill>'
         '<fill><patternFill patternType="solid"><fgColor rgb="FFEDF2F6"/>'
         '<bgColor indexed="64"/></patternFill></fill>'
+        # 5 light green, 6 light yellow, 7 orange, 8 light red
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFD8EFD3"/>'
+        '<bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFFFF2B2"/>'
+        '<bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFFBC38B"/>'
+        '<bgColor indexed="64"/></patternFill></fill>'
+        '<fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/>'
+        '<bgColor indexed="64"/></patternFill></fill>'
         '</fills>'
         '<borders count="2">'
         '<border><left/><right/><top/><bottom/><diagonal/></border>'
@@ -166,7 +216,7 @@ def _styles_xml():
         '<color rgb="FF8EA9BB"/></bottom><diagonal/></border>'
         '</borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        '<cellXfs count="16">'
+        '<cellXfs count="28">'
         # 0 default
         '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
         # 1 header
@@ -201,6 +251,22 @@ def _styles_xml():
         '<xf numFmtId="3" fontId="8" fillId="0" borderId="0" xfId="0" '
         'applyNumberFormat="1" applyFont="1"/>'
         '<xf numFmtId="0" fontId="8" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+        # fill 5: text, integer, money
+        '<xf numFmtId="0" fontId="9" fillId="5" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+        '<xf numFmtId="3" fontId="9" fillId="5" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        '<xf numFmtId="164" fontId="9" fillId="5" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        # fill 6: text, integer, money
+        '<xf numFmtId="0" fontId="10" fillId="6" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+        '<xf numFmtId="3" fontId="10" fillId="6" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        '<xf numFmtId="164" fontId="10" fillId="6" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        # fill 7: text, integer, money
+        '<xf numFmtId="0" fontId="11" fillId="7" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+        '<xf numFmtId="3" fontId="11" fillId="7" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        '<xf numFmtId="164" fontId="11" fillId="7" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        # fill 8: text, integer, money
+        '<xf numFmtId="0" fontId="12" fillId="8" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
+        '<xf numFmtId="3" fontId="12" fillId="8" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        '<xf numFmtId="164" fontId="12" fillId="8" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
         '</cellXfs>'
         '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
         '</styleSheet>' % ns

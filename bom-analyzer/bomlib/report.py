@@ -10,6 +10,7 @@ import json
 import os
 import re
 
+from . import leadtime as leadtime_module
 from .normalize import format_lead_time
 from .prepare import DUPLICATE, FLAGGED, IGNORED, MERGED
 from .xlsx_writer import (
@@ -31,6 +32,7 @@ from .xlsx_writer import (
     STYLE_TITLE,
     STYLE_WARN,
     column_letter,
+    fill_style,
     write_xlsx,
 )
 
@@ -276,14 +278,14 @@ def write_report_workbook(target, books):
             meta = book.get('meta') or {}
             # Four sheet names share the prefix, and Excel truncates at 31
             # characters, so the BOM name gets the room that leaves.
-            prefix = _sheet_prefix(meta.get('name') or 'BOM %d' % (index + 1))
+            prefix = sheet_prefix(meta.get('name') or 'BOM %d' % (index + 1))
         sheets.extend(build_workbook_sheets(
             book['result'], book['summary'], book.get('meta'), book.get('excluded'), prefix,
         ))
     return write_xlsx(target, sheets, freeze_rows=1, autofilter=True)
 
 
-def _sheet_prefix(name):
+def sheet_prefix(name):
     # "Full comparison" is the longest sheet name at 15 characters; 31 minus
     # that and a space leaves 15 for the BOM.
     cleaned = re.sub(r'[\[\]:*?/\\]', '-', str(name or '')).strip()
@@ -726,6 +728,138 @@ def _parts_widths(header):
     return widths
 
 
+# ── Long lead times ─────────────────────────────────────────────────────────
+
+LEAD_COLUMNS = [
+    'Row', 'Part Number', 'Qty', 'Manufacturer', 'Description',
+    'Availability', 'Lead (days)', 'Buy From', 'Supplier P/N',
+    'Unit Price', 'Extended', 'Stock', 'Lifecycle',
+    'Suppliers Carrying', 'Also Available From', 'Notes',
+]
+LEAD_WIDTHS = [6, 26, 8, 18, 34, 20, 11, 16, 22, 12, 13, 12, 15, 10, 40, 46]
+
+# The colour each band is shaded, which is also what the legend explains.
+LEAD_FILL = {
+    leadtime_module.QUICK: 'green',
+    leadtime_module.MEDIUM: 'yellow',
+    leadtime_module.LONG: 'orange',
+    leadtime_module.NONE: 'red',
+    # Deliberately unshaded: "nobody would say when" is not a duration, and
+    # colouring it as one would assert something no supplier did.
+    leadtime_module.UNKNOWN: None,
+}
+
+
+def _others_text(entry):
+    return '; '.join(
+        '%s (%s)' % (other['supplier'], other['availability'])
+        for other in entry['others'][:4]
+    )
+
+
+def build_lead_rows(report, styled=False):
+    """The lead-time table, one row per part, shaded by band."""
+    header = list(LEAD_COLUMNS)
+    rows = [[Cell(h, STYLE_HEADER) for h in header] if styled else header]
+
+    for entry in report['rows']:
+        colour = LEAD_FILL.get(entry['band'])
+        note = entry['note']
+
+        values = [
+            entry['row'], entry['mpn'], entry['quantity'], entry['manufacturer'],
+            entry['description'], entry['availability'], entry['days'],
+            entry['supplier'], entry['supplierPartNumber'],
+            entry['unitPrice'], entry['extendedPrice'], entry['stock'],
+            entry['lifecycle'], entry['suppliersCarrying'],
+            _others_text(entry), note,
+        ]
+        if not styled:
+            rows.append(values)
+            continue
+
+        # Which cells are numbers decides the format; the band decides the fill.
+        kinds = ['int', 'text', 'int', 'text', 'text', 'text', 'int', 'text',
+                 'text', 'money', 'money', 'int', 'text', 'int', 'text', 'text']
+        rows.append([
+            Cell(value, fill_style(colour, kind))
+            for value, kind in zip(values, kinds)
+        ])
+    return rows
+
+
+def build_lead_summary_rows(report, meta=None):
+    """The title block above the table: what was searched, and the legend."""
+    meta = meta or {}
+    counts = report['counts']
+    thresholds = report['thresholds']
+
+    rows = [
+        _pad([Cell('Long Lead Times', STYLE_TITLE)]),
+        _pad([Cell('%s · %s · %d part%s across %d supplier%s' % (
+            meta.get('name') or 'Parts looked up',
+            meta.get('generated') or '',
+            len(report['rows']), '' if len(report['rows']) == 1 else 's',
+            len(report['suppliers']), '' if len(report['suppliers']) == 1 else 's',
+        ), STYLE_SUBTITLE)]),
+        _pad([]),
+        _section('How soon each part can arrive'),
+    ]
+
+    legend = [
+        (leadtime_module.NONE, 'red',
+         'No supplier searched can provide the part at this time'),
+        (leadtime_module.LONG, 'orange',
+         'More than %d weeks out' % (thresholds['longDays'] // 7)),
+        (leadtime_module.MEDIUM, 'yellow',
+         '%d to %d weeks out' % (thresholds['mediumDays'] // 7,
+                                 thresholds['longDays'] // 7)),
+        (leadtime_module.QUICK, 'green',
+         'In stock, or quoted inside %d weeks' % (thresholds['mediumDays'] // 7)),
+        (leadtime_module.UNKNOWN, None,
+         'Carried, but no supplier quoted a date'),
+    ]
+    for band, colour, explanation in legend:
+        rows.append(_pad([
+            Cell(leadtime_module.BAND_LABEL[band], fill_style(colour)),
+            Cell(counts.get(band, 0), fill_style(colour, 'int')),
+            Cell(explanation, fill_style(colour)),
+        ]))
+
+    rows.append(_pad([]))
+    rows.append(_pad([Cell(
+        'Stock on hand counts as zero days, because it ships today whatever the '
+        'factory quotes behind it. Where several suppliers can deliver in the same '
+        'time, the cheapest of them is the one named.', STYLE_MUTED)]))
+    return rows
+
+
+def build_lead_workbook_sheets(report, meta=None, prefix=''):
+    """A lead-time workbook: the legend, then the table."""
+    def name(base):
+        return ('%s %s' % (prefix, base)).strip() if prefix else base
+
+    summary_rows = build_lead_summary_rows(report, meta)
+    return [{
+        'name': name('Lead times'),
+        'rows': summary_rows,
+        'widths': [30, 10, 60, 15, 15, 15, 15, 15],
+        'freeze': 0,
+        'autofilter': False,
+        'merges': ['A1:%s1' % column_letter(REPORT_WIDTH - 1),
+                   'A2:%s2' % column_letter(REPORT_WIDTH - 1)],
+        'heights': {0: 26, 1: 18},
+    }, {
+        'name': name('By part'),
+        'rows': build_lead_rows(report, styled=True),
+        'widths': LEAD_WIDTHS,
+    }]
+
+
+def write_lead_workbook(target, report, meta=None):
+    write_xlsx(target, build_lead_workbook_sheets(report, meta))
+
+
 def build_workbook_sheets(result, summary, meta=None, excluded=None, prefix=''):
     """Every sheet of the deliverable, headline first.
 
@@ -760,6 +894,12 @@ def build_workbook_sheets(result, summary, meta=None, excluded=None, prefix=''):
         'rows': build_rows(result, summary, styled=True),
         'widths': column_widths(result['suppliers']),
     }]
+
+    sheets.append({
+        'name': name('Lead times'),
+        'rows': build_lead_rows(leadtime_module.build_report(result), styled=True),
+        'widths': LEAD_WIDTHS,
+    })
 
     if has_distributor_detail(result):
         sheets.append({

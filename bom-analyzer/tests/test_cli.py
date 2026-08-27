@@ -904,3 +904,75 @@ class AlternateNoteTests(unittest.TestCase):
     def test_a_long_list_is_trimmed(self):
         many = [{'mpn': 'S%d' % i, 'usable': True} for i in range(6)]
         self.assertEqual(self.note(many), 'approved alternates available: S0, S1, S2')
+
+
+class LeadTimeCliTests(unittest.TestCase):
+    """--lead-time writes the same report the browser shows."""
+
+    def setUp(self):
+        self.paths = []
+        self._original = bom.build_service
+        bom.build_service = self._stub_service
+
+    def tearDown(self):
+        bom.build_service = self._original
+        for path in self.paths:
+            if os.path.exists(path):
+                os.unlink(path)
+
+    def _stub_service(self, args):
+        return LookupService(clients=[
+            StubSupplier('digikey', 'DigiKey', 0.10, lead='16 Weeks', stock=0),
+            StubSupplier('mouser', 'Mouser', 0.20, lead='2 Weeks', stock=90000),
+        ], cache=None), None
+
+    def temp(self, suffix):
+        handle, path = tempfile.mkstemp(suffix=suffix)
+        os.close(handle)
+        self.paths.append(path)
+        return path
+
+    def source(self):
+        path = self.temp('.csv')
+        with open(path, 'w', encoding='utf-8') as handle:
+            handle.write('Manufacturer Part Number,Qty\nABC123,100\nDEF456,50\n')
+        return path
+
+    def run_cli(self, argv):
+        errors = io.StringIO()
+        original = sys.stderr
+        sys.stderr = errors
+        try:
+            return bom.main(argv), errors.getvalue()
+        finally:
+            sys.stderr = original
+
+    def test_a_report_is_written_for_every_part_looked_up(self):
+        from bomlib.spreadsheet import parse_xlsx
+        out = self.temp('.xlsx')
+        code, _ = self.run_cli([self.source(), '--lead-time', out, '--quiet', '--no-color'])
+        self.assertEqual(code, 0)
+        with open(out, 'rb') as handle:
+            data = handle.read()
+        table = parse_xlsx(data, 'By part')
+        self.assertEqual(sorted(r[1] for r in table[1:]), ['ABC123', 'DEF456'])
+
+    def test_the_supplier_holding_stock_wins_over_the_cheaper_one(self):
+        from bomlib.spreadsheet import parse_xlsx
+        out = self.temp('.xlsx')
+        self.run_cli([self.source(), '--lead-time', out, '--quiet', '--no-color'])
+        with open(out, 'rb') as handle:
+            table = parse_xlsx(handle.read(), 'By part')
+        header = table[0]
+        # DigiKey is half the price but sixteen weeks out with nothing on the
+        # shelf; Mouser has 90,000 in stock.
+        self.assertEqual(table[1][header.index('Buy From')], 'Mouser')
+        self.assertEqual(table[1][header.index('Availability')], 'In stock')
+
+    def test_the_lead_sheet_also_rides_along_in_the_main_workbook(self):
+        from bomlib.spreadsheet import parse_xlsx
+        out = self.temp('.xlsx')
+        self.run_cli([self.source(), '-o', out, '--quiet', '--no-color'])
+        with open(out, 'rb') as handle:
+            data = handle.read()
+        self.assertEqual(parse_xlsx(data, 'Lead times')[0][1], 'Part Number')

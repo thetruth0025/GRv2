@@ -104,6 +104,13 @@ of a healthy BOM. What it finds fills the DMSMS form's Suggested Replacement col
 separate query from part search and fails separately: `similarParts` is not on every Nexar plan, and
 a plan without it still gives you the supplier column.
 
+**Says when each part can arrive, and from whom.** The **Lead times** button bands every part
+looked up — from a BOM or typed by hand — by how soon it can actually be here. Stock on hand counts
+as zero days, because it ships today whatever the factory quotes behind it; where several suppliers
+can deliver in the same time, the cheapest of them is the one named. In stock or inside three weeks
+is green, three to eight weeks yellow, longer orange, and a part no supplier carries is red and says
+so. Exports to Excel with the same shading.
+
 **Fills a DMSMS form per program.** Parts whose supply is ending — obsolete, discontinued, end of
 life, last time buy, NRND — are collected across every analyzed BOM into a picker. Tick the ones
 belonging to a program, name it, and out comes a DMSMS case form as Excel. A part can sit on three
@@ -243,6 +250,7 @@ the whole analysis, screened-out lines included, for scripting.
 | `--ignore-skip-column` | Look up lines the BOM marks YES in a skip-to-production column |
 | `--no-alternates` | Do not look up the approved alternates named in the BOM's alternates column |
 | `--show-skipped` | List every skipped line and why |
+| `--lead-time FILE` | Write a long-lead-times report: every part banded by how soon it can arrive |
 | `--dmsms FILE --program NAME` | Write a DMSMS case form for every at-risk part |
 | `--dmsms-status STATUS` | Narrow the form to given lifecycle statuses (repeatable) |
 | `--alternatives` | Ask Nexar what could replace each at-risk part, and fill in Suggested Replacement |
@@ -363,6 +371,54 @@ column in the browser does the same.
 
 Typed lookups ignore the column entirely, as they ignore every other screening rule: a part number
 you entered by hand is a direct question, and it gets answered.
+
+### Long lead times
+
+**Lead times** answers a purchasing question rather than a pricing one: not what a part costs, but
+when it can be here and from whom. Every part that was looked up appears — a whole BOM, several
+BOMs, or a handful of part numbers typed into the lookup form — sorted worst first, so the report
+reads as a worklist rather than a table to search.
+
+Two rules decide who is named for each line:
+
+1. **Stock on hand is the fastest answer there is.** A supplier holding enough counts as zero days,
+   whatever the factory quotes behind it. A part in stock at one supplier beats the same part quoted
+   at four weeks by another, even if the quote is cheaper.
+2. **Where several suppliers can deliver in the same time, the cheapest wins.** Being equally fast,
+   price is the only thing left to choose on.
+
+Each line is then shaded by how long it takes:
+
+| | Band | Means |
+| --- | --- | --- |
+| 🟩 | **In stock or under 3 weeks** | Ships now, or quoted inside three weeks |
+| 🟨 | **3–8 weeks** | Plan around it |
+| 🟧 | **Over 8 weeks** | The long poles |
+| 🟥 | **Not available** | No supplier searched can provide the part at this time |
+| ⬜ | **Unknown** | Carried, but no supplier would quote a date |
+
+Two of those need a word of explanation. The colours you asked for leave a gap between "in stock"
+and "three weeks", so a part quoted inside a fortnight is shaded green alongside stock: the band
+exists to separate "order it" from "plan around it", and a fortnight is not something to plan
+around. The exact wording is still in the Availability column either way. And a part that is
+carried but that nobody would date is left **unshaded** rather than binned as long: TrustedParts,
+for one, reports stock without a lead time, and colouring that orange would assert a delay no
+supplier ever quoted.
+
+Alongside the winner each line carries the price, the stock, how many suppliers carry it at all,
+who else could supply it and when — and, where the BOM named an approved alternate that can
+actually be bought, that alternate, because it is the one thing that rescues a line that is late or
+gone.
+
+**Export Excel** writes the report as a workbook: a legend sheet with the band counts, then the
+table with each row shaded light green, light yellow, orange or light red. On the command line:
+
+```bash
+python3 bom.py my-bom.csv --lead-time lead-times.xlsx
+```
+
+The same table is also a **Lead times** sheet inside the main `-o report.xlsx` workbook, so one
+export carries everything.
 
 ### The alternates column
 

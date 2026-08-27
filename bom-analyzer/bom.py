@@ -11,6 +11,7 @@ Standard library only. Credentials come from .env, exactly as the web app.
 """
 
 import argparse
+import datetime
 import os
 import sys
 
@@ -38,7 +39,9 @@ from bomlib.report import (  # noqa: E402
     truncate,
 )
 from bomlib import dmsms as dmsms_module
+from bomlib import leadtime as leadtime_module
 from bomlib import nexar as nexar_module
+from bomlib import report as report_module
 from bomlib.prepare import (
     DEFAULT_IGNORE_PREFIXES,
     describe_exclusions,
@@ -158,6 +161,11 @@ def build_parser():
         '--nexar-check', action='store_true',
         help='Test the Nexar credentials on their own and print exactly what the token '
              'endpoint said. Nothing else runs.',
+    )
+    obsolescence.add_argument(
+        '--lead-time', metavar='FILE',
+        help='Write a long-lead-times report: every part banded by how soon it can '
+             'arrive, with the supplier that can do it soonest and cheapest.',
     )
     obsolescence.add_argument(
         '--dmsms-status', action='append', metavar='STATUS', dest='dmsms_statuses',
@@ -309,6 +317,11 @@ def main(argv=None):
             print('error: could not write %s: %s' % (args.output, err), file=sys.stderr)
             return EXIT_ERROR
         log('\nWrote %s' % paint(args.output, 'bold'))
+
+    if args.lead_time:
+        code = write_lead_time_report(args, result, source, log, paint)
+        if code != EXIT_OK:
+            return code
 
     if args.dmsms:
         code = write_dmsms_form(args, result, source, log, paint)
@@ -798,6 +811,33 @@ def _alternate_note(row):
         ', '.join(a['mpn'] for a in entries[:3]),
         'is' if len(entries) == 1 else 'are',
     )
+
+
+def write_lead_time_report(args, result, source, log, paint):
+    """Every looked-up part, banded by how soon it can arrive."""
+    report = leadtime_module.build_report(result, scope=os.path.basename(source))
+    try:
+        report_module.write_lead_workbook(args.lead_time, report, {
+            'name': os.path.basename(source),
+            'generated': datetime.datetime.now().strftime('%Y-%m-%d %H:%M'),
+        })
+    except OSError as err:
+        print('error: could not write %s: %s' % (args.lead_time, err), file=sys.stderr)
+        return EXIT_ERROR
+
+    counts = report['counts']
+    log('\nWrote %s' % paint(args.lead_time, 'bold'))
+    # The two bands worth acting on, said in the order they matter.
+    missing = counts.get(leadtime_module.NONE, 0)
+    if missing:
+        log('  %s' % paint('%d part%s no supplier can provide' % (
+            missing, '' if missing == 1 else 's'), 'red'))
+    long_lead = counts.get(leadtime_module.LONG, 0)
+    if long_lead:
+        log('  %s' % paint('%d part%s more than %d weeks out' % (
+            long_lead, '' if long_lead == 1 else 's',
+            report['thresholds']['longDays'] // 7), 'yellow'))
+    return EXIT_OK
 
 
 def check_exit(fail_on, summary):

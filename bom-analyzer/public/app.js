@@ -122,7 +122,7 @@
     'setupCard', 'toast', 'attribution',
     'bomBar', 'bomTabs', 'bomCount', 'analyzeAllBtn', 'closeAllBtn',
     'reportBtn', 'skippedNote', 'reportOverlay', 'dmsmsBtn', 'dmsmsOverlay',
-    'altBtn', 'altOverlay',
+    'altBtn', 'altOverlay', 'leadBtn', 'leadOverlay',
   ].forEach(function (id) {
     el[id] = document.getElementById(id);
   });
@@ -2022,6 +2022,319 @@
     reportReturnFocus = null;
   }
 
+  // ── Long lead times ──────────────────────────────────────────────────────
+  //
+  // A purchasing question rather than a pricing one: not what a part costs but
+  // when it can be here, and from whom. Mirrors bomlib/leadtime.py so the
+  // screen and the workbook can never disagree.
+
+  var LEAD_MEDIUM_DAYS = 21;
+  var LEAD_LONG_DAYS = 56;
+
+  var LEAD_BANDS = [
+    { key: 'none', label: 'Not available', tone: 'red',
+      note: 'No supplier searched can provide the part at this time' },
+    { key: 'long', label: 'Over 8 weeks', tone: 'orange',
+      note: 'More than ' + (LEAD_LONG_DAYS / 7) + ' weeks out' },
+    { key: 'medium', label: '3–8 weeks', tone: 'yellow',
+      note: (LEAD_MEDIUM_DAYS / 7) + ' to ' + (LEAD_LONG_DAYS / 7) + ' weeks out' },
+    { key: 'unknown', label: 'Unknown', tone: '',
+      note: 'Carried, but no supplier quoted a date' },
+    { key: 'quick', label: 'In stock or under 3 weeks', tone: 'green',
+      note: 'In stock, or quoted inside ' + (LEAD_MEDIUM_DAYS / 7) + ' weeks' },
+  ];
+
+  // Short in the availability column, said in full in the note beside it.
+  var NO_SUPPLIER_SHORT = 'Not available';
+  var NO_SUPPLIER_TEXT = 'No supplier searched can provide this part at this time';
+  var LEAD_UNKNOWN_SHORT = 'No date quoted';
+
+  // Enough stock on hand ships today, whatever the factory quotes behind it.
+  function effectiveDays(offer) {
+    if (!offer || !offer.found) return null;
+    if (offer.stockSufficient === true) return 0;
+    return typeof offer.leadTimeDays === 'number' ? offer.leadTimeDays : null;
+  }
+
+  function leadBandFor(days, carried) {
+    if (!carried) return 'none';
+    if (days === null || days === undefined) return 'unknown';
+    if (days < LEAD_MEDIUM_DAYS) return 'quick';
+    if (days <= LEAD_LONG_DAYS) return 'medium';
+    return 'long';
+  }
+
+  function leadAvailability(entry) {
+    if (!entry) return NO_SUPPLIER_SHORT;
+    if (entry.days === null) return LEAD_UNKNOWN_SHORT;
+    if (entry.days <= 0) return 'In stock';
+    return leadTimeText(entry.days);
+  }
+
+  // Mirrors format_lead_time() in bomlib/normalize.py, which is what every
+  // other lead time on the page is already worded by. Weeks only when the
+  // quote divides into them: rounding 120 days to "17 weeks" would report a
+  // date the supplier never gave.
+  function leadTimeText(days) {
+    if (days === 0) return 'In stock';
+    if (days >= 7 && days % 7 === 0) {
+      var weeks = days / 7;
+      return weeks === 1 ? '1 week' : weeks + ' weeks';
+    }
+    return days === 1 ? '1 day' : days + ' days';
+  }
+
+  function rankLeadOffers(row, suppliers) {
+    var entries = [];
+    suppliers.forEach(function (supplier) {
+      var offer = row.offers[supplier.id];
+      if (!offer || !offer.found) return;
+      entries.push({
+        supplier: offer.supplier || supplier.name,
+        offer: offer,
+        days: effectiveDays(offer),
+      });
+    });
+    // Soonest first; where two are equally fast the cheaper one wins, which is
+    // the only thing left to choose on.
+    entries.sort(function (a, b) {
+      var aTimed = a.days === null ? 1 : 0;
+      var bTimed = b.days === null ? 1 : 0;
+      if (aTimed !== bTimed) return aTimed - bTimed;
+      if (a.days !== b.days && a.days !== null) return a.days - b.days;
+      var ap = typeof a.offer.extendedPrice === 'number' ? a.offer.extendedPrice : Infinity;
+      var bp = typeof b.offer.extendedPrice === 'number' ? b.offer.extendedPrice : Infinity;
+      if (ap !== bp) return ap - bp;
+      return a.supplier.localeCompare(b.supplier);
+    });
+    return entries;
+  }
+
+  function leadRow(row, suppliers) {
+    var ranked = rankLeadOffers(row, suppliers);
+    var timed = ranked.filter(function (e) { return e.days !== null; });
+    var winner = timed[0] || ranked[0] || null;
+    var days = winner ? winner.days : null;
+    var band = leadBandFor(days, ranked.length > 0);
+    var tied = timed.filter(function (e) { return e.days === days; });
+
+    return {
+      row: row,
+      band: band,
+      days: days,
+      availability: leadAvailability(winner),
+      winner: winner,
+      offer: winner ? winner.offer : null,
+      carrying: ranked.length,
+      tied: tied.length > 1 ? tied.map(function (e) { return e.supplier; }) : [],
+      others: ranked.filter(function (e) { return e !== winner; }),
+    };
+  }
+
+  function leadModel(entry) {
+    var suppliers = entry.results.suppliers;
+    var rows = entry.results.rows.map(function (row) { return leadRow(row, suppliers); });
+    var order = {};
+    LEAD_BANDS.forEach(function (band, index) { order[band.key] = index; });
+    rows.sort(function (a, b) {
+      if (order[a.band] !== order[b.band]) return order[a.band] - order[b.band];
+      // Longest wait leads its own band: the report is read from the top.
+      var ad = typeof a.days === 'number' ? a.days : 0;
+      var bd = typeof b.days === 'number' ? b.days : 0;
+      if (ad !== bd) return bd - ad;
+      return (a.row.mpn || '').localeCompare(b.row.mpn || '');
+    });
+
+    var counts = {};
+    LEAD_BANDS.forEach(function (band) { counts[band.key] = 0; });
+    rows.forEach(function (r) { counts[r.band] += 1; });
+
+    return {
+      entry: entry,
+      suppliers: suppliers,
+      rows: rows,
+      counts: counts,
+      currency: (entry.results.summary || {}).currency || 'USD',
+      generated: new Date().toLocaleString(),
+    };
+  }
+
+  // Mirrors _note() in bomlib/leadtime.py; the screen and the workbook have to
+  // give a buyer the same reason for the same line.
+  function leadNote(item) {
+    var pieces = [];
+    if (item.band === 'none') {
+      pieces.push(NO_SUPPLIER_TEXT);
+    } else if (item.band === 'unknown') {
+      pieces.push(item.carrying + ' carr' + (item.carrying === 1 ? 'ies' : 'y') +
+        ' it, none quoting a date');
+    } else if (item.tied.length > 1) {
+      pieces.push('Cheapest of ' + item.tied.length + ' suppliers equally fast (' +
+        item.tied.join(', ') + ')');
+    } else if (item.carrying === 1 && (item.band === 'long' || item.band === 'medium')) {
+      pieces.push('Single source — only ' + item.winner.supplier + ' carries it');
+    }
+
+    if (item.band === 'none' || item.band === 'long') {
+      var usable = usableAlternates(item.row).map(function (a) { return a.mpn; });
+      if (usable.length) {
+        pieces.push('BOM alternate available: ' + usable.slice(0, 2).join(', '));
+      }
+    }
+    return pieces.join('; ');
+  }
+
+  function leadHtml(model) {
+    var currency = model.currency;
+
+    var legend = LEAD_BANDS.map(function (band) {
+      return '<div class="lead-key lead-' + (band.tone || 'plain') + '">' +
+        '<div class="k-value">' + count(model.counts[band.key]) + '</div>' +
+        '<div class="k-label">' + esc(band.label) + '</div>' +
+        '<div class="k-note">' + esc(band.note) + '</div></div>';
+    }).join('');
+
+    var body = model.rows.map(function (item) {
+      var offer = item.offer;
+      var note = leadNote(item);
+      var others = item.others.slice(0, 3).map(function (other) {
+        return esc(other.supplier) + ' (' + esc(leadAvailability(other)) + ')';
+      }).join(', ');
+
+      return '<tr class="lead-' + item.band + '">' +
+        '<td class="mpn-cell">' + esc(item.row.mpn) +
+        (item.row.description ? '<div class="desc">' + esc(item.row.description) + '</div>' : '') +
+        '</td>' +
+        '<td class="num">' + count(item.row.quantity) + '</td>' +
+        '<td><strong>' + esc(item.availability) + '</strong>' +
+        (typeof item.days === 'number' && item.days > 0
+          ? '<div class="desc">' + count(item.days) + ' days</div>' : '') + '</td>' +
+        '<td>' + (item.winner ? esc(item.winner.supplier) : '<span class="muted">—</span>') +
+        (offer && offer.aggregator && offer.distributor
+          ? '<div class="desc">via ' + esc(offer.distributor) + '</div>' : '') + '</td>' +
+        '<td class="num">' + esc((offer && money(offer.unitPrice, offer.currency)) || '—') + '</td>' +
+        '<td class="num">' + esc((offer && money(offer.extendedPrice, offer.currency)) || '—') + '</td>' +
+        '<td class="num">' + (offer && offer.stock !== null && offer.stock !== undefined
+          ? count(offer.stock) : '<span class="muted">—</span>') + '</td>' +
+        '<td class="num">' + count(item.carrying) + '</td>' +
+        '<td class="desc">' + (others || '<span class="muted">—</span>') + '</td>' +
+        '<td class="desc">' + esc(note) + '</td>' +
+        '</tr>';
+    }).join('');
+
+    var analyzed = state.boms.filter(function (b) { return b.results; });
+    var allButton = analyzed.length > 1
+      ? '<button type="button" class="btn ghost small" data-lead="excel-all">Excel · all ' +
+        analyzed.length + ' BOMs</button>'
+      : '';
+
+    return '<div class="report-sheet">' +
+      '<div class="report-head">' +
+      '<div><h2 id="leadTitle">' + esc(model.entry.name) + '</h2>' +
+      '<div class="sub">Long lead times · ' + esc(model.generated) + ' · ' +
+      model.rows.length + ' part' + (model.rows.length === 1 ? '' : 's') +
+      ' across ' + model.suppliers.length + ' supplier' +
+      (model.suppliers.length === 1 ? '' : 's') + ' · prices in ' + esc(currency) + '</div></div>' +
+      '<div class="report-actions">' +
+      '<button type="button" class="btn primary small" data-lead="excel">Export Excel</button>' +
+      allButton +
+      '<button type="button" class="btn ghost small" data-lead="print">Print / PDF</button>' +
+      '<button type="button" class="icon-btn" data-lead="close" aria-label="Close report">✕</button>' +
+      '</div></div>' +
+      '<div class="report-body">' +
+      '<section class="report-section"><h3>How soon each part can arrive</h3>' +
+      '<div class="lead-legend">' + legend + '</div></section>' +
+      '<section class="report-section"><h3>Parts <span class="aside">worst first</span></h3>' +
+      '<div class="report-scroll"><table class="report-table lead-table">' +
+      '<thead><tr><th>Part</th><th class="num">Qty</th><th>Availability</th>' +
+      '<th>Buy from</th><th class="num">Unit</th><th class="num">Extended</th>' +
+      '<th class="num">Stock</th><th class="num">Carried by</th>' +
+      '<th>Also available from</th><th>Notes</th></tr></thead>' +
+      '<tbody>' + body + '</tbody></table></div></section>' +
+      '<div class="report-foot">Stock on hand counts as zero days, because it ships today ' +
+      'whatever the factory quotes behind it. Where several suppliers can deliver in the same ' +
+      'time, the cheapest of them is the one named.</div>' +
+      '</div></div>';
+  }
+
+  var leadReturnFocus = null;
+
+  function openLeadTimes() {
+    var entry = bom();
+    if (!entry.results) {
+      toast('Analyze this BOM first', true);
+      return;
+    }
+    leadReturnFocus = document.activeElement;
+    el.leadOverlay.innerHTML = leadHtml(leadModel(entry));
+    el.leadOverlay.hidden = false;
+    document.body.style.overflow = 'hidden';
+
+    Array.prototype.forEach.call(
+      el.leadOverlay.querySelectorAll('[data-lead]'),
+      function (button) {
+        button.addEventListener('click', function () {
+          var action = button.getAttribute('data-lead');
+          if (action === 'close') closeLeadTimes();
+          else if (action === 'print') window.print();
+          else if (action === 'excel') exportLeadWorkbook([entry]);
+          else if (action === 'excel-all') {
+            exportLeadWorkbook(state.boms.filter(function (b) { return b.results; }));
+          }
+        });
+      }
+    );
+
+    var close = el.leadOverlay.querySelector('[data-lead="close"]');
+    if (close) close.focus();
+  }
+
+  function closeLeadTimes() {
+    el.leadOverlay.hidden = true;
+    el.leadOverlay.innerHTML = '';
+    document.body.style.overflow = '';
+    if (leadReturnFocus && leadReturnFocus.focus) leadReturnFocus.focus();
+    leadReturnFocus = null;
+  }
+
+  function exportLeadWorkbook(entries) {
+    var books = (entries || []).filter(function (entry) { return entry && entry.results; });
+    if (!books.length) {
+      toast('Nothing analyzed to report on yet', true);
+      return;
+    }
+    toast('Building the workbook…');
+
+    fetch(api('/api/leadtime'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        books: books.map(function (entry) {
+          return {
+            name: entry.name,
+            generated: new Date().toLocaleString(),
+            rows: entry.results.rows,
+            suppliers: entry.results.suppliers,
+          };
+        }),
+      }),
+    })
+      .then(function (res) {
+        if (!res.ok) return readJsonOrThrow(res);
+        return res.blob().then(function (blob) {
+          var slug = books.length === 1
+            ? (books[0].name || 'bom').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')
+            : 'all-boms';
+          download(blob, (slug || 'bom') + '-lead-times-' +
+            new Date().toISOString().slice(0, 10) + '.xlsx');
+          toast('Exported ' + books.length + ' BOM' + (books.length === 1 ? '' : 's') + ' to Excel');
+        });
+      })
+      .catch(function (err) {
+        toast(err.message || 'Could not build the workbook', true);
+      });
+  }
+
   // ── DMSMS case form ──────────────────────────────────────────────────────
   //
   // A part can sit on several boards and belong to one program, so which parts
@@ -2964,6 +3277,7 @@
   });
   el.exportBtn.addEventListener('click', exportCsv);
   el.reportBtn.addEventListener('click', openReport);
+  el.leadBtn.addEventListener('click', openLeadTimes);
   el.dmsmsBtn.addEventListener('click', openDmsms);
   el.altBtn.addEventListener('click', openAlternatives);
 
@@ -2979,10 +3293,14 @@
   el.reportOverlay.addEventListener('click', function (event) {
     if (event.target === el.reportOverlay) closeReport();
   });
+  el.leadOverlay.addEventListener('click', function (event) {
+    if (event.target === el.leadOverlay) closeLeadTimes();
+  });
   document.addEventListener('keydown', function (event) {
     if (event.key !== 'Escape') return;
     if (!el.altOverlay.hidden) closeAlternatives();
     else if (!el.dmsmsOverlay.hidden) closeDmsms();
+    else if (!el.leadOverlay.hidden) closeLeadTimes();
     else if (!el.reportOverlay.hidden) closeReport();
   });
 

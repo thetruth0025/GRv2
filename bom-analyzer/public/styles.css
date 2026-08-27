@@ -903,6 +903,46 @@ footer p { color: var(--text3); font-size: 0.74rem; line-height: 1.6; max-width:
 }
 .report-table td.num, .report-table th.num { text-align: right; font-family: 'JetBrains Mono', ui-monospace, monospace; white-space: nowrap; }
 .report-table tbody tr:hover td { background: rgba(255, 255, 255, .022); }
+
+/* Long lead times.
+   The workbook is shaded in the literal light green / light yellow / orange /
+   light red a buyer asked for, because it is read on white. On this dark page
+   the same four hues are carried as tinted rows with a coloured edge: the same
+   bands, at a weight that stays readable. */
+.lead-legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.lead-key {
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 10px;
+  padding: 11px 13px;
+  background: var(--surface2);
+}
+.lead-key .k-value { font-family: 'Syne', sans-serif; font-size: 1.3rem; font-weight: 800; }
+.lead-key .k-label { font-size: 0.74rem; font-weight: 700; margin-top: 2px; }
+.lead-key .k-note { font-size: 0.7rem; color: var(--text3); margin-top: 3px; }
+
+.lead-red { border-left-color: var(--red); }
+.lead-red .k-value, .lead-red .k-label { color: var(--red); }
+.lead-orange { border-left-color: #fb923c; }
+.lead-orange .k-value, .lead-orange .k-label { color: #fb923c; }
+.lead-yellow { border-left-color: var(--yellow); }
+.lead-yellow .k-value, .lead-yellow .k-label { color: var(--yellow); }
+.lead-green { border-left-color: var(--green); }
+.lead-green .k-value, .lead-green .k-label { color: var(--green); }
+.lead-plain { border-left-color: var(--text3); }
+
+.lead-table tbody tr td:first-child { border-left: 4px solid transparent; padding-left: 9px; }
+.lead-table tbody tr.lead-none td { background: rgba(248, 113, 113, .12); }
+.lead-table tbody tr.lead-none td:first-child { border-left-color: var(--red); }
+.lead-table tbody tr.lead-none td:last-child { color: var(--red); }
+.lead-table tbody tr.lead-long td { background: rgba(251, 146, 60, .12); }
+.lead-table tbody tr.lead-long td:first-child { border-left-color: #fb923c; }
+.lead-table tbody tr.lead-medium td { background: rgba(251, 191, 36, .1); }
+.lead-table tbody tr.lead-medium td:first-child { border-left-color: var(--yellow); }
+.lead-table tbody tr.lead-quick td { background: rgba(74, 222, 128, .08); }
+.lead-table tbody tr.lead-quick td:first-child { border-left-color: var(--green); }
+.lead-table tbody tr.lead-unknown td:first-child { border-left-color: var(--text3); }
+.lead-table tbody tr:hover td { filter: brightness(1.18); }
 .report-table .mpn-cell { font-family: 'JetBrains Mono', ui-monospace, monospace; color: var(--text); overflow-wrap: anywhere; min-width: 132px; }
 .report-table .desc { color: var(--text2); font-size: 0.74rem; }
 .report-table tr.winner td:first-child { box-shadow: inset 3px 0 0 var(--accent); }

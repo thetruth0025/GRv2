@@ -740,3 +740,113 @@ class AlternativesCacheTests(unittest.TestCase):
         self.ask('LM358DR', 'TI')
         self.assertIsNone(server.cache.get(cache_key('nexar', {'mpn': 'LM358DR',
                                                               'manufacturer': 'TI'})))
+
+
+class LeadTimeEndpointTests(unittest.TestCase):
+    """The long-lead-times workbook, built from the same rows the screen shows."""
+
+    def offer(self, days=None, stocked=False, extended=5.0, found=True):
+        return {
+            'supplier': 'DigiKey', 'found': found, 'unitPrice': 0.05,
+            'extendedPrice': extended, 'stock': 5000 if stocked else 0,
+            'stockSufficient': stocked, 'lifecycle': 'Active',
+            'lifecycleSeverity': 'ok', 'leadTimeDays': days, 'currency': 'USD',
+            'orderQuantity': 100, 'supplierPartNumber': 'DK-1',
+        }
+
+    def book(self, name='Main board'):
+        def row(index, mpn, quantity, offer):
+            return {
+                'index': index, 'row': index + 1, 'mpn': mpn, 'quantity': quantity,
+                'manufacturer': 'Acme', 'description': 'A part', 'reference': 'R%d' % index,
+                'offers': {'digikey': offer},
+                'comparison': {'lifecycle': 'Active', 'lifecycleSeverity': 'ok',
+                               'inStockSuppliers': ['DigiKey'] if offer['stockSufficient']
+                                                   else [], 'flags': []},
+            }
+        return {
+            'name': name,
+            'suppliers': [{'id': 'digikey', 'name': 'DigiKey'}],
+            'rows': [
+                row(0, 'RC0603FR-0710KL', 100, self.offer(stocked=True)),
+                row(1, 'SLOW-1', 10, self.offer(days=120, extended=12.0)),
+                row(2, 'GONE-1', 4, self.offer(found=False)),
+            ],
+        }
+
+    def post(self, books):
+        return call_binary('/api/leadtime', body=json.dumps({'books': books}),
+                           headers={'Content-Type': 'application/json'})
+
+    def test_a_workbook_comes_back_as_a_named_download(self):
+        result = self.post([self.book()])
+        self.assertEqual(result['status'], 200)
+        self.assertIn('spreadsheetml', result['headers']['Content-Type'])
+        self.assertIn('Main-board-lead-times.xlsx', result['headers']['Content-Disposition'])
+
+    def test_the_sheets_lead_with_the_legend_and_then_the_parts(self):
+        from bomlib.spreadsheet import parse_xlsx
+        data = self.post([self.book()])['body']
+        self.assertEqual(parse_xlsx(data, 'Lead times')[0][0], 'Long Lead Times')
+        table = parse_xlsx(data, 'By part')
+        self.assertEqual(table[0][1], 'Part Number')
+        # Worst first: nobody carries GONE-1, SLOW-1 is months out, the rest is fine.
+        self.assertEqual([r[1] for r in table[1:]],
+                         ['GONE-1', 'SLOW-1', 'RC0603FR-0710KL'])
+
+    def test_each_line_says_when_and_from_whom(self):
+        from bomlib.spreadsheet import parse_xlsx
+        table = parse_xlsx(self.post([self.book()])['body'], 'By part')
+        header = table[0]
+        by_mpn = {r[1]: r for r in table[1:]}
+        self.assertEqual(by_mpn['RC0603FR-0710KL'][header.index('Availability')], 'In stock')
+        self.assertEqual(by_mpn['RC0603FR-0710KL'][header.index('Buy From')], 'DigiKey')
+        # Said the way every other lead time in the app is said: 120 days does
+        # not divide into weeks, so it is not reported as though it did.
+        self.assertEqual(by_mpn['SLOW-1'][header.index('Availability')], '120 days')
+        self.assertEqual(by_mpn['GONE-1'][header.index('Buy From')], '')
+        self.assertIn('No supplier searched', by_mpn['GONE-1'][header.index('Notes')])
+
+    def test_the_bands_are_shaded_the_colours_a_buyer_reads_them_by(self):
+        import io as _io
+        import zipfile
+        import xml.etree.ElementTree as ET
+        data = self.post([self.book()])['body']
+        book = zipfile.ZipFile(_io.BytesIO(data))
+        ns = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        styles = ET.fromstring(book.read('xl/styles.xml'))
+        xfs = list(styles.find(ns + 'cellXfs'))
+        fills = list(styles.find(ns + 'fills'))
+
+        def colour(style_index):
+            pattern = fills[int(xfs[style_index].get('fillId', '0'))].find(ns + 'patternFill')
+            swatch = pattern.find(ns + 'fgColor') if pattern is not None else None
+            return swatch.get('rgb') if swatch is not None else None
+
+        sheet = ET.fromstring(book.read('xl/worksheets/sheet2.xml'))
+        rows = list(sheet.iter(ns + 'row'))[1:]
+        shades = [colour(int(list(row)[1].get('s', '0'))) for row in rows]
+        # Light red for the part nobody has, orange for months out, light green
+        # for in stock — the three the report is read by.
+        self.assertEqual(shades, ['FFFFC7CE', 'FFFBC38B', 'FFD8EFD3'])
+
+    def test_several_boms_share_one_workbook_with_prefixed_tabs(self):
+        from bomlib.spreadsheet import parse_xlsx
+        result = self.post([self.book('Alpha'), self.book('Beta')])
+        self.assertIn('all-boms-lead-times.xlsx', result['headers']['Content-Disposition'])
+        data = result['body']
+        self.assertEqual(parse_xlsx(data, 'Alpha Lead times')[0][0], 'Long Lead Times')
+        self.assertEqual(parse_xlsx(data, 'Beta By part')[1][1], 'GONE-1')
+
+    def test_a_request_with_no_results_is_refused_rather_than_producing_an_empty_book(self):
+        empty = self.book()
+        empty['rows'] = []
+        result = call('/api/leadtime', 'POST', json.dumps({'books': [empty]}),
+                      {'Content-Type': 'application/json'})
+        self.assertEqual(result['status'], 400)
+
+    def test_a_filename_cannot_be_smuggled_through_the_bom_name(self):
+        result = self.post([self.book('../../etc/passwd"; drop')])
+        disposition = result['headers']['Content-Disposition']
+        self.assertNotIn('"', disposition[len('attachment; filename='):].strip('"'))
+        self.assertNotIn('/', disposition)

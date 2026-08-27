@@ -35,7 +35,13 @@ from bomlib.mouser import MouserClient  # noqa: E402
 from bomlib import trustedparts as tp_module  # noqa: E402
 from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.prepare import normalize_mpn, parse_prefixes, prepare_lines  # noqa: E402
-from bomlib.report import write_report_workbook  # noqa: E402
+from bomlib import leadtime as leadtime_module  # noqa: E402
+from bomlib.report import (  # noqa: E402
+    sheet_prefix,
+    build_lead_workbook_sheets,
+    write_report_workbook,
+)
+from bomlib.xlsx_writer import write_xlsx  # noqa: E402
 from bomlib import dmsms as dmsms_module  # noqa: E402
 from bomlib import nexar as nexar_module  # noqa: E402
 from bomlib.spreadsheet import clean_cell, extract_bom, line_from_row, parse_workbook  # noqa: E402
@@ -222,6 +228,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_lookup()
         if path == '/api/report':
             return self._handle_report()
+        if path == '/api/leadtime':
+            return self._handle_leadtime()
         if path == '/api/dmsms':
             return self._handle_dmsms()
         if path == '/api/alternatives':
@@ -428,6 +436,23 @@ class Handler(BaseHTTPRequestHandler):
             'claimed': screened['claimed'],
         })
 
+    def _send_download(self, body, name):
+        """One workbook, as a file the browser saves rather than renders."""
+        self.send_response(200)
+        self.send_header(
+            'Content-Type',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        self.send_header('Content-Disposition', 'attachment; filename="%s"' % name)
+        self.send_header('Content-Length', str(len(body)))
+        self.send_header('Cache-Control', 'no-store')
+        for key, value in getattr(self, '_cors', []):
+            self.send_header(key, value)
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+        return None
+
     def _handle_report(self):
         """Build the downloadable workbook from an analysis the client already has.
 
@@ -475,20 +500,58 @@ class Handler(BaseHTTPRequestHandler):
 
         body = buffer.getvalue()
         name = _download_name(books[0]['meta']['name'] if len(books) == 1 else 'all-boms')
-        self.send_response(200)
-        self.send_header(
-            'Content-Type',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        )
-        self.send_header('Content-Disposition', 'attachment; filename="%s"' % name)
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
-        for key, value in getattr(self, '_cors', []):
-            self.send_header(key, value)
-        self.end_headers()
-        if self.command != 'HEAD':
-            self.wfile.write(body)
-        return None
+        return self._send_download(body, name)
+
+    def _handle_leadtime(self):
+        """Build the long-lead-times workbook from analyses the client holds.
+
+        Same contract as /api/report: the rows come from the browser so the
+        workbook matches the screen exactly and no API call is spent
+        re-answering a question already answered.
+        """
+        payload = self._read_json(MAX_REPORT_BYTES)
+        if payload is None:
+            return None
+
+        raw_books = payload.get('books')
+        if not isinstance(raw_books, list) or not raw_books:
+            return self._send_json(400, {'error': 'No analyzed parts supplied'})
+        if len(raw_books) > MAX_REPORT_BOOKS:
+            return self._send_json(400, {
+                'error': 'Report at most %d BOMs at once' % MAX_REPORT_BOOKS
+            })
+
+        sheets = []
+        names = []
+        for entry in raw_books:
+            if not isinstance(entry, dict):
+                continue
+            rows = entry.get('rows') if isinstance(entry.get('rows'), list) else []
+            suppliers = entry.get('suppliers') if isinstance(entry.get('suppliers'), list) else []
+            if not rows:
+                continue
+            name = str(entry.get('name') or 'Parts looked up')[:120]
+            names.append(name)
+            report = leadtime_module.build_report(
+                {'rows': rows, 'suppliers': suppliers}, scope=name)
+            sheets.extend(build_lead_workbook_sheets(
+                report,
+                {'name': name, 'generated': str(entry.get('generated') or '')[:40] or None},
+                prefix='' if len(raw_books) == 1 else sheet_prefix(name),
+            ))
+
+        if not sheets:
+            return self._send_json(400, {'error': 'None of those BOMs have results yet'})
+
+        buffer = io.BytesIO()
+        try:
+            write_xlsx(buffer, sheets)
+        except Exception as err:
+            return self._send_json(500, {'error': 'Could not build the workbook: %s' % err})
+
+        body = buffer.getvalue()
+        label = names[0] if len(names) == 1 else 'all-boms'
+        return self._send_download(body, _download_name(label, '-lead-times.xlsx'))
 
     def _handle_alternatives(self):
         """Ask Nexar what could be used instead of the parts named.
@@ -614,20 +677,7 @@ class Handler(BaseHTTPRequestHandler):
 
         body = buffer.getvalue()
         name = _download_name(meta.get('program') or 'dmsms', suffix='-dmsms.xlsx')
-        self.send_response(200)
-        self.send_header(
-            'Content-Type',
-            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        )
-        self.send_header('Content-Disposition', 'attachment; filename="%s"' % name)
-        self.send_header('Content-Length', str(len(body)))
-        self.send_header('Cache-Control', 'no-store')
-        for key, value in getattr(self, '_cors', []):
-            self.send_header(key, value)
-        self.end_headers()
-        if self.command != 'HEAD':
-            self.wfile.write(body)
-        return None
+        return self._send_download(body, name)
 
     def _stream_lookup(self, parts, excluded=None, claimed=None):
         self.send_response(200)
