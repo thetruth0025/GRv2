@@ -493,6 +493,106 @@ def error_offer(supplier, message):
     return offer
 
 
+def allocate_stock(offers, quantity):
+    """How much to buy from each supplier to cover one line.
+
+    A buyer with 200 to find and four suppliers holding 80 each is not short —
+    they have 320. They just have to raise four purchase orders instead of one.
+    This works out which ones, and for how many.
+
+    Lead time decides the order, always, and price only settles a tie: a
+    supplier who can ship today is drawn on before one who quotes four weeks,
+    whatever the difference in price. Stock on hand counts as zero days.
+
+    Only stock on hand is allocated. A factory lead time can supply any
+    quantity, so counting it would make every line coverable and the word
+    "short" meaningless; what a shortfall means here is that the parts do not
+    exist on a shelf today.
+    """
+    needed = int(quantity) if isinstance(quantity, (int, float)) and quantity > 0 else 1
+    usable = [o for o in offers if o and o.get('found')]
+
+    holders = [o for o in usable if isinstance(o.get('stock'), (int, float)) and o['stock'] > 0]
+    # Lead time decides the order, and here it has already decided: every one
+    # of these is drawn from stock on hand, so every one ships today and the
+    # factory lead time behind it is beside the point. That leaves price to
+    # settle a field that is entirely tied on speed.
+    holders.sort(key=lambda o: (
+        o['unitPrice'] if isinstance(o.get('unitPrice'), (int, float)) else float('inf'),
+        str(o.get('supplier') or ''),
+    ))
+
+    lines = []
+    remaining = needed
+    for offer in holders:
+        if remaining <= 0:
+            break
+        take = int(min(remaining, offer['stock']))
+        if take <= 0:
+            continue
+        # Packaging still applies to a partial draw: asking a supplier for 200
+        # when they sell in reels of 1,000 buys a reel.
+        order_qty = order_quantity(take, offer.get('minimumOrderQuantity'), offer.get('orderMultiple'))
+        # Never buy more of a partial draw than the supplier actually holds.
+        order_qty = int(min(order_qty, offer['stock'])) if order_qty > offer['stock'] else order_qty
+        brk = price_at_quantity(offer.get('priceBreaks'), order_qty)
+        unit = brk['unitPrice'] if brk else None
+        lines.append({
+            'supplier': offer.get('supplier'),
+            'supplierPartNumber': offer.get('supplierPartNumber'),
+            'take': take,
+            'orderQuantity': order_qty,
+            'stock': int(offer['stock']),
+            'leadTimeDays': 0,
+            'factoryLeadTimeDays': offer.get('leadTimeDays'),
+            'unitPrice': unit,
+            'extendedPrice': None if unit is None else round_to(unit * order_qty, 4),
+            'currency': offer.get('currency') or 'USD',
+        })
+        remaining -= take
+
+    covered = needed - max(0, remaining)
+    priced = [line['extendedPrice'] for line in lines if line['extendedPrice'] is not None]
+
+    plan = {
+        'needed': needed,
+        'covered': covered,
+        'shortfall': max(0, remaining),
+        'combinedStock': int(sum(o['stock'] for o in usable
+                                 if isinstance(o.get('stock'), (int, float)))),
+        'suppliers': len(lines),
+        # One purchase order is the normal case; this is what makes the other
+        # case visible without reading the numbers.
+        'splitRequired': len(lines) > 1,
+        'lines': lines,
+        'total': round_to(sum(priced), 4) if len(priced) == len(lines) and lines else None,
+        'currency': lines[0]['currency'] if lines else None,
+    }
+
+    # The build waits on the last box to arrive, so the plan is as slow as its
+    # slowest line rather than as fast as its first.
+    days = [line['leadTimeDays'] for line in lines
+            if isinstance(line.get('leadTimeDays'), (int, float))]
+    plan['leadTimeDays'] = max(days) if days and len(days) == len(lines) else None
+
+    # What it would take to close a shortfall: whoever can factory-order the
+    # rest soonest. Named, not allocated — it is a different kind of answer.
+    if plan['shortfall']:
+        backorder = sorted(
+            [o for o in usable if isinstance(o.get('leadTimeDays'), (int, float))],
+            key=lambda o: (o['leadTimeDays'],
+                           o['unitPrice'] if isinstance(o.get('unitPrice'), (int, float))
+                           else float('inf')),
+        )
+        if backorder:
+            plan['backorder'] = {
+                'supplier': backorder[0].get('supplier'),
+                'quantity': plan['shortfall'],
+                'leadTimeDays': backorder[0]['leadTimeDays'],
+            }
+    return plan
+
+
 def compare_offers(offers, quantity):
     """Cross-supplier verdict for one BOM line: who wins on price, on lead time,
     on stock, and what the line's overall risk is."""
@@ -506,6 +606,12 @@ def compare_offers(offers, quantity):
         'bestLeadTimeSuppliers': [],
         'bestLeadTimeDays': None,
         'inStockSuppliers': [],
+        # Whether the line can be covered at all, and how. "Short" is a fact
+        # about the line, not about any one supplier: four suppliers holding 80
+        # each cover a need for 200 between them.
+        'combinedStock': 0,
+        'stockCovers': False,
+        'allocation': None,
         'lifecycle': worst_lifecycle([o.get('lifecycle') for o in usable]),
         'recommendedSupplier': None,
         'flags': [],
@@ -561,20 +667,30 @@ def compare_offers(offers, quantity):
     else:
         summary['recommendedSupplier'] = summary['bestPriceSupplier'] or usable[0]['supplier']
 
-    needed = quantity if isinstance(quantity, (int, float)) and quantity > 0 else 1
-    total_stock = sum(o['stock'] for o in usable if isinstance(o.get('stock'), (int, float)))
+    needed = int(quantity) if isinstance(quantity, (int, float)) and quantity > 0 else 1
+    plan = allocate_stock(usable, needed)
+    summary['allocation'] = plan
+    summary['combinedStock'] = plan['combinedStock']
+    summary['stockCovers'] = plan['shortfall'] == 0 and bool(plan['lines'])
 
-    if not stocked:
-        if total_stock >= needed:
-            summary['flags'].append({
-                'level': 'warn',
-                'text': 'No single supplier can cover %d — split the order' % needed,
-            })
-        else:
-            summary['flags'].append({
-                'level': 'bad',
-                'text': 'Combined stock (%d) is below the required %d' % (total_stock, needed),
-            })
+    if not summary['stockCovers']:
+        # Genuinely short: nobody's shelves, added together, hold enough.
+        summary['flags'].append({
+            'level': 'bad',
+            'text': 'Combined stock (%s) is below the required %s'
+                    % (_trim_number(plan['combinedStock']), _trim_number(needed)),
+        })
+    elif plan['splitRequired']:
+        # Coverable, but not from one purchase order. That is a logistics note,
+        # not a supply risk, so it is said as one.
+        summary['flags'].append({
+            'level': 'info',
+            'text': 'Split %s across %d suppliers: %s' % (
+                _trim_number(needed), plan['suppliers'],
+                ', '.join('%s %s' % (line['supplier'], _trim_number(line['take']))
+                          for line in plan['lines']),
+            ),
+        })
     if summary['lifecycleSeverity'] == 'bad':
         summary['flags'].append({'level': 'bad', 'text': summary['lifecycle'] + ' — find a replacement'})
     elif summary['lifecycleSeverity'] == 'warn':

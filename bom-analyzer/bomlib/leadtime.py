@@ -125,6 +125,16 @@ def summarize_row(row, suppliers):
     timed = [e for e in ranked if e['days'] is not None]
     winner = timed[0] if timed else (ranked[0] if ranked else None)
     days = winner['days'] if winner else None
+
+    # A line nobody can cover alone but everybody can cover between them ships
+    # today, from several purchase orders. Reporting it at the factory lead
+    # time of whichever supplier happens to be quickest would be wrong twice
+    # over: too slow, and from the wrong supplier.
+    plan = (row.get('comparison') or {}).get('allocation') or {}
+    split = bool(plan.get('splitRequired')) and not plan.get('shortfall')
+    if split:
+        days = plan.get('leadTimeDays', 0)
+
     band = band_for(days, bool(ranked))
 
     # Everyone else who could also supply it, so a second source is visible
@@ -142,7 +152,7 @@ def summarize_row(row, suppliers):
         })
 
     offer = winner['offer'] if winner else None
-    tied = [e['supplier'] for e in timed if e['days'] == days] if timed else []
+    tied = [] if split else ([e['supplier'] for e in timed if e['days'] == days] if timed else [])
     alternates = [
         {'mpn': a.get('mpn'), 'usable': a.get('usable')}
         for a in (row.get('alternates') or [])
@@ -160,13 +170,18 @@ def summarize_row(row, suppliers):
         'band': band,
         'bandLabel': BAND_LABEL[band],
         'days': days,
-        'availability': availability_text(winner),
-        'supplier': winner['supplier'] if winner else None,
-        'supplierPartNumber': (offer or {}).get('supplierPartNumber'),
-        'unitPrice': (offer or {}).get('unitPrice'),
-        'extendedPrice': (offer or {}).get('extendedPrice'),
+        'availability': 'In stock, split' if split else availability_text(winner),
+        # The purchase orders this line actually needs, so the report answers
+        # "how do I get 200" and not only "who is quickest".
+        'split': split,
+        'allocation': plan.get('lines') or [],
+        'supplier': ('%d suppliers, split' % plan['suppliers']) if split
+                    else (winner['supplier'] if winner else None),
+        'supplierPartNumber': None if split else (offer or {}).get('supplierPartNumber'),
+        'unitPrice': None if split else (offer or {}).get('unitPrice'),
+        'extendedPrice': plan.get('total') if split else (offer or {}).get('extendedPrice'),
         'orderQuantity': (offer or {}).get('orderQuantity'),
-        'stock': (offer or {}).get('stock'),
+        'stock': plan.get('combinedStock') if split else (offer or {}).get('stock'),
         'lifecycle': (row.get('comparison') or {}).get('lifecycle'),
         'currency': (offer or {}).get('currency'),
         'suppliersCarrying': len(ranked),
@@ -174,16 +189,17 @@ def summarize_row(row, suppliers):
         # can say why this supplier and not the other one.
         'tiedOn': tied if len(tied) > 1 else [],
         'others': others,
-        'note': _note(band, winner, tied, ranked, alternates),
+        'note': _note(band, winner, tied, ranked, alternates, split, plan),
         # A BOM alternate is the one thing that can rescue a line nobody
         # carries, so it rides along rather than living in another report.
         'alternates': alternates,
     }
 
 
-def _note(band, winner, tied, ranked, alternates):
+def _note(band, winner, tied, ranked, alternates, split=False, plan=None):
     """The one sentence explaining this line, or nothing when it explains itself."""
     pieces = []
+    plan = plan or {}
     if band == NONE:
         pieces.append(NO_SUPPLIER_TEXT)
     elif band == UNKNOWN:
@@ -192,6 +208,10 @@ def _note(band, winner, tied, ranked, alternates):
     elif len(tied) > 1:
         pieces.append('Cheapest of %d suppliers equally fast (%s)'
                       % (len(tied), ', '.join(tied)))
+    elif split:
+        pieces.append('Split %d across %d suppliers: %s' % (
+            plan['needed'], plan['suppliers'],
+            ', '.join('%s %d' % (line['supplier'], line['take']) for line in plan['lines'])))
     elif len(ranked) == 1 and band in (LONG, MEDIUM):
         pieces.append('Single source — only %s carries it' % winner['supplier'])
 

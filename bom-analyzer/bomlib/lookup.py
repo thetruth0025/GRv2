@@ -43,7 +43,7 @@ def summarize_alternate(part, offers, offer_list):
     """
     comparison = compare_offers(offer_list, part.get('quantity'))
     found = [offer for offer in offer_list if offer and offer.get('found')]
-    covers = bool(comparison.get('inStockSuppliers'))
+    covers = bool(comparison.get('stockCovers'))
     healthy = comparison.get('lifecycleSeverity') not in ('bad',)
 
     return {
@@ -381,7 +381,7 @@ def summarize_bom(rows, suppliers):
             summary['unpricedLines'] += 1
 
         severity = comparison.get('lifecycleSeverity')
-        no_stock = not comparison.get('inStockSuppliers')
+        no_stock = not comparison.get('stockCovers')
         if not any_found or severity in ('bad', 'warn') or no_stock:
             summary['riskLines'].append({
                 'row': row.get('row'),

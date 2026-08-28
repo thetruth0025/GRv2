@@ -432,7 +432,7 @@ def risk_rows(result):
         comparison = row['comparison']
         found = any(o and o.get('found') for o in row['offers'].values())
         severity = comparison.get('lifecycleSeverity')
-        if found and severity not in ('bad', 'warn') and comparison.get('inStockSuppliers'):
+        if found and severity not in ('bad', 'warn') and comparison.get('stockCovers'):
             continue
         risky.append(row)
     return risky
@@ -441,7 +441,9 @@ def risk_rows(result):
 def report_stats(result, summary, excluded=None):
     """The handful of numbers the top of the report leads with."""
     rows = result['rows']
-    stock_risk = sum(1 for r in rows if not r['comparison'].get('inStockSuppliers'))
+    # Short means the suppliers' shelves together cannot cover it, not that
+    # no single one can: a line coverable by splitting the order is not a risk.
+    stock_risk = sum(1 for r in rows if not r['comparison'].get('stockCovers'))
     lifecycle_risk = sum(
         1 for r in rows if r['comparison'].get('lifecycleSeverity') in ('bad', 'warn')
     )
@@ -487,7 +489,7 @@ def build_report_rows(result, summary, meta=None, excluded=None):
         _pad([]),
         _section('What each supplier would cost'),
         _pad([Cell(label, STYLE_HEADER) for label in [
-            'Supplier', 'Lines quoted', 'Not carried', 'Short on stock', 'Cart total', '', '', '',
+            'Supplier', 'Lines quoted', 'Not carried', 'Cannot cover alone', 'Cart total', '', '', '',
         ]]),
     ]
 
@@ -624,13 +626,17 @@ def build_parts_rows(result, summary, styled=False):
                 ('%s (%s)' % (name, qty)) if isinstance(qty, (int, float)) else name
                 for name, qty in _also_in(row)
             ) or None, STYLE_MUTED))
+        plan = comparison.get('allocation') or {}
+        split = bool(plan.get('splitRequired')) and not plan.get('shortfall')
         record.extend([
             cell(row.get('manufacturer')),
             cell(row.get('description')),
-            cell(comparison.get('recommendedSupplier') or '—'),
-            cell(chosen.get('unitPrice') if chosen else None, STYLE_MONEY_FINE),
-            cell(chosen.get('extendedPrice') if chosen else None, STYLE_MONEY),
-            cell(lead),
+            cell('%d suppliers, split' % plan['suppliers'] if split
+                 else (comparison.get('recommendedSupplier') or '—')),
+            cell(None if split else (chosen.get('unitPrice') if chosen else None), STYLE_MONEY_FINE),
+            cell(plan.get('total') if split
+                 else (chosen.get('extendedPrice') if chosen else None), STYLE_MONEY),
+            cell('In stock, split' if split else lead),
             cell(comparison.get('lifecycle'),
                  SEVERITY_STYLE.get(comparison.get('lifecycleSeverity'), STYLE_DEFAULT)),
         ])
@@ -726,6 +732,63 @@ def _parts_widths(header):
         label = getattr(name, 'value', name)
         widths.append(base.get(label, extra.get(label, 18)))
     return widths
+
+
+# ── Split orders ────────────────────────────────────────────────────────────
+
+SPLIT_COLUMNS = [
+    'Row', 'Part Number', 'Needed', 'Supplier', 'Supplier P/N',
+    'Take', 'Order Qty', 'They Hold', 'Unit Price', 'Extended', 'Notes',
+]
+SPLIT_WIDTHS = [6, 26, 10, 20, 24, 10, 11, 12, 12, 13, 44]
+
+
+def split_lines(result):
+    """Every line whose quantity has to come from more than one supplier."""
+    out = []
+    for row in result['rows']:
+        plan = (row.get('comparison') or {}).get('allocation') or {}
+        if plan.get('splitRequired'):
+            out.append((row, plan))
+    return out
+
+
+def has_split_orders(result):
+    return bool(split_lines(result))
+
+
+def build_split_rows(result, styled=False):
+    """One row per purchase order, grouped under the BOM line that needs them."""
+    def cell(value, style=STYLE_DEFAULT):
+        return Cell(value, style) if styled else value
+
+    rows = [[cell(name, STYLE_HEADER) for name in SPLIT_COLUMNS]]
+    for row, plan in split_lines(result):
+        for index, line in enumerate(plan['lines']):
+            note = ''
+            if index == 0:
+                note = ('%d of %d covered — %d still to find'
+                        % (plan['covered'], plan['needed'], plan['shortfall'])
+                        if plan['shortfall'] else
+                        'Covered in full across %d purchase orders' % plan['suppliers'])
+                if plan.get('backorder'):
+                    note += '; soonest for the rest is %s in %s' % (
+                        plan['backorder']['supplier'],
+                        format_lead_time(plan['backorder']['leadTimeDays']))
+            rows.append([
+                cell(row.get('row') if index == 0 else None, STYLE_INT),
+                cell(row.get('mpn') if index == 0 else None),
+                cell(plan['needed'] if index == 0 else None, STYLE_INT),
+                cell(line['supplier']),
+                cell(line.get('supplierPartNumber')),
+                cell(line['take'], STYLE_INT),
+                cell(line['orderQuantity'], STYLE_INT),
+                cell(line['stock'], STYLE_INT),
+                cell(line.get('unitPrice'), STYLE_MONEY_FINE),
+                cell(line.get('extendedPrice'), STYLE_MONEY),
+                cell(note, STYLE_MUTED),
+            ])
+    return rows
 
 
 # ── Long lead times ─────────────────────────────────────────────────────────
@@ -894,6 +957,13 @@ def build_workbook_sheets(result, summary, meta=None, excluded=None, prefix=''):
         'rows': build_rows(result, summary, styled=True),
         'widths': column_widths(result['suppliers']),
     }]
+
+    if has_split_orders(result):
+        sheets.append({
+            'name': name('Split orders'),
+            'rows': build_split_rows(result, styled=True),
+            'widths': SPLIT_WIDTHS,
+        })
 
     sheets.append({
         'name': name('Lead times'),

@@ -234,10 +234,14 @@ class ComparisonTests(unittest.TestCase):
         self.assertEqual(summary['recommendedSupplier'], 'Mouser')
         self.assertEqual(summary['bestLeadTimeDays'], 42)
 
-    def test_split_order_suggested_when_neither_alone_can_cover(self):
+    def test_a_split_names_who_supplies_how_many(self):
         summary = compare_offers([offer('DigiKey', stock=60), offer('Mouser', stock=60)], 100)
         texts = [f['text'] for f in summary['flags']]
-        self.assertTrue(any('split the order' in t for t in texts), texts)
+        self.assertTrue(any('Split 100 across 2 suppliers' in t for t in texts), texts)
+        self.assertTrue(any('DigiKey 60, Mouser 40' in t for t in texts), texts)
+        # Coverable is not short, however many purchase orders it takes.
+        self.assertTrue(summary['stockCovers'])
+        self.assertFalse(any(f['level'] == 'bad' for f in summary['flags']), texts)
 
     def test_genuine_shortage_is_called_out_rather_than_a_split(self):
         summary = compare_offers([offer('DigiKey', stock=10), offer('Mouser', stock=5)], 100)

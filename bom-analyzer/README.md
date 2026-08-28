@@ -63,9 +63,13 @@ costs it four calls rather than two hundred.
 quantity, extended price for the line, and lifecycle status. The cheapest and the soonest are
 badged, and a verdict column says which supplier to use and why.
 
-**Tells you what to worry about.** Obsolete and NRND parts, lines no supplier can cover, lines
-where you would have to split the order across suppliers, and lead times past twelve weeks are all
-called out per line and totalled at the top.
+**Tells you what to worry about, and only that.** Obsolete and NRND parts, lines whose combined
+stock across every supplier falls short of what the build needs, and lead times past twelve weeks
+are called out per line and totalled at the top. A line no *single* supplier can cover is not one
+of them — see below.
+
+**Works out how many to order from each supplier.** Four suppliers holding 80 each cover a need for
+200 between them; the tool says who to buy how many from, and what the split costs.
 
 **Prices what you would actually buy.** Minimum order quantities and packaging multiples are
 applied before pricing, and the correct price break is used for the resulting quantity. Where
@@ -371,6 +375,53 @@ column in the browser does the same.
 
 Typed lookups ignore the column entirely, as they ignore every other screening rule: a part number
 you entered by hand is a direct question, and it gets answered.
+
+### Short, and splitting an order
+
+**A line is short only when every supplier's stock, added together, still cannot cover it.** Four
+suppliers holding 80 pieces each are not a shortage against a need for 200 — they are 320 pieces
+and three purchase orders. Only the combined position counts, so a line that used to be flagged
+because no *single* supplier could cover it now reports what to do instead:
+
+> Split 200 across 3 suppliers: Mouser 80, DigiKey 80, TrustedParts 40
+
+The split is worked out for you. Expand the row and **Split this order** lists each supplier, how
+many to take, how many that actually buys once minimum order quantities and packaging multiples are
+applied, what they hold, and what each order costs — with the total underneath.
+
+**Lead time decides who supplies it, and price only settles a tie.** Every unit in a split is drawn
+from stock on hand, so every one of them ships today whatever factory lead time sits behind that
+supplier's shelf — which means the whole field is tied on speed and price is all that is left to
+order it by. Cheapest shelves are drawn down first. Nothing is ever ordered from a slower supplier
+to save money: a supplier who can ship today is always drawn on before one who quotes four weeks,
+whatever the difference in price.
+
+That has a consequence worth knowing: where one supplier holds the whole quantity but at a higher
+price, the tool will still propose a split if drawing part of it from a cheaper shelf costs less.
+Both orders ship today, so nothing is given up on speed — but it is two purchase orders instead of
+one, and the row says so.
+
+Where it shows up:
+
+- **In the table** — each supplier's stock cell carries a `take 80` badge, so the quantities are on
+  the row without expanding it. The old per-supplier `short` badge is gone: whether one supplier
+  alone can cover the line is no longer the question being asked.
+- **In the verdict** — the split named in full, as a note rather than a warning.
+- **In the stat strip** — *Stock risk* counts only lines the combined stock cannot cover.
+- **In the report and the workbook** — a **Split orders** sheet with one row per purchase order, and
+  the parts table pricing the whole split rather than one supplier's share of it.
+- **On the lead-time report** — a split-covered line reads *In stock, split*, because it is. Banding
+  it at the factory lead time of whichever supplier happened to be quickest would be wrong twice
+  over: too slow, and from the wrong supplier.
+
+When the combined stock genuinely is short, the line says by how much and names whoever could
+factory-order the remainder soonest:
+
+> 15 of 200 covered — 185 still to find; soonest for the rest is Mouser in 6 weeks
+
+The per-supplier question has not gone away, it has just moved to where it belongs: the supplier
+cart tiles price single-sourcing everything from one place, so *"3 lines it cannot cover alone"* is
+exactly the right thing for those to say.
 
 ### Long lead times
 

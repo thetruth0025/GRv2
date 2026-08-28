@@ -28,7 +28,7 @@
     { key: 'all', label: 'All' },
     { key: 'issues', label: 'Needs attention' },
     { key: 'lifecycle', label: 'Lifecycle risk' },
-    { key: 'stock', label: 'Short on stock' },
+    { key: 'stock', label: 'Short on stock' },  // combined across suppliers
     { key: 'missing', label: 'Not found' },
   ];
 
@@ -972,7 +972,12 @@
       if (!totals) return;
       var gaps = [];
       if (totals.linesMissing) gaps.push(totals.linesMissing + ' not carried');
-      if (totals.linesShort) gaps.push(totals.linesShort + ' short on stock');
+      // Per-supplier by design: this tile prices single-sourcing everything
+      // here, so "can it cover the line alone" is exactly the right question.
+      if (totals.linesShort) {
+        gaps.push(totals.linesShort + ' line' + (totals.linesShort === 1 ? '' : 's') +
+          ' it cannot cover alone');
+      }
       tiles.push(tile(
         supplier.name + ' cart',
         money(totals.total, summary.currency) || '—',
@@ -993,13 +998,16 @@
       ));
     }
 
+    // Short means the suppliers' shelves together cannot cover the line, not
+    // that no single one can. A line coverable by splitting the order is a
+    // second purchase order, not a supply risk.
     var stockRisk = bom().results.rows.filter(function (row) {
-      return row.comparison.inStockSuppliers.length === 0;
+      return !row.comparison.stockCovers;
     }).length;
     tiles.push(tile(
       'Stock risk',
       String(stockRisk),
-      stockRisk ? 'no supplier holds the full quantity' : 'every line is coverable today',
+      stockRisk ? 'combined stock is below the need' : 'every line is coverable today',
       stockRisk ? 'bad' : 'good'
     ));
 
@@ -1089,7 +1097,7 @@
       case 'lifecycle':
         return row.comparison.lifecycleSeverity === 'bad' || row.comparison.lifecycleSeverity === 'warn';
       case 'stock':
-        return row.comparison.inStockSuppliers.length === 0;
+        return !row.comparison.stockCovers;
       case 'missing':
         return !bom().results.suppliers.some(function (s) {
           return row.offers[s.id] && row.offers[s.id].found;
@@ -1223,7 +1231,7 @@
     });
     var severity = comparison.lifecycleSeverity;
     return !found || severity === 'bad' || severity === 'warn' ||
-      comparison.inStockSuppliers.length === 0;
+      !comparison.stockCovers;
   }
 
   function alternateSummaryText(row) {
@@ -1284,6 +1292,15 @@
       renderDetail(row, suppliers) + '</td></tr>';
   }
 
+  // What the split plan draws from one supplier, if anything.
+  function allocationDraw(comparison, supplierName) {
+    var lines = (comparison.allocation && comparison.allocation.lines) || [];
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].supplier === supplierName) return lines[i];
+    }
+    return null;
+  }
+
   function supplierCells(offer, supplier, comparison, needed) {
     var start = ' class="group-start';
     if (!offer || !offer.found) {
@@ -1296,10 +1313,14 @@
     var bestPrice = comparison.bestPriceSupplier === supplier.name;
     var bestLead = comparison.bestLeadTimeSupplier === supplier.name;
 
+    // No per-supplier "short" badge: whether one supplier alone can cover the
+    // line stopped being the question. What a buyer needs in this cell is how
+    // many to order here, which is only worth saying when the order splits.
+    var draw = allocationDraw(comparison, supplier.name);
     var stockCell = '<td' + start + ' num">' +
       (offer.stock === null ? '<span class="muted">—</span>' : count(offer.stock)) +
-      (offer.stockSufficient === false
-        ? '<div class="rowmeta"><span class="badge warn">short</span></div>'
+      (draw && comparison.stockCovers && comparison.allocation.splitRequired
+        ? '<div class="rowmeta"><span class="badge info">take ' + count(draw.take) + '</span></div>'
         : '') +
       '</td>';
 
@@ -1475,7 +1496,47 @@
         '</div>';
     }).join('');
 
-    return alternateDetail(row) + '<div class="detail">' + columns + '</div>';
+    return splitDetail(row) + alternateDetail(row) +
+      '<div class="detail">' + columns + '</div>';
+  }
+
+  // The purchase orders this line actually needs. Only shown when it needs more
+  // than one — a single order is what the row already says.
+  function splitDetail(row) {
+    var plan = row.comparison.allocation;
+    if (!plan || !plan.splitRequired) return '';
+    if (!plan.lines.length) return '';
+
+    var currency = (bom().results.summary || {}).currency || 'USD';
+    var rows = (plan.lines || []).map(function (line) {
+      return '<tr class="covers">' +
+        '<td class="l">' + esc(line.supplier) + '</td>' +
+        '<td class="l">' + esc(line.supplierPartNumber || '—') + '</td>' +
+        '<td>' + count(line.take) + '</td>' +
+        '<td>' + count(line.orderQuantity) + '</td>' +
+        '<td>' + count(line.stock) + '</td>' +
+        '<td>' + esc(money(line.unitPrice, line.currency || currency) || '—') + '</td>' +
+        '<td>' + esc(money(line.extendedPrice, line.currency || currency) || '—') + '</td>' +
+        '</tr>';
+    }).join('');
+
+    var foot = plan.shortfall
+      ? count(plan.covered) + ' of ' + count(plan.needed) + ' covered — ' +
+        count(plan.shortfall) + ' still to find' +
+        (plan.backorder ? ', soonest from ' + esc(plan.backorder.supplier) + ' in ' +
+          esc(leadTimeText(plan.backorder.leadTimeDays)) : '')
+      : count(plan.needed) + ' covered in full across ' + plan.suppliers +
+        ' purchase orders' +
+        (plan.total !== null && plan.total !== undefined
+          ? ', ' + esc(money(plan.total, currency)) + ' in total' : '');
+
+    return '<div class="alt-detail"><h4>Split this order ' +
+      '<span class="aside">nobody holds all ' + count(plan.needed) + '</span></h4>' +
+      '<div class="breaks dist"><table>' +
+      '<tr><th class="l">Supplier</th><th class="l">P/N</th><th>Take</th>' +
+      '<th>Order</th><th>They hold</th><th>Unit</th><th>Extended</th></tr>' +
+      rows + '</table>' +
+      '<div class="rowmeta">' + foot + '</div></div></div>';
   }
 
   // What the BOM's alternates column promised, checked against the same
@@ -1734,7 +1795,7 @@
     var usage = usageIndex();
 
     var stockRisk = results.rows.filter(function (row) {
-      return row.comparison.inStockSuppliers.length === 0;
+      return !row.comparison.stockCovers;
     });
     var lifecycleRisk = results.rows.filter(function (row) {
       var severity = row.comparison.lifecycleSeverity;
@@ -1746,7 +1807,7 @@
       });
       var severity = row.comparison.lifecycleSeverity;
       return !found || severity === 'bad' || severity === 'warn' ||
-        row.comparison.inStockSuppliers.length === 0;
+        !row.comparison.stockCovers;
     });
 
     return {
@@ -1825,7 +1886,7 @@
       kpi('Best-mix total', money(summary.bestMixTotal, currency) || '—',
         summary.bestMixLines + ' of ' + summary.lines + ' priced', 'accent'),
       kpi('Stock risk', String(model.stockRisk.length),
-        model.stockRisk.length ? 'no supplier covers the quantity' : 'all coverable today',
+        model.stockRisk.length ? 'combined stock is below the need' : 'all coverable today',
         model.stockRisk.length ? 'bad' : 'good'),
       kpi('Lifecycle risk', String(model.lifecycleRisk.length),
         model.lifecycleRisk.length ? 'NRND, EOL or obsolete' : 'nothing flagged',
@@ -1898,6 +1959,16 @@
       if (offer) {
         lead = offer.stockSufficient === true ? 'In stock' : (offer.leadTimeText || '—');
       }
+      // Naming one supplier and pricing one supplier's share is wrong on both
+      // counts when the order goes to three of them.
+      var plan = row.comparison.allocation || {};
+      var split = !!plan.splitRequired && row.comparison.stockCovers;
+      var buyFrom = split ? plan.suppliers + ' suppliers, split'
+                          : (row.comparison.recommendedSupplier || '—');
+      var unit = split ? '—' : ((offer && money(offer.unitPrice, offer.currency)) || '—');
+      var extended = split ? (money(plan.total, model.currency) || '—')
+                           : ((offer && money(offer.extendedPrice, offer.currency)) || '—');
+      if (split) lead = 'In stock, split';
       var elsewhere = otherBomDemand(model, row.mpn);
       return '<tr>' +
         '<td class="mpn-cell">' + esc(row.mpn) +
@@ -1908,11 +1979,15 @@
             return use.name + ' (' + count(use.quantity) + ')';
           }).join(', '))
           : '—') + '</td>' : '') +
-        '<td>' + esc(row.comparison.recommendedSupplier || '—') +
-        (offer && offer.aggregator && offer.distributor
-          ? '<div class="desc">via ' + esc(offer.distributor) + '</div>' : '') + '</td>' +
-        '<td class="num">' + esc((offer && money(offer.unitPrice, offer.currency)) || '—') + '</td>' +
-        '<td class="num">' + esc((offer && money(offer.extendedPrice, offer.currency)) || '—') + '</td>' +
+        '<td>' + esc(buyFrom) +
+        (split
+          ? '<div class="desc">' + esc(plan.lines.map(function (line) {
+              return line.supplier + ' ' + count(line.take);
+            }).join(', ')) + '</div>'
+          : (offer && offer.aggregator && offer.distributor
+            ? '<div class="desc">via ' + esc(offer.distributor) + '</div>' : '')) + '</td>' +
+        '<td class="num">' + esc(unit) + '</td>' +
+        '<td class="num">' + esc(extended) + '</td>' +
         '<td>' + esc(lead) + '</td>' +
         '<td>' + lifecycleBadge({
           lifecycle: row.comparison.lifecycle,
@@ -1968,7 +2043,7 @@
       '<section class="report-section"><h3>What each supplier would cost</h3>' +
       '<div class="report-scroll"><table class="report-table">' +
       '<thead><tr><th>Supplier</th><th class="num">Lines quoted</th><th class="num">Not carried</th>' +
-      '<th class="num">Short on stock</th><th class="num">Cart total</th></tr></thead>' +
+      '<th class="num">Cannot cover alone</th><th class="num">Cart total</th></tr></thead>' +
       '<tbody>' + cartRows + '</tbody></table></div></section>' +
       '<section class="report-section"><h3>Needs a decision ' +
       '<span class="aside">' + model.risky.length + ' of ' + model.rows.length + ' lines</span></h3>' +
@@ -2763,7 +2838,7 @@
         if (!carried) reason = 'No supplier carries it';
         else if (comparison.lifecycleSeverity === 'bad') reason = comparison.lifecycle;
         else if (comparison.lifecycleSeverity === 'warn') reason = comparison.lifecycle;
-        else if (!comparison.inStockSuppliers.length) reason = 'Nobody holds the quantity';
+        else if (!comparison.stockCovers) reason = 'Combined stock is below the need';
         if (!reason) return;
 
         found.push({

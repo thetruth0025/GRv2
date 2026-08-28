@@ -715,8 +715,9 @@ def render_parts_table(result, summary, paint):
                 record += [dash, dash, dash]
                 continue
             stock = integer(offer.get('stock'))
-            if offer.get('stockSufficient') is False:
-                stock = paint(stock, 'yellow')
+            draw = _draw_from(comparison, supplier['name'])
+            if draw is not None:
+                stock = '%s %s' % (stock, paint('take %s' % integer(draw['take']), 'cyan'))
             extended = money(offer.get('extendedPrice'), currency)
             if comparison.get('bestPriceSupplier') == supplier['name']:
                 extended = paint(extended, 'green')
@@ -745,7 +746,8 @@ def render_summary(result, summary, paint):
         if totals['linesMissing']:
             note.append('%d not carried' % totals['linesMissing'])
         if totals['linesShort']:
-            note.append('%d short on stock' % totals['linesShort'])
+            note.append('%d line%s it cannot cover alone'
+                        % (totals['linesShort'], '' if totals['linesShort'] == 1 else 's'))
         suffix = paint('  (%s)' % ', '.join(note), 'yellow') if note else ''
         out.append('  %-22s %s%s' % ('%s cart' % supplier['name'],
                                      money(totals['total'], currency), suffix))
@@ -757,11 +759,18 @@ def render_summary(result, summary, paint):
             extra = paint('  (saves %s vs. single-sourcing)' % money(savings, currency), 'green')
         out.append('  %-22s %s%s' % ('Cheapest per line', money(summary['bestMixTotal'], currency), extra))
 
-    stock_risk = sum(1 for r in result['rows'] if not r['comparison'].get('inStockSuppliers'))
+    stock_risk = sum(1 for r in result['rows'] if not r['comparison'].get('stockCovers'))
     lifecycle_risk = sum(1 for r in result['rows']
                          if r['comparison'].get('lifecycleSeverity') in ('bad', 'warn'))
     out.append('  %-22s %s' % ('Stock risk',
                                paint(stock_risk, 'red') if stock_risk else paint('0', 'green')))
+    splits = [r for r in result['rows']
+              if (r['comparison'].get('allocation') or {}).get('splitRequired')
+              and r['comparison'].get('stockCovers')]
+    if splits:
+        out.append('  %-22s %s' % ('Split orders', paint(
+            '%d line%s need more than one purchase order'
+            % (len(splits), '' if len(splits) == 1 else 's'), 'cyan')))
     out.append('  %-22s %s' % ('Lifecycle risk',
                                paint(lifecycle_risk, 'yellow') if lifecycle_risk else paint('0', 'green')))
     if summary['notFoundLines']:
@@ -792,6 +801,19 @@ def render_summary(result, summary, paint):
             out.append(paint('  … and %d more' % (len(risks) - 20), 'dim'))
 
     return '\n'.join(out)
+
+
+def _draw_from(comparison, supplier_name):
+    """What the split plan takes from one supplier, if the plan covers the line."""
+    if not comparison.get('stockCovers'):
+        return None
+    plan = comparison.get('allocation') or {}
+    if not plan.get('splitRequired'):
+        return None
+    for line in plan.get('lines') or []:
+        if line.get('supplier') == supplier_name:
+            return line
+    return None
 
 
 def _alternate_note(row):

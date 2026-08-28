@@ -976,3 +976,60 @@ class LeadTimeCliTests(unittest.TestCase):
         with open(out, 'rb') as handle:
             data = handle.read()
         self.assertEqual(parse_xlsx(data, 'Lead times')[0][1], 'Part Number')
+
+
+class SplitOrderSheetTests(unittest.TestCase):
+    """The purchase orders a split line needs, in the workbook."""
+
+    def result(self, stocks, quantity=200):
+        clients = [StubSupplier('s%d' % i, 'Supplier%d' % i, 0.10 * (i + 1), stock=stock)
+                   for i, stock in enumerate(stocks)]
+        return analyze([{'row': 1, 'mpn': 'ABC123', 'quantity': quantity,
+                         'reference': 'R1', 'manufacturer': 'Acme', 'description': '10k'}],
+                       clients=clients)
+
+    def test_a_bom_that_needs_no_split_gets_no_sheet(self):
+        from bomlib.report import build_workbook_sheets, has_split_orders
+        result, summary = self.result([5000])
+        self.assertFalse(has_split_orders(result))
+        names = [s['name'] for s in build_workbook_sheets(result, summary)]
+        self.assertNotIn('Split orders', names)
+
+    def test_a_split_line_gets_one_row_per_purchase_order(self):
+        from bomlib.report import build_split_rows, build_workbook_sheets, SPLIT_COLUMNS
+        result, summary = self.result([80, 80, 80])
+        self.assertIn('Split orders', [s['name'] for s in build_workbook_sheets(result, summary)])
+        rows = build_split_rows(result)
+        header = rows[0]
+        self.assertEqual(len(rows) - 1, 3)
+        takes = [r[header.index('Take')] for r in rows[1:]]
+        self.assertEqual(takes, [80, 80, 40])
+        # The line it belongs to is named once, on its first order.
+        self.assertEqual(rows[1][header.index('Part Number')], 'ABC123')
+        self.assertIsNone(rows[2][header.index('Part Number')])
+        self.assertIn('Covered in full across 3 purchase orders',
+                      rows[1][header.index('Notes')])
+
+    def test_the_parts_sheet_prices_the_whole_split_not_one_supplier(self):
+        from bomlib.report import build_parts_rows
+        result, summary = self.result([80, 80, 80])
+        rows = build_parts_rows(result, summary)
+        header, first = rows[0], rows[1]
+        self.assertEqual(first[header.index('Buy From')], '3 suppliers, split')
+        self.assertEqual(first[header.index('Lead Time')], 'In stock, split')
+        plan = result['rows'][0]['comparison']['allocation']
+        self.assertEqual(first[header.index('Extended')], plan['total'])
+
+    def test_the_widths_line_up_on_every_sheet(self):
+        from bomlib.report import build_workbook_sheets
+        result, summary = self.result([80, 80, 80])
+        for sheet in build_workbook_sheets(result, summary):
+            if sheet.get('widths'):
+                self.assertEqual(len(sheet['widths']), len(sheet['rows'][0]), sheet['name'])
+
+    def test_a_short_line_says_how_much_is_still_to_find(self):
+        from bomlib.report import build_split_rows, SPLIT_COLUMNS
+        result, _ = self.result([10, 5])
+        rows = build_split_rows(result)
+        self.assertIn('15 of 200 covered — 185 still to find',
+                      rows[1][rows[0].index('Notes')])
