@@ -312,3 +312,118 @@ class NoteTests(unittest.TestCase):
         note = self.note({'digikey': offer('DigiKey', stocked=True, stock=9, extended=1.0)},
                          alternates=[{'mpn': 'SUB-1', 'usable': True}])
         self.assertEqual(note, '')
+
+
+class SummaryExportShadingTests(unittest.TestCase):
+    """The availability colours have to reach the summary export too.
+
+    A buyer opening the workbook should not have to cross-reference the
+    lead-time sheet to see which lines are the problem, and the two must use
+    one palette so they can never disagree.
+    """
+
+    def line(self, index, mpn, one):
+        """One row, with the comparison the app would really have built."""
+        from bomlib.normalize import compare_offers
+        entry = row({'digikey': one}, mpn=mpn, quantity=10)
+        entry['index'] = index
+        entry['comparison'] = compare_offers([one], 10)
+        return entry
+
+    def result(self):
+        rows = [
+            self.line(0, 'QUICK-1', offer('DigiKey', stocked=True, stock=900,
+                                          extended=5.0, unit=0.00525)),
+            self.line(1, 'MID-1', offer('DigiKey', days=35, stock=900,
+                                        extended=5.0, unit=0.5)),
+            self.line(2, 'SLOW-1', offer('DigiKey', days=140, stock=900,
+                                         extended=5.0, unit=0.5)),
+            self.line(3, 'GONE-1', offer('DigiKey', found=False)),
+            self.line(4, 'UNKNOWN-1', offer('DigiKey', days=None, stock=900,
+                                            extended=5.0, unit=0.5)),
+        ]
+        return {'rows': rows, 'suppliers': SUPPLIERS, 'stats': {}}
+
+    def summary(self):
+        return {'currency': 'USD', 'lines': 5, 'totalQuantity': 50, 'supplierTotals': {},
+                'bestMixTotal': 0, 'bestMixLines': 0, 'notFoundLines': 1, 'unpricedLines': 0,
+                'errorLines': 0, 'riskLines': [], 'lifecycleCounts': {}}
+
+    def test_the_parts_sheet_is_shaded_by_availability(self):
+        from bomlib.report import build_parts_rows, parts_filter_rows
+        from bomlib.xlsx_writer import fill_style
+        rows = build_parts_rows(self.result(), self.summary(), styled=True)
+        data = rows[1:parts_filter_rows(self.result())]
+        self.assertEqual([r[1].style for r in data], [
+            fill_style('green'), fill_style('yellow'), fill_style('orange'),
+            fill_style('red'), fill_style(None),
+        ])
+
+    def test_money_keeps_its_format_on_a_shaded_row(self):
+        from bomlib.report import build_parts_rows, PARTS_COLUMNS
+        from bomlib.xlsx_writer import fill_style
+        rows = build_parts_rows(self.result(), self.summary(), styled=True)
+        unit = PARTS_COLUMNS.index('Unit Price')
+        extended = PARTS_COLUMNS.index('Extended')
+        # A sub-cent unit price still needs five decimals, shaded or not.
+        self.assertEqual(rows[1][unit].style, fill_style('green', 'money_fine'))
+        self.assertEqual(rows[1][unit].value, 0.00525)
+        self.assertEqual(rows[1][extended].style, fill_style('green', 'money'))
+
+    def test_quantities_stay_integers_on_a_shaded_row(self):
+        from bomlib.report import build_parts_rows, PARTS_COLUMNS
+        from bomlib.xlsx_writer import fill_style
+        rows = build_parts_rows(self.result(), self.summary(), styled=True)
+        self.assertEqual(rows[1][PARTS_COLUMNS.index('Qty')].style, fill_style('green', 'int'))
+
+    def test_an_unstyled_build_is_plain_values_as_before(self):
+        from bomlib.report import build_parts_rows
+        rows = build_parts_rows(self.result(), self.summary(), styled=False)
+        self.assertTrue(all(not hasattr(c, 'style') for row in rows for c in row))
+
+    def test_the_sheet_carries_a_key_to_the_colours(self):
+        from bomlib.report import build_parts_rows
+        rows = build_parts_rows(self.result(), self.summary(), styled=True)
+        flat = [[getattr(c, 'value', c) for c in r] for r in rows]
+        self.assertTrue(any(r[0] == 'Colour key' for r in flat))
+        labels = [r[0] for r in flat]
+        for band in leadtime.BAND_ORDER:
+            self.assertIn(leadtime.BAND_LABEL[band], labels)
+
+    def test_the_key_is_left_out_of_the_filter_range(self):
+        # Otherwise sorting the table scatters the legend through the parts.
+        from bomlib.report import build_parts_rows, parts_filter_rows
+        result = self.result()
+        rows = build_parts_rows(result, self.summary(), styled=True)
+        self.assertGreater(len(rows), parts_filter_rows(result))
+        self.assertEqual(parts_filter_rows(result), 1 + len(result['rows']))
+
+    def test_the_report_sheet_shades_the_lines_needing_a_decision(self):
+        from bomlib.report import build_report_rows
+        rows = build_report_rows(self.result(), self.summary(), {'name': 'B', 'generated': 'now'})
+        flat = [[getattr(c, 'value', c) for c in r] for r in rows]
+        start = next(i for i, r in enumerate(flat) if str(r[0]).startswith('Needs a decision'))
+        from bomlib.xlsx_writer import FILL_STYLES
+        shades = [rows[i][0].style for i in range(start + 2, len(rows))
+                  if flat[i][0] not in ('', None, 'Colour key')
+                  and flat[i][0] not in leadtime.BAND_LABEL.values()]
+        colours = {colour for colour, styles in FILL_STYLES.items()
+                   for style in shades if style in styles}
+        self.assertIn('orange', colours)
+        self.assertIn('red', colours)
+        self.assertNotIn('green', colours)  # a healthy line is not a decision
+
+    def test_the_summary_and_the_lead_report_share_one_palette(self):
+        from bomlib.report import LEAD_FILL, build_lead_rows, build_parts_rows
+        from bomlib.xlsx_writer import fill_style
+        result = self.result()
+        lead = build_lead_rows(leadtime.build_report(result), styled=True)
+        parts = build_parts_rows(result, self.summary(), styled=True)
+        # The lead report sorts worst first and the parts sheet keeps BOM order,
+        # so compare the sets of fills rather than the sequences.
+        lead_fills = {r[1].style for r in lead[1:]}
+        part_fills = {r[1].style for r in parts[1:1 + len(result['rows'])]}
+        self.assertEqual(lead_fills, part_fills)
+        self.assertEqual(sorted(LEAD_FILL.values(), key=str),
+                         sorted([None, 'green', 'orange', 'red', 'yellow'], key=str))
+        self.assertEqual(fill_style(LEAD_FILL[leadtime.QUICK]), fill_style('green'))

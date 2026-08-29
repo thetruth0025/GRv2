@@ -66,7 +66,7 @@ badged, and a verdict column says which supplier to use and why.
 **Tells you what to worry about, and only that.** Obsolete and NRND parts, lines whose combined
 stock across every supplier falls short of what the build needs, and lead times past twelve weeks
 are called out per line and totalled at the top. A line no *single* supplier can cover is not one
-of them — see below.
+of them, and neither is a part nobody stocks but everybody can order in a fortnight — see below.
 
 **Works out how many to order from each supplier.** Four suppliers holding 80 each cover a need for
 200 between them; the tool says who to buy how many from, and what the split costs.
@@ -414,6 +414,12 @@ Where it shows up:
   it at the factory lead time of whichever supplier happened to be quickest would be wrong twice
   over: too slow, and from the wrong supplier.
 
+**Short on stock and unobtainable are different problems, and only the second is an emergency.** A
+part nobody has on a shelf but everybody can order in a fortnight is a normal factory order, so it
+reads *"No stock on hand — soonest is 2 weeks from DigiKey"* at warning level. It is called a
+shortage in red only when the combined stock falls short **and** no supplier will quote a date for
+the rest — at which point there is genuinely nowhere to go.
+
 When the combined stock genuinely is short, the line says by how much and names whoever could
 factory-order the remainder soonest:
 
@@ -448,6 +454,10 @@ Each line is then shaded by how long it takes:
 | 🟥 | **Not available** | No supplier searched can provide the part at this time |
 | ⬜ | **Unknown** | Carried, but no supplier would quote a date |
 
+Sub-cent unit prices keep their five decimal places on a shaded row, and quantities stay integers:
+in Excel a fill and a number format are one style, so each band carries a copy per format rather
+than giving one up for the other.
+
 Two of those need a word of explanation. The colours you asked for leave a gap between "in stock"
 and "three weeks", so a part quoted inside a fortnight is shaded green alongside stock: the band
 exists to separate "order it" from "plan around it", and a fortnight is not something to plan
@@ -461,8 +471,15 @@ who else could supply it and when — and, where the BOM named an approved alter
 actually be bought, that alternate, because it is the one thing that rescues a line that is late or
 gone.
 
-**Export Excel** writes the report as a workbook: a legend sheet with the band counts, then the
-table with each row shaded light green, light yellow, orange or light red. On the command line:
+**The colours follow the parts everywhere they go.** The same four fills shade the **Parts** sheet
+and the *Needs a decision* table of the summary workbook, the summary report on screen, and its
+Print / PDF output — one palette, defined once, so no two views can drift on to different colours.
+Each shaded table carries a key. The CSV has no colour to give, so the band travels there as a word
+in an **Availability** column rather than being the one thing that export loses.
+
+**Export Excel** writes the lead-time report as a workbook of its own: a legend sheet with the band
+counts, then the table with each row shaded light green, light yellow, orange or light red. On the
+command line:
 
 ```bash
 python3 bom.py my-bom.csv --lead-time lead-times.xlsx

@@ -47,9 +47,9 @@ SUPPLIER_WIDTHS = [22, 11, 12, 10, 12, 14, 10, 14, 26]
 
 TAIL_COLUMNS = [
     'Cheapest Supplier', 'Soonest Supplier', 'Soonest (days)',
-    'Recommended', 'Worst Lifecycle', 'Notes',
+    'Recommended', 'Worst Lifecycle', 'Availability', 'Notes',
 ]
-TAIL_WIDTHS = [17, 20, 14, 14, 18, 52]
+TAIL_WIDTHS = [17, 20, 14, 14, 18, 22, 52]
 
 SEVERITY_STYLE = {'bad': STYLE_BAD, 'warn': STYLE_WARN, 'ok': STYLE_GOOD, 'unknown': STYLE_MUTED}
 
@@ -78,13 +78,17 @@ def build_rows(result, summary, styled=False):
     """Return [[value|Cell, ...], ...] — the header row plus one row per part."""
     suppliers = result['suppliers']
     currency = summary.get('currency') or 'USD'
+    # The audit sheet also feeds the CSV writer, which has no colour at all, so
+    # the band travels as a word — otherwise the one thing the other exports
+    # say at a glance is the one thing this one loses.
+    bands = leadtime_module.bands_by_row(result)
 
     def cell(value, style=STYLE_DEFAULT):
         return Cell(value, style) if styled else value
 
     rows = [[cell(name, STYLE_HEADER) for name in build_header(suppliers, currency)]]
 
-    for row in result['rows']:
+    for index, row in enumerate(result['rows']):
         comparison = row['comparison']
         record = [
             cell(row.get('row'), STYLE_INT),
@@ -127,6 +131,7 @@ def build_rows(result, summary, styled=False):
             cell(comparison.get('recommendedSupplier')),
             cell(comparison.get('lifecycle'),
                  SEVERITY_STYLE.get(comparison.get('lifecycleSeverity'), STYLE_DEFAULT)),
+            cell(leadtime_module.BAND_LABEL[bands[index]]),
             cell('; '.join(f['text'] for f in comparison.get('flags') or [])),
         ])
         rows.append(record)
@@ -426,15 +431,20 @@ def _section(title, width=REPORT_WIDTH):
 
 
 def risk_rows(result):
-    """The lines a buyer has to make a decision about."""
+    """The lines a buyer has to make a decision about.
+
+    A line earns its place by carrying a flag at bad or warn level — the same
+    flags shown beside it — rather than by a rule restated here that could
+    drift from them. An info flag (a split, a price spread) is worth reading
+    but is not a decision.
+    """
     risky = []
     for row in result['rows']:
         comparison = row['comparison']
         found = any(o and o.get('found') for o in row['offers'].values())
-        severity = comparison.get('lifecycleSeverity')
-        if found and severity not in ('bad', 'warn') and comparison.get('stockCovers'):
-            continue
-        risky.append(row)
+        if not found or any(f.get('level') in ('bad', 'warn')
+                            for f in comparison.get('flags') or []):
+            risky.append(row)
     return risky
 
 
@@ -519,23 +529,32 @@ def build_report_rows(result, summary, meta=None, excluded=None):
                  if isinstance(savings, (int, float)) and savings > 0 else '', STYLE_MUTED),
         ]))
 
+    # Shaded by availability, the same four colours as everywhere else, so the
+    # worst lines are findable by eye before anything is read.
+    bands = leadtime_module.bands_by_row(result)
+    band_by_row = {id(row): bands[index] for index, row in enumerate(result['rows'])}
+
     risky = risk_rows(result)
     rows.append(_pad([]))
     rows.append(_section('Needs a decision (%d)' % len(risky)))
     if risky:
         rows.append(_pad([Cell(label, STYLE_HEADER) for label in [
-            'Row', 'Part Number', 'Qty', 'Lifecycle', 'Issue', '', '', '',
+            'Row', 'Part Number', 'Qty', 'Availability', 'Lifecycle', 'Issue', '', '',
         ]]))
         for row in risky:
             comparison = row['comparison']
+            cell = banded_cell(LEAD_FILL.get(band_by_row.get(id(row))))
+            entry = leadtime_module.summarize_row(row, suppliers)
             rows.append(_pad([
-                Cell(row.get('row'), STYLE_INT),
-                Cell(row.get('mpn')),
-                Cell(row.get('quantity'), STYLE_INT),
-                Cell(comparison.get('lifecycle'),
-                     SEVERITY_STYLE.get(comparison.get('lifecycleSeverity'), STYLE_DEFAULT)),
-                Cell('; '.join(f['text'] for f in comparison.get('flags') or [])),
+                cell(row.get('row'), STYLE_INT),
+                cell(row.get('mpn')),
+                cell(row.get('quantity'), STYLE_INT),
+                cell(entry['availability']),
+                cell(comparison.get('lifecycle')),
+                cell('; '.join(f['text'] for f in comparison.get('flags') or [])),
             ]))
+        rows.append(_pad([]))
+        rows.extend(availability_legend())
     else:
         rows.append(_pad([Cell('Every line is in stock, priced and in production.', STYLE_GOOD)]))
 
@@ -581,11 +600,61 @@ def _also_in(row):
     return usable
 
 
+# Semantic style -> the kind of fill cell it becomes on a shaded row. A cell
+# that was carrying meaning in its text colour (a lifecycle severity, a muted
+# note) gives that up to the fill, which is the stronger signal of the two.
+_FILL_KIND = {
+    STYLE_INT: 'int',
+    STYLE_INT_BOLD: 'int',
+    STYLE_MONEY: 'money',
+    STYLE_MONEY_BOLD: 'money',
+    STYLE_MONEY_FINE: 'money_fine',
+}
+
+
+def banded_cell(colour):
+    """A cell factory that shades everything it makes, or nothing if unshaded."""
+    def cell(value, style=STYLE_DEFAULT):
+        if colour is None:
+            return Cell(value, style)
+        return Cell(value, fill_style(colour, _FILL_KIND.get(style, 'text')))
+    return cell
+
+
+def availability_legend(width=REPORT_WIDTH):
+    """The key to the colours, so a shaded sheet explains itself."""
+    rows = [_pad([Cell('Colour key', STYLE_LABEL)], width)]
+    for band in leadtime_module.BAND_ORDER:
+        colour = LEAD_FILL.get(band)
+        rows.append(_pad([
+            Cell(leadtime_module.BAND_LABEL[band], fill_style(colour)),
+            Cell(_BAND_EXPLANATION[band], fill_style(colour)),
+        ], width))
+    return rows
+
+
+_BAND_EXPLANATION = {
+    leadtime_module.NONE: 'No supplier searched can provide the part at this time',
+    leadtime_module.LONG: 'More than %d weeks out' % (leadtime_module.LONG_DAYS // 7),
+    leadtime_module.MEDIUM: '%d to %d weeks out' % (leadtime_module.MEDIUM_DAYS // 7,
+                                                    leadtime_module.LONG_DAYS // 7),
+    leadtime_module.UNKNOWN: 'Carried, but no supplier quoted a date',
+    leadtime_module.QUICK: 'In stock, or quoted inside %d weeks' % (
+        leadtime_module.MEDIUM_DAYS // 7),
+}
+
+
 def build_parts_rows(result, summary, styled=False):
-    """One line per part, only the columns a buyer acts on."""
+    """One line per part, only the columns a buyer acts on.
+
+    Shaded by how soon the part can arrive, the same four colours the lead-time
+    report uses: a buyer opening the summary should not have to cross-reference
+    another sheet to see which lines are the problem.
+    """
     def cell(value, style=STYLE_DEFAULT):
         return Cell(value, style) if styled else value
 
+    bands = leadtime_module.bands_by_row(result) if styled else []
     shared = any(_also_in(row) for row in result['rows'])
     alternates = has_alternates(result)
     columns = list(PARTS_COLUMNS)
@@ -596,8 +665,10 @@ def build_parts_rows(result, summary, styled=False):
 
     rows = [[cell(name, STYLE_HEADER) for name in columns]]
 
-    for row in result['rows']:
+    for index, row in enumerate(result['rows']):
         comparison = row['comparison']
+        if styled:
+            cell = banded_cell(LEAD_FILL.get(bands[index]))
         # The recommended supplier is the one to price: it already balances
         # "soonest" against "cheapest among the soonest".
         chosen = None
@@ -644,7 +715,21 @@ def build_parts_rows(result, summary, styled=False):
             record.append(cell(alternate_summary(row), STYLE_MUTED))
         record.append(cell('; '.join(notes)))
         rows.append(record)
+
+    if styled and rows[1:]:
+        # The key goes under the table rather than over it, so the sheet still
+        # opens on its first part and the header stays row 1. The caller keeps
+        # it out of the filter range — see parts_filter_rows().
+        width = len(rows[0])
+        rows.append([Cell('')] * width)
+        for entry in availability_legend(width):
+            rows.append(list(entry))
     return rows
+
+
+def parts_filter_rows(result):
+    """How many rows of the Parts sheet are the table, header included."""
+    return 1 + len(result['rows'])
 
 
 def has_alternates(result):
@@ -802,6 +887,8 @@ LEAD_COLUMNS = [
 LEAD_WIDTHS = [6, 26, 8, 18, 34, 20, 11, 16, 22, 12, 13, 12, 15, 10, 40, 46]
 
 # The colour each band is shaded, which is also what the legend explains.
+# Defined once and used by every sheet that shades a part, so the summary
+# report and the lead-time report can never drift on to different palettes.
 LEAD_FILL = {
     leadtime_module.QUICK: 'green',
     leadtime_module.MEDIUM: 'yellow',
@@ -952,6 +1039,7 @@ def build_workbook_sheets(result, summary, meta=None, excluded=None, prefix=''):
         'rows': parts_rows,
         'widths': PARTS_WIDTHS if len(parts_rows[0]) == len(PARTS_COLUMNS)
                   else _parts_widths(parts_rows[0]),
+        'filterRows': parts_filter_rows(result),
     }, {
         'name': name('Full comparison'),
         'rows': build_rows(result, summary, styled=True),

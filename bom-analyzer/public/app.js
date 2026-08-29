@@ -1229,9 +1229,12 @@
       var offer = row.offers[supplier.id];
       return offer && offer.found;
     });
-    var severity = comparison.lifecycleSeverity;
-    return !found || severity === 'bad' || severity === 'warn' ||
-      !comparison.stockCovers;
+    // A line earns a badge by carrying a flag worth acting on, which keeps this
+    // from drifting away from the flags shown beside it. An info flag — a
+    // split, a price spread — is worth reading but is not a decision.
+    return !found || comparison.flags.some(function (flag) {
+      return flag.level === 'bad' || flag.level === 'warn';
+    });
   }
 
   function alternateSummaryText(row) {
@@ -1600,7 +1603,7 @@
       );
     });
     header.push('Cheapest Supplier', 'Soonest Supplier', 'Soonest (days)', 'Recommended',
-      'Worst Lifecycle', 'Approved Alternates', 'Notes');
+      'Worst Lifecycle', 'Availability', 'Approved Alternates', 'Notes');
 
     var lines = [header];
     visibleRows().forEach(function (row) {
@@ -1630,6 +1633,7 @@
         row.comparison.bestLeadTimeDays,
         row.comparison.recommendedSupplier,
         row.comparison.lifecycle,
+        (LEAD_BAND_LABEL[leadRow(row, suppliers).band] || ''),
         alternateSummaryText(row),
         row.comparison.flags.map(function (f) { return f.text; }).join('; ')
       );
@@ -1805,9 +1809,9 @@
       var found = results.suppliers.some(function (s) {
         return row.offers[s.id] && row.offers[s.id].found;
       });
-      var severity = row.comparison.lifecycleSeverity;
-      return !found || severity === 'bad' || severity === 'warn' ||
-        !row.comparison.stockCovers;
+      return !found || row.comparison.flags.some(function (flag) {
+        return flag.level === 'bad' || flag.level === 'warn';
+      });
     });
 
     return {
@@ -1825,6 +1829,12 @@
       hasAlternates: results.rows.some(function (row) {
         return alternateEntries(row).length > 0;
       }),
+      // The availability band of every line, so the summary shades its parts
+      // the same four colours the lead-time report and the workbook use.
+      bands: results.rows.reduce(function (map, row) {
+        map[row.index] = leadRow(row, results.suppliers).band;
+        return map;
+      }, {}),
       generated: new Date().toLocaleString(),
     };
   }
@@ -1875,6 +1885,20 @@
     return entries.map(function (entry) {
       return '<div class="alt-line">' + esc(entry.mpn) + ' ' + alternateBadge(entry) + '</div>';
     }).join('');
+  }
+
+  function bandClass(model, row) {
+    var band = model.bands[row.index];
+    return band ? ' class="lead-' + band + '"' : '';
+  }
+
+  // The key to the shading, so a coloured table explains itself — on screen
+  // and in the printed PDF.
+  function bandKeyHtml() {
+    return '<div class="band-key">' + LEAD_BANDS.map(function (band) {
+      return '<span><i class="swatch-' + (band.tone || 'plain') + '"></i>' +
+        esc(band.label) + '</span>';
+    }).join('') + '</div>';
   }
 
   function reportHtml(model) {
@@ -1932,7 +1956,7 @@
         (model.hasAlternates ? '<th>Approved alternate</th>' : '') +
         '</tr></thead><tbody>' +
         model.risky.map(function (row) {
-          return '<tr><td class="mpn-cell">' + esc(row.mpn) +
+          return '<tr' + bandClass(model, row) + '><td class="mpn-cell">' + esc(row.mpn) +
             (row.reference ? '<div class="desc">' + esc(row.reference) + '</div>' : '') + '</td>' +
             '<td class="num">' + count(row.quantity) + '</td>' +
             '<td>' + lifecycleBadge({
@@ -1946,7 +1970,7 @@
               : '<span class="muted">—</span>') + '</td>' +
             (model.hasAlternates ? '<td>' + reportAlternateCell(row) + '</td>' : '') +
             '</tr>';
-        }).join('') + '</tbody></table></div>';
+        }).join('') + '</tbody></table></div>' + bandKeyHtml();
     } else {
       riskHtml = '<div class="report-empty">Every line is in stock, priced and in production.</div>';
     }
@@ -1970,7 +1994,7 @@
                            : ((offer && money(offer.extendedPrice, offer.currency)) || '—');
       if (split) lead = 'In stock, split';
       var elsewhere = otherBomDemand(model, row.mpn);
-      return '<tr>' +
+      return '<tr' + bandClass(model, row) + '>' +
         '<td class="mpn-cell">' + esc(row.mpn) +
         (row.description ? '<div class="desc">' + esc(row.description) + '</div>' : '') + '</td>' +
         '<td class="num">' + count(row.quantity) + '</td>' +
@@ -2004,7 +2028,7 @@
       '<th>Lead time</th><th>Lifecycle</th>' +
       (model.hasAlternates ? '<th>Approved alternates</th>' : '') +
       '</tr></thead><tbody>' + partRows +
-      '</tbody></table></div>';
+      '</tbody></table></div>' + bandKeyHtml();
 
     // Skipped lines.
     var skippedHtml = '';
@@ -2120,6 +2144,11 @@
   ];
 
   // Short in the availability column, said in full in the note beside it.
+  var LEAD_BAND_LABEL = LEAD_BANDS.reduce(function (map, band) {
+    map[band.key] = band.label;
+    return map;
+  }, {});
+
   var NO_SUPPLIER_SHORT = 'Not available';
   var NO_SUPPLIER_TEXT = 'No supplier searched can provide this part at this time';
   var LEAD_UNKNOWN_SHORT = 'No date quoted';

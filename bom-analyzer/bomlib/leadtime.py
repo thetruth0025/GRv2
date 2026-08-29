@@ -224,6 +224,17 @@ def _note(band, winner, tied, ranked, alternates, split=False, plan=None):
     return '; '.join(pieces)
 
 
+def bands_by_row(result):
+    """The availability band of every line, keyed by its position in the result.
+
+    One pass, so the summary report can shade its tables the same colours the
+    lead-time report uses without recomputing the banding per sheet — and
+    without any chance of the two disagreeing.
+    """
+    suppliers = result.get('suppliers') or []
+    return [summarize_row(row, suppliers)['band'] for row in result.get('rows') or []]
+
+
 def build_report(result, scope=None):
     """Every looked-up part, banded and sorted worst first."""
     suppliers = result.get('suppliers') or []

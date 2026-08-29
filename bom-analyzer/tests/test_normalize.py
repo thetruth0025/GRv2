@@ -243,10 +243,23 @@ class ComparisonTests(unittest.TestCase):
         self.assertTrue(summary['stockCovers'])
         self.assertFalse(any(f['level'] == 'bad' for f in summary['flags']), texts)
 
-    def test_genuine_shortage_is_called_out_rather_than_a_split(self):
-        summary = compare_offers([offer('DigiKey', stock=10), offer('Mouser', stock=5)], 100)
+    def test_no_stock_but_a_quoted_date_is_a_factory_order_not_an_emergency(self):
+        summary = compare_offers([offer('DigiKey', stock=10, leadTime='10 Weeks'),
+                                  offer('Mouser', stock=5, leadTime='20 Weeks')], 100)
         texts = [f['text'] for f in summary['flags']]
-        self.assertTrue(any('below the required 100' in t for t in texts), texts)
+        self.assertFalse(summary['stockCovers'])
+        self.assertTrue(summary['obtainable'])
+        self.assertTrue(any('No stock on hand — soonest is 10 weeks' in t for t in texts), texts)
+        self.assertFalse(any(f['level'] == 'bad' for f in summary['flags']), texts)
+
+    def test_short_with_nobody_quoting_a_date_is_the_emergency(self):
+        summary = compare_offers([offer('DigiKey', stock=10, leadTime=None),
+                                  offer('Mouser', stock=5, leadTime=None)], 100)
+        texts = [f['text'] for f in summary['flags']]
+        self.assertFalse(summary['obtainable'])
+        self.assertTrue(any('below the required 100' in t and 'no supplier quoted a date' in t
+                            for t in texts), texts)
+        self.assertTrue(any(f['level'] == 'bad' for f in summary['flags']), texts)
 
     def test_obsolete_from_one_supplier_marks_the_whole_line(self):
         summary = compare_offers([

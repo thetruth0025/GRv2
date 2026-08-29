@@ -611,6 +611,7 @@ def compare_offers(offers, quantity):
         # each cover a need for 200 between them.
         'combinedStock': 0,
         'stockCovers': False,
+        'obtainable': False,
         'allocation': None,
         'lifecycle': worst_lifecycle([o.get('lifecycle') for o in usable]),
         'recommendedSupplier': None,
@@ -673,13 +674,29 @@ def compare_offers(offers, quantity):
     summary['combinedStock'] = plan['combinedStock']
     summary['stockCovers'] = plan['shortfall'] == 0 and bool(plan['lines'])
 
+    # Short on stock and unobtainable are two different problems, and only the
+    # second is an emergency. A part nobody has on a shelf but everybody can
+    # order in a fortnight is a normal factory order, not a line to escalate.
+    summary['obtainable'] = bool(summary['inStockSuppliers']) or summary['stockCovers'] \
+        or summary['bestLeadTimeDays'] is not None
+
     if not summary['stockCovers']:
-        # Genuinely short: nobody's shelves, added together, hold enough.
-        summary['flags'].append({
-            'level': 'bad',
-            'text': 'Combined stock (%s) is below the required %s'
-                    % (_trim_number(plan['combinedStock']), _trim_number(needed)),
-        })
+        if summary['obtainable']:
+            soonest = summary['bestLeadTimeSuppliers'][0] if summary['bestLeadTimeSuppliers'] else None
+            summary['flags'].append({
+                'level': 'warn',
+                'text': 'No stock on hand — soonest is %s%s' % (
+                    format_lead_time(summary['bestLeadTimeDays']) or 'unquoted',
+                    ' from %s' % soonest if soonest else '',
+                ),
+            })
+        else:
+            summary['flags'].append({
+                'level': 'bad',
+                'text': 'Combined stock (%s) is below the required %s, and no supplier '
+                        'quoted a date'
+                        % (_trim_number(plan['combinedStock']), _trim_number(needed)),
+            })
     elif plan['splitRequired']:
         # Coverable, but not from one purchase order. That is a logistics note,
         # not a supply risk, so it is said as one.

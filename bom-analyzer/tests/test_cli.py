@@ -156,8 +156,11 @@ class ReportTests(unittest.TestCase):
             ],
         )
         rows = build_rows(result, summary)
-        self.assertEqual(len(rows[1]), len(rows[0]))
-        self.assertIn('No Mouser match', rows[1][-7])
+        header, record = rows[0], rows[1]
+        self.assertEqual(len(record), len(header))
+        self.assertIn('No Mouser match', record[header.index('Mouser Status')])
+        # And the blanks before it line up rather than shifting the row.
+        self.assertEqual(record[header.index('Mouser Unit Price (USD)')], None)
 
 
 class WriterTests(unittest.TestCase):

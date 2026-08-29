@@ -27,41 +27,48 @@ STYLE_MONEY_BOLD = 13
 STYLE_INT_BOLD = 14
 STYLE_BOLD = 15
 
-# Highlight bands for the lead-time report. Each band needs its own copy per
-# number format, because a fill and a number format are one style in Excel and
-# a shaded row still has to show money as money.
-STYLE_FILL_GREEN = 16
-STYLE_FILL_GREEN_INT = 17
-STYLE_FILL_GREEN_MONEY = 18
-STYLE_FILL_YELLOW = 19
-STYLE_FILL_YELLOW_INT = 20
-STYLE_FILL_YELLOW_MONEY = 21
-STYLE_FILL_ORANGE = 22
-STYLE_FILL_ORANGE_INT = 23
-STYLE_FILL_ORANGE_MONEY = 24
-STYLE_FILL_RED = 25
-STYLE_FILL_RED_INT = 26
-STYLE_FILL_RED_MONEY = 27
+# Highlight bands for the availability colours. Each band needs its own copy
+# per number format, because a fill and a number format are one style in Excel
+# and a shaded row still has to show money as money — down to the fifth decimal
+# for the sub-cent unit prices passives are sold at.
+FILL_KINDS = ('text', 'int', 'money', 'money_fine')
+FILL_COLOURS = ('green', 'yellow', 'orange', 'red')
 
-# Pick the styled cell for a highlighted row: fill by band, format by content.
+# 16..31, four kinds per colour in FILL_COLOURS order.
 FILL_STYLES = {
-    'green': (STYLE_FILL_GREEN, STYLE_FILL_GREEN_INT, STYLE_FILL_GREEN_MONEY),
-    'yellow': (STYLE_FILL_YELLOW, STYLE_FILL_YELLOW_INT, STYLE_FILL_YELLOW_MONEY),
-    'orange': (STYLE_FILL_ORANGE, STYLE_FILL_ORANGE_INT, STYLE_FILL_ORANGE_MONEY),
-    'red': (STYLE_FILL_RED, STYLE_FILL_RED_INT, STYLE_FILL_RED_MONEY),
+    colour: tuple(16 + index * len(FILL_KINDS) + kind
+                  for kind in range(len(FILL_KINDS)))
+    for index, colour in enumerate(FILL_COLOURS)
+}
+
+STYLE_FILL_GREEN = FILL_STYLES['green'][0]
+STYLE_FILL_YELLOW = FILL_STYLES['yellow'][0]
+STYLE_FILL_ORANGE = FILL_STYLES['orange'][0]
+STYLE_FILL_RED = FILL_STYLES['red'][0]
+
+# What an unshaded cell of each kind uses, so one call site covers both cases.
+PLAIN_STYLES = {
+    'text': STYLE_DEFAULT,
+    'int': STYLE_INT,
+    'money': STYLE_MONEY,
+    'money_fine': STYLE_MONEY_FINE,
 }
 
 
 def fill_style(colour, kind='text'):
     """The style index for one cell of a highlighted row.
 
-    `kind` is 'text', 'int' or 'money'. An unknown colour means no highlight,
-    which is how a band that is deliberately left unshaded stays readable.
+    `kind` is 'text', 'int', 'money' or 'money_fine'. An unknown colour means
+    no highlight, which is how a band deliberately left unshaded stays readable
+    and how an unshaded sheet reuses the same call.
     """
     styles = FILL_STYLES.get(colour)
     if not styles:
-        return {'money': STYLE_MONEY, 'int': STYLE_INT}.get(kind, STYLE_DEFAULT)
-    return styles[{'text': 0, 'int': 1, 'money': 2}.get(kind, 0)]
+        return PLAIN_STYLES.get(kind, STYLE_DEFAULT)
+    try:
+        return styles[FILL_KINDS.index(kind)]
+    except ValueError:
+        return styles[0]
 
 # Excel rejects most control characters outright.
 _ILLEGAL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
@@ -112,7 +119,8 @@ def _cell_xml(ref, cell):
     )
 
 
-def _sheet_xml(rows, widths, freeze_rows, autofilter, merges=None, heights=None):
+def _sheet_xml(rows, widths, freeze_rows, autofilter, merges=None, heights=None,
+               filter_rows=None):
     ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
 
     pane = ''
@@ -146,7 +154,11 @@ def _sheet_xml(rows, widths, freeze_rows, autofilter, merges=None, heights=None)
 
     filter_xml = ''
     if autofilter and rows:
-        filter_xml = '<autoFilter ref="A1:%s%d"/>' % (column_letter(len(rows[0]) - 1), len(rows))
+        # A sheet may end in something that is not data — a colour key, a note.
+        # Including it in the filter range means sorting the table scatters it.
+        last = filter_rows if isinstance(filter_rows, int) and filter_rows > 0 else len(rows)
+        last = min(last, len(rows))
+        filter_xml = '<autoFilter ref="A1:%s%d"/>' % (column_letter(len(rows[0]) - 1), last)
 
     # Schema order matters here: mergeCells must follow autoFilter, not precede
     # it, or Excel refuses to open the file at all.
@@ -216,7 +228,7 @@ def _styles_xml():
         '<color rgb="FF8EA9BB"/></bottom><diagonal/></border>'
         '</borders>'
         '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
-        '<cellXfs count="28">'
+        '<cellXfs count="32">'
         # 0 default
         '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
         # 1 header
@@ -251,22 +263,26 @@ def _styles_xml():
         '<xf numFmtId="3" fontId="8" fillId="0" borderId="0" xfId="0" '
         'applyNumberFormat="1" applyFont="1"/>'
         '<xf numFmtId="0" fontId="8" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
-        # fill 5: text, integer, money
+        # fill 5: text, integer, money, money to 5dp
         '<xf numFmtId="0" fontId="9" fillId="5" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
         '<xf numFmtId="3" fontId="9" fillId="5" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
         '<xf numFmtId="164" fontId="9" fillId="5" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
-        # fill 6: text, integer, money
+        '<xf numFmtId="165" fontId="9" fillId="5" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        # fill 6: text, integer, money, money to 5dp
         '<xf numFmtId="0" fontId="10" fillId="6" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
         '<xf numFmtId="3" fontId="10" fillId="6" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
         '<xf numFmtId="164" fontId="10" fillId="6" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
-        # fill 7: text, integer, money
+        '<xf numFmtId="165" fontId="10" fillId="6" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        # fill 7: text, integer, money, money to 5dp
         '<xf numFmtId="0" fontId="11" fillId="7" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
         '<xf numFmtId="3" fontId="11" fillId="7" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
         '<xf numFmtId="164" fontId="11" fillId="7" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
-        # fill 8: text, integer, money
+        '<xf numFmtId="165" fontId="11" fillId="7" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        # fill 8: text, integer, money, money to 5dp
         '<xf numFmtId="0" fontId="12" fillId="8" borderId="0" xfId="0" applyFont="1" applyFill="1"/>'
         '<xf numFmtId="3" fontId="12" fillId="8" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
         '<xf numFmtId="164" fontId="12" fillId="8" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
+        '<xf numFmtId="165" fontId="12" fillId="8" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1" applyFill="1"/>'
         '</cellXfs>'
         '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
         '</styleSheet>' % ns
@@ -297,7 +313,7 @@ def write_xlsx(path, sheets, sheet_name='BOM', widths=None, freeze_rows=1, autof
 
     `sheets` is either a list of rows (a single sheet, named by `sheet_name`)
     or a list of {'name', 'rows', 'widths'} dicts for a multi-sheet workbook.
-    A sheet may also carry 'freeze', 'autofilter', 'merges' and 'heights' to
+    A sheet may also carry 'freeze', 'autofilter', 'filterRows', 'merges' and 'heights' to
     override the workbook-wide defaults — a report sheet with a title block
     wants neither a frozen row nor a filter on row 1.
     """
@@ -322,6 +338,7 @@ def write_xlsx(path, sheets, sheet_name='BOM', widths=None, freeze_rows=1, autof
             'widths': spec.get('widths'),
             'freeze': spec.get('freeze', freeze_rows),
             'autofilter': spec.get('autofilter', autofilter),
+            'filterRows': spec.get('filterRows'),
             'merges': spec.get('merges'),
             'heights': spec.get('heights'),
         })
@@ -367,6 +384,7 @@ def write_xlsx(path, sheets, sheet_name='BOM', widths=None, freeze_rows=1, autof
             archive.writestr(
                 'xl/worksheets/sheet%d.xml' % (index + 1),
                 _sheet_xml(spec['rows'], spec['widths'], spec['freeze'],
-                           spec['autofilter'], spec['merges'], spec['heights']),
+                           spec['autofilter'], spec['merges'], spec['heights'],
+                           spec['filterRows']),
             )
     return path
