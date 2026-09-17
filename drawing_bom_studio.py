@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.38.0"
+__version__ = "2.38.1"
 
 import argparse
 import datetime
@@ -529,10 +529,24 @@ def _cluster(values, tol):
     return [(c[0], c[1]) for c in clusters]
 
 
+def _shape_is_rect(sh, ns) -> bool:
+    """True if a leaf shape is a rectangle-ish text box (a closed box, not a
+    line or free-floating text): its geometry has >=3 straight line segments."""
+    for sec in sh.findall(ns + "Section"):
+        if sec.get("N") != "Geometry":
+            continue
+        lines = sum(1 for r in sec.findall(ns + "Row")
+                    if (r.get("T") or "") in ("LineTo", "RelLineTo"))
+        if lines >= 3:
+            return True
+    return False
+
+
 def _visio_leaf_cells(page_xml):
     """Leaf text-box shapes with geometry. Returns (ns, cells, max_id) where
-    each cell is {id, x, y, w, h, text}. Leaf = has its own <Text> and no child
-    <Shapes>, i.e. a single grid cell (not a group)."""
+    each cell is {id, x, y, w, h, text, rect}. Leaf = has its own <Text> and no
+    child <Shapes>, i.e. a single grid cell (not a group). ``rect`` is True for
+    a rectangular box (vs a line / free text)."""
     try:
         root = ET.fromstring(page_xml)
     except ET.ParseError:
@@ -556,6 +570,7 @@ def _visio_leaf_cells(page_xml):
             "w": _cell_value(sh, ns, "Width"),
             "h": _cell_value(sh, ns, "Height"),
             "text": "".join(text_el.itertext()).strip(),
+            "rect": _shape_is_rect(sh, ns),
         })
     return ns, cells, max_id
 
@@ -4603,6 +4618,10 @@ def _visio_sheet_cable_labels(page_xml: str, drawing_no: str):
         best, bd = None, None
         for c in cc:
             if c is cap or _LABEL_CAP_RE.match(c["text"].strip()):
+                continue
+            # The label value lives in a RECTANGLE text box -- never a wire
+            # line or free-floating annotation that merely sits nearby.
+            if not c.get("rect"):
                 continue
             # same column (x overlap) and the closest box vertically
             if abs(c["x"] - cx) > max(cw, c["w"] or 0.3) * 0.9:
