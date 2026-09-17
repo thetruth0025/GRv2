@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.38.1"
+__version__ = "2.38.2"
 
 import argparse
 import datetime
@@ -530,16 +530,28 @@ def _cluster(values, tol):
 
 
 def _shape_is_rect(sh, ns) -> bool:
-    """True if a leaf shape is a rectangle-ish text box (a closed box, not a
-    line or free-floating text): its geometry has >=3 straight line segments."""
+    """True if a leaf shape is an *actual visible rectangle* -- a drawn box with
+    a border that the text sits inside -- not a borderless default text box
+    (rectangular geometry but no visible outline), a wire line, or free text.
+
+    Requires: a stroked rectangle geometry (>=3 line segments, NoLine != 1)
+    AND a visible line pattern on the shape (LinePattern present and != 0)."""
+    has_rect_geo = False
     for sec in sh.findall(ns + "Section"):
         if sec.get("N") != "Geometry":
             continue
         lines = sum(1 for r in sec.findall(ns + "Row")
                     if (r.get("T") or "") in ("LineTo", "RelLineTo"))
-        if lines >= 3:
-            return True
-    return False
+        noline = next((c.get("V") for c in sec.findall(ns + "Cell")
+                       if c.get("N") == "NoLine"), None)
+        if lines >= 3 and noline != "1":
+            has_rect_geo = True
+            break
+    if not has_rect_geo:
+        return False
+    lp = next((c.get("V") for c in sh.findall(ns + "Cell")
+               if c.get("N") == "LinePattern"), None)
+    return lp is not None and lp not in ("0", "0.0", "")
 
 
 def _visio_leaf_cells(page_xml):
