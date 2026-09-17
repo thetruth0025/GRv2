@@ -204,13 +204,17 @@ loaded Visio drawing(s) and writes an Excel file of the wire labels. For each
 cable sheet it captures:
 
 - the **cable name** — the drawing number (from the file name) joined to the
-  sheet's cable id, e.g. `CBL00120-01-W0001`;
+  sheet's cable id, e.g. `CBL00120-01-W0001`. It reads the cable-name box in the
+  title block; if that box is missing, it falls back to the cable name printed
+  above the sheet's **Length:** box (top-centre);
 - **every label** — the text boxes captioned "Label …" (the caption sits
   directly above or below the value box).
 
 The output has one row per label: **Sheet · Cable Name · Label · Label Text**
-(a leading **File** column is added when several drawings are exported at once).
-Sheets without labels, and the specification/legend sheets, are skipped.
+(a leading **File** column is added when several drawings are exported at once,
+and a **Label Type** column when any caption carries a "Label Type: …"). The
+header row is bold and colored. Sheets without labels, and the
+specification/legend sheets, are skipped.
 
 ### Excel: find & edit BOM rows
 

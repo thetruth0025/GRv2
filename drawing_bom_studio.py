@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.37.0"
+__version__ = "2.38.0"
 
 import argparse
 import datetime
@@ -4532,17 +4532,37 @@ def _natural_key(s: str):
 _LABEL_CAP_RE = re.compile(r"label\b", re.IGNORECASE)
 
 
+def _cable_name_from_text(text: str, drawing_no: str):
+    """Interpret a box's text as a cable name: the "<drawing_no>-<id>" it
+    contains, or a bare cable-id token (e.g. W0001) composed with the drawing
+    number. Returns the cable name, or None if it doesn't look like one (so
+    spec/legend text such as "Cable Assembly Specifications" is rejected)."""
+    t = (text or "").replace("\r", "").strip()
+    if not t:
+        return None
+    if drawing_no:
+        mm = re.search(re.escape(drawing_no) + r"-\S+", t, re.IGNORECASE)
+        if mm:
+            return mm.group(0)
+    first = t.splitlines()[0].strip()
+    if re.fullmatch(r"[A-Za-z]{1,4}\d{2,}[A-Za-z0-9-]*", first):
+        return f"{drawing_no}-{first}" if drawing_no else first
+    return None
+
+
 def _visio_sheet_cable_labels(page_xml: str, drawing_no: str):
     """For one Visio sheet, return (cable_name, [(caption, value), ...]) if it's
-    a cable sheet, else None. A cable sheet has "Label" captions AND a single
-    line cable-name box "<drawing_no>-<id>". Each label value is the nearest
-    text box directly above/below its caption (same column)."""
+    a cable sheet, else None. A cable sheet has "Label" captions AND a cable
+    name -- either a "<drawing_no>-<id>" box, or (fallback) the box directly
+    above the "Length:" box near the top of the sheet. Each label value is the
+    nearest text box directly above/below its caption (same column)."""
     ns, cells, _ = _visio_leaf_cells(page_xml)
     cc = [c for c in cells if c["text"] and c["x"] is not None
           and c["y"] is not None]
     caps = [c for c in cc if _LABEL_CAP_RE.match(c["text"].strip())]
     if not caps:
         return None
+    # 1) A "<drawing_no>-<id>" box (usually the title-block / top-center name).
     cable = None
     if drawing_no:
         pat = re.compile(re.escape(drawing_no) + r"-\S.*$")
@@ -4551,6 +4571,30 @@ def _visio_sheet_cable_labels(page_xml: str, drawing_no: str):
             if "\n" not in c["text"] and pat.fullmatch(t):
                 cable = t
                 break
+    # 2) Fallback: the box directly above a "Length:" box (top-center), when the
+    #    cable-name box isn't on the sheet. Validated so legend sheets are still
+    #    excluded.
+    if not cable:
+        for lb in cc:
+            if not re.match(r"\s*length\s*[:\-]", lb["text"].strip(), re.I):
+                continue
+            best, bd = None, None
+            for c in cc:
+                if c is lb:
+                    continue
+                if abs(c["x"] - lb["x"]) > max(lb["w"] or 0.3,
+                                               c["w"] or 0.3) * 0.9:
+                    continue
+                dy = c["y"] - lb["y"]  # strictly above (higher Y)
+                if dy <= 0.02 or dy > 2.5:
+                    continue
+                if bd is None or dy < bd:
+                    bd, best = dy, c
+            if best:
+                cand = _cable_name_from_text(best["text"], drawing_no)
+                if cand:
+                    cable = cand
+                    break
     if not cable:
         return None  # a spec/legend sheet, not an actual cable sheet
     labels = []
