@@ -197,6 +197,21 @@ Options:
     (`CBL00132_REVD`) still matches `CBL00132-01 REVD` in the BOM, but a
     different suffix (`CBL00132-02`) does not.
 
+### Capture cable labels (Visio → Excel)
+
+On the **Parts** tab, **Extract cable labels…** scans every cable sheet of the
+loaded Visio drawing(s) and writes an Excel file of the wire labels. For each
+cable sheet it captures:
+
+- the **cable name** — the drawing number (from the file name) joined to the
+  sheet's cable id, e.g. `CBL00120-01-W0001`;
+- **every label** — the text boxes captioned "Label …" (the caption sits
+  directly above or below the value box).
+
+The output has one row per label: **Sheet · Cable Name · Label · Label Text**
+(a leading **File** column is added when several drawings are exported at once).
+Sheets without labels, and the specification/legend sheets, are skipped.
+
 ### Excel: find & edit BOM rows
 
 For Excel bill-of-materials sheets, you can edit a part's whole row, not just

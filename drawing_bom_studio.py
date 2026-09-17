@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.35.1"
+__version__ = "2.36.0"
 
 import argparse
 import datetime
@@ -4519,6 +4519,180 @@ def _natural_key(s: str):
             for t in re.split(r"(\d+)", s or "")]
 
 
+# ---------------------------------------------------------------------------
+# Cable-label capture (Visio cable drawings)
+# ---------------------------------------------------------------------------
+#
+# On each cable sheet of a Visio cable drawing, the wire labels are text boxes
+# captioned "Label" / "Label 1" / ... (the caption sits directly above or below
+# the value box). The sheet's cable name is a box reading "<drawing no>-<id>"
+# (e.g. CBL00120-01-W0001) -- the drawing number from the file name joined to
+# the cable id. We capture, per cable sheet, the cable name and every label.
+
+_LABEL_CAP_RE = re.compile(r"label\b", re.IGNORECASE)
+
+
+def _visio_sheet_cable_labels(page_xml: str, drawing_no: str):
+    """For one Visio sheet, return (cable_name, [(caption, value), ...]) if it's
+    a cable sheet, else None. A cable sheet has "Label" captions AND a single
+    line cable-name box "<drawing_no>-<id>". Each label value is the nearest
+    text box directly above/below its caption (same column)."""
+    ns, cells, _ = _visio_leaf_cells(page_xml)
+    cc = [c for c in cells if c["text"] and c["x"] is not None
+          and c["y"] is not None]
+    caps = [c for c in cc if _LABEL_CAP_RE.match(c["text"].strip())]
+    if not caps:
+        return None
+    cable = None
+    if drawing_no:
+        pat = re.compile(re.escape(drawing_no) + r"-\S.*$")
+        for c in cc:
+            t = c["text"].strip()
+            if "\n" not in c["text"] and pat.fullmatch(t):
+                cable = t
+                break
+    if not cable:
+        return None  # a spec/legend sheet, not an actual cable sheet
+    labels = []
+    for cap in sorted(caps, key=lambda c: c["x"]):
+        cx, cw, cy = cap["x"], (cap["w"] or 0.3), cap["y"]
+        best, bd = None, None
+        for c in cc:
+            if c is cap or _LABEL_CAP_RE.match(c["text"].strip()):
+                continue
+            # same column (x overlap) and the closest box vertically
+            if abs(c["x"] - cx) > max(cw, c["w"] or 0.3) * 0.9:
+                continue
+            d = abs(c["y"] - cy)
+            if d < 0.02 or d > 2.0:
+                continue
+            if bd is None or d < bd:
+                bd, best = d, c
+        val = ""
+        if best:
+            val = re.sub(r"\s*\n\s*", " / ",
+                         best["text"].replace("\r", "").strip())
+        labels.append((cap["text"].strip(), val))
+    return cable, labels
+
+
+def extract_cable_labels(path) -> list:
+    """Capture cable labels from a .vsdx cable drawing. Returns a list of rows
+    {'file','sheet','cable','label','text'} -- one per label, cable sheets only,
+    in sheet display order."""
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return []
+    fname = Path(path).name
+    with z:
+        names = _visio_page_names(z)  # dict in page display order
+        drawing = _drawing_name_from_filename(path)
+        rows = []
+        for part, nm in names.items():
+            try:
+                xml = z.read(part).decode("utf-8", "replace")
+            except (KeyError, OSError):
+                continue
+            res = _visio_sheet_cable_labels(xml, drawing)
+            if not res:
+                continue
+            cable, labels = res
+            for cap, val in labels:
+                rows.append({"file": fname, "sheet": nm, "cable": cable,
+                             "label": cap, "text": val})
+    return rows
+
+
+def _xlsx_escape(v) -> str:
+    return (str(v).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def write_simple_xlsx(out_path, headers: list, data_rows: list,
+                      sheet_name: str = "Sheet1") -> Path:
+    """Write a minimal, valid .xlsx (inline strings, one worksheet). ``headers``
+    is a list of column titles; ``data_rows`` a list of row value-lists."""
+    out_path = Path(out_path)
+    cols = [_col_letters(i + 1) for i in range(max(len(headers), 1))]
+
+    def row_xml(rn, vals):
+        cells = "".join(
+            f'<c r="{cols[i]}{rn}" t="inlineStr"><is><t xml:space='
+            f'"preserve">{_xlsx_escape(v)}</t></is></c>'
+            for i, v in enumerate(vals) if i < len(cols))
+        return f'<row r="{rn}">{cells}</row>'
+
+    sd = row_xml(1, headers)
+    sd += "".join(row_xml(i + 2, r) for i, r in enumerate(data_rows))
+    sheet = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+             '<worksheet xmlns="http://schemas.openxmlformats.org/'
+             'spreadsheetml/2006/main"><sheetData>' + sd
+             + "</sheetData></worksheet>")
+    sn = _xlsx_escape(sheet_name)[:31] or "Sheet1"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Types xmlns="http://schemas.openxmlformats.org/package/'
+                   '2006/content-types"><Default Extension="rels" ContentType='
+                   '"application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   '<Override PartName="/xl/workbook.xml" ContentType='
+                   '"application/vnd.openxmlformats-officedocument.'
+                   'spreadsheetml.sheet.main+xml"/><Override PartName='
+                   '"/xl/worksheets/sheet1.xml" ContentType="application/vnd.'
+                   'openxmlformats-officedocument.spreadsheetml.worksheet+xml"'
+                   '/></Types>')
+        z.writestr("_rels/.rels",
+                   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/'
+                   'package/2006/relationships"><Relationship Id="rId1" Type='
+                   '"http://schemas.openxmlformats.org/officeDocument/2006/'
+                   'relationships/officeDocument" Target="xl/workbook.xml"/>'
+                   '</Relationships>')
+        z.writestr("xl/workbook.xml",
+                   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<workbook xmlns="http://schemas.openxmlformats.org/'
+                   'spreadsheetml/2006/main" xmlns:r="http://schemas.'
+                   'openxmlformats.org/officeDocument/2006/relationships">'
+                   f'<sheets><sheet name="{sn}" sheetId="1" r:id="rId1"/>'
+                   '</sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels",
+                   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/'
+                   'package/2006/relationships"><Relationship Id="rId1" Type='
+                   '"http://schemas.openxmlformats.org/officeDocument/2006/'
+                   'relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+                   '</Relationships>')
+        z.writestr("xl/worksheets/sheet1.xml", sheet)
+    return out_path
+
+
+def export_cable_labels(paths, out_path) -> tuple:
+    """Extract cable labels from one or more .vsdx files and write them to an
+    .xlsx. Returns (out_path, row_count, file_count). Includes a File column
+    only when more than one file contributed rows."""
+    all_rows = []
+    files_with = set()
+    for p in paths:
+        rows = extract_cable_labels(p)
+        if rows:
+            files_with.add(Path(p).name)
+        all_rows.extend(rows)
+    multi = len(files_with) > 1
+    if multi:
+        headers = ["File", "Sheet", "Cable Name", "Label", "Label Text"]
+        data = [[r["file"], r["sheet"], r["cable"], r["label"], r["text"]]
+                for r in all_rows]
+    else:
+        headers = ["Sheet", "Cable Name", "Label", "Label Text"]
+        data = [[r["sheet"], r["cable"], r["label"], r["text"]]
+                for r in all_rows]
+    write_simple_xlsx(out_path, headers, data, sheet_name="Cable Labels")
+    return Path(out_path), len(all_rows), len(files_with)
+
+
 def generate_change_summary(records, summary_path, run_dt=None) -> Path:
     """Write an HTML before/after change-review document.
 
@@ -6626,6 +6800,22 @@ def launch_gui() -> int:
                        kind="accent").pack(side="left")
             self.add_status = ttk.Label(adf, text="")
             self.add_status.pack(anchor="w", padx=10, pady=(0, 6))
+
+            lblf = ttk.LabelFrame(
+                tab_parts, text="Capture cable labels (Visio) → Excel")
+            lblf.pack(fill="x", padx=8, pady=(0, 8))
+            ttk.Label(
+                lblf, wraplength=900, justify="left",
+                text="Scan each cable sheet of the loaded Visio drawing(s) and "
+                "export every wire label (the boxes captioned “Label …”) with "
+                "its cable name to an Excel file.").pack(
+                fill="x", padx=8, pady=(8, 2))
+            lbl_row = ttk.Frame(lblf)
+            lbl_row.pack(fill="x", padx=8, pady=(0, 6))
+            self._rbtn(lbl_row, "Extract cable labels...",
+                       self.open_extract_labels, kind="green").pack(side="left")
+            self.labels_status = ttk.Label(lblf, text="")
+            self.labels_status.pack(anchor="w", padx=10, pady=(0, 6))
 
             # Tab 3 -- Approve & Revise.
             tab_appr = ttk.Frame(self.nb)
@@ -9024,6 +9214,45 @@ def launch_gui() -> int:
             self.out_dir = ""
             self.out_dir_lbl.configure(text="(same folder as each source file)")
 
+        # -- capture cable labels ------------------------------------------
+        def open_extract_labels(self):
+            vsdx = [f for f in self.files if detect_format(f) == "vsdx"]
+            if not vsdx:
+                messagebox.showinfo(
+                    "Cable labels",
+                    "Add at least one Visio (.vsdx) cable drawing first.")
+                return
+            initdir = self.out_dir or str(Path(vsdx[0]).parent)
+            default = ("Cable_Labels.xlsx" if len(vsdx) > 1
+                       else f"{Path(vsdx[0]).stem}_labels.xlsx")
+            out = filedialog.asksaveasfilename(
+                title="Save cable labels as", defaultextension=".xlsx",
+                initialdir=initdir, initialfile=default,
+                filetypes=[("Excel workbook", "*.xlsx")])
+            if not out:
+                return
+            try:
+                path, rows, nfiles = export_cable_labels(vsdx, out)
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror(
+                    "Cable labels", f"Couldn't extract labels:\n{exc}")
+                return
+            if rows == 0:
+                self.labels_status.configure(text="No cable labels found.")
+                self.log("Cable labels: none found (no 'Label' boxes on "
+                         "cable sheets of the selected file(s)).")
+                messagebox.showinfo(
+                    "Cable labels",
+                    "No cable labels were found. This works on Visio cable "
+                    "drawings whose sheets have boxes captioned “Label …” and "
+                    "a cable-name box matching the drawing number.")
+                return
+            self.labels_status.configure(
+                text=f"{rows} label(s) from {nfiles} file(s) → {path.name}")
+            self.log(f"Cable labels: {rows} label(s) from {nfiles} "
+                     f"file(s) -> {path.name}")
+            self._open_path(str(path))
+
         # -- remembered settings + presets ---------------------------------
         def _collect_prefs(self) -> dict:
             return {
@@ -9184,6 +9413,7 @@ def launch_gui() -> int:
             self.bom_status.configure(text="")
             self.remove_status.configure(text="")
             self.add_status.configure(text="")
+            self.labels_status.configure(text="")
             self._clear_out_dir()
             self.show_step(1)
             self.log(
