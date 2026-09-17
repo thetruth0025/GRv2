@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.36.0"
+__version__ = "2.37.0"
 
 import argparse
 import datetime
@@ -4576,10 +4576,25 @@ def _visio_sheet_cable_labels(page_xml: str, drawing_no: str):
     return cable, labels
 
 
+def _split_label_type(caption: str):
+    """Split a label caption into (label, label_type). If the caption contains
+    "Label Type: <text>" (any separator, any case), the text after it becomes
+    the label_type and is removed from the label part -- so e.g.
+    "Label 1  Label Type: Heat Shrink" -> ("Label 1", "Heat Shrink")."""
+    m = re.search(r"label\s*type\s*[:\-]?\s*(.*)$", caption or "",
+                  re.IGNORECASE | re.DOTALL)
+    if not m:
+        return (caption or "").strip(), ""
+    ltype = re.sub(r"\s*\n\s*", " ", m.group(1)).strip()
+    label = caption[:m.start()].strip()
+    label = re.sub(r"[\s:\-]+$", "", label).strip()
+    return label, ltype
+
+
 def extract_cable_labels(path) -> list:
     """Capture cable labels from a .vsdx cable drawing. Returns a list of rows
-    {'file','sheet','cable','label','text'} -- one per label, cable sheets only,
-    in sheet display order."""
+    {'file','sheet','cable','label','label_type','text'} -- one per label,
+    cable sheets only, in sheet display order."""
     try:
         z = zipfile.ZipFile(path)
     except (zipfile.BadZipFile, OSError):
@@ -4599,8 +4614,10 @@ def extract_cable_labels(path) -> list:
                 continue
             cable, labels = res
             for cap, val in labels:
+                label, ltype = _split_label_type(cap)
                 rows.append({"file": fname, "sheet": nm, "cable": cable,
-                             "label": cap, "text": val})
+                             "label": label, "label_type": ltype,
+                             "text": val})
     return rows
 
 
@@ -4611,24 +4628,59 @@ def _xlsx_escape(v) -> str:
 
 def write_simple_xlsx(out_path, headers: list, data_rows: list,
                       sheet_name: str = "Sheet1") -> Path:
-    """Write a minimal, valid .xlsx (inline strings, one worksheet). ``headers``
-    is a list of column titles; ``data_rows`` a list of row value-lists."""
+    """Write a minimal, valid .xlsx (inline strings, one worksheet) with a
+    bold, colored header row and auto-sized columns. ``headers`` is a list of
+    column titles; ``data_rows`` a list of row value-lists."""
     out_path = Path(out_path)
-    cols = [_col_letters(i + 1) for i in range(max(len(headers), 1))]
+    ncol = max(len(headers), 1)
+    cols = [_col_letters(i + 1) for i in range(ncol)]
 
-    def row_xml(rn, vals):
+    def row_xml(rn, vals, style=""):
+        s = f' s="{style}"' if style else ""
         cells = "".join(
-            f'<c r="{cols[i]}{rn}" t="inlineStr"><is><t xml:space='
+            f'<c r="{cols[i]}{rn}"{s} t="inlineStr"><is><t xml:space='
             f'"preserve">{_xlsx_escape(v)}</t></is></c>'
             for i, v in enumerate(vals) if i < len(cols))
         return f'<row r="{rn}">{cells}</row>'
 
-    sd = row_xml(1, headers)
+    # Auto-fit column widths from the longest cell (capped).
+    widths = []
+    for i in range(ncol):
+        longest = len(str(headers[i])) if i < len(headers) else 0
+        for r in data_rows:
+            if i < len(r):
+                longest = max(longest, len(str(r[i])))
+        widths.append(min(max(longest + 2, 10), 60))
+    colsxml = ("<cols>" + "".join(
+        f'<col min="{i+1}" max="{i+1}" width="{w}" customWidth="1"/>'
+        for i, w in enumerate(widths)) + "</cols>")
+
+    sd = row_xml(1, headers, style="1")  # header row -> styled
     sd += "".join(row_xml(i + 2, r) for i, r in enumerate(data_rows))
     sheet = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
              '<worksheet xmlns="http://schemas.openxmlformats.org/'
-             'spreadsheetml/2006/main"><sheetData>' + sd
+             'spreadsheetml/2006/main">' + colsxml + '<sheetData>' + sd
              + "</sheetData></worksheet>")
+    # Bold white header text on an accent-blue fill.
+    styles = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+              '<styleSheet xmlns="http://schemas.openxmlformats.org/'
+              'spreadsheetml/2006/main"><fonts count="2">'
+              '<font><sz val="11"/><name val="Calibri"/></font>'
+              '<font><b/><color rgb="FFFFFFFF"/><sz val="11"/>'
+              '<name val="Calibri"/></font></fonts>'
+              '<fills count="3"><fill><patternFill patternType="none"/></fill>'
+              '<fill><patternFill patternType="gray125"/></fill>'
+              '<fill><patternFill patternType="solid">'
+              '<fgColor rgb="FF2563EB"/><bgColor indexed="64"/>'
+              '</patternFill></fill></fills>'
+              '<borders count="1"><border/></borders>'
+              '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" '
+              'borderId="0"/></cellStyleXfs><cellXfs count="2">'
+              '<xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+              '<xf numFmtId="0" fontId="1" fillId="2" borderId="0" xfId="0" '
+              'applyFont="1" applyFill="1" applyAlignment="1">'
+              '<alignment horizontal="center" vertical="center"/></xf>'
+              '</cellXfs></styleSheet>')
     sn = _xlsx_escape(sheet_name)[:31] or "Sheet1"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -4641,6 +4693,9 @@ def write_simple_xlsx(out_path, headers: list, data_rows: list,
                    '<Override PartName="/xl/workbook.xml" ContentType='
                    '"application/vnd.openxmlformats-officedocument.'
                    'spreadsheetml.sheet.main+xml"/><Override PartName='
+                   '"/xl/styles.xml" ContentType="application/vnd.'
+                   'openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+                   '<Override PartName='
                    '"/xl/worksheets/sheet1.xml" ContentType="application/vnd.'
                    'openxmlformats-officedocument.spreadsheetml.worksheet+xml"'
                    '/></Types>')
@@ -4664,7 +4719,10 @@ def write_simple_xlsx(out_path, headers: list, data_rows: list,
                    'package/2006/relationships"><Relationship Id="rId1" Type='
                    '"http://schemas.openxmlformats.org/officeDocument/2006/'
                    'relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-                   '</Relationships>')
+                   '<Relationship Id="rId2" Type="http://schemas.'
+                   'openxmlformats.org/officeDocument/2006/relationships/'
+                   'styles" Target="styles.xml"/></Relationships>')
+        z.writestr("xl/styles.xml", styles)
         z.writestr("xl/worksheets/sheet1.xml", sheet)
     return out_path
 
@@ -4672,7 +4730,8 @@ def write_simple_xlsx(out_path, headers: list, data_rows: list,
 def export_cable_labels(paths, out_path) -> tuple:
     """Extract cable labels from one or more .vsdx files and write them to an
     .xlsx. Returns (out_path, row_count, file_count). Includes a File column
-    only when more than one file contributed rows."""
+    only when more than one file contributed rows, and a Label Type column only
+    when at least one label carries a "Label Type"."""
     all_rows = []
     files_with = set()
     for p in paths:
@@ -4681,14 +4740,16 @@ def export_cable_labels(paths, out_path) -> tuple:
             files_with.add(Path(p).name)
         all_rows.extend(rows)
     multi = len(files_with) > 1
+    has_type = any(r.get("label_type") for r in all_rows)
+    headers, cols = [], []
     if multi:
-        headers = ["File", "Sheet", "Cable Name", "Label", "Label Text"]
-        data = [[r["file"], r["sheet"], r["cable"], r["label"], r["text"]]
-                for r in all_rows]
-    else:
-        headers = ["Sheet", "Cable Name", "Label", "Label Text"]
-        data = [[r["sheet"], r["cable"], r["label"], r["text"]]
-                for r in all_rows]
+        headers.append("File"); cols.append("file")
+    headers += ["Sheet", "Cable Name", "Label"]
+    cols += ["sheet", "cable", "label"]
+    if has_type:
+        headers.append("Label Type"); cols.append("label_type")
+    headers.append("Label Text"); cols.append("text")
+    data = [[r.get(c, "") for c in cols] for r in all_rows]
     write_simple_xlsx(out_path, headers, data, sheet_name="Cable Labels")
     return Path(out_path), len(all_rows), len(files_with)
 
