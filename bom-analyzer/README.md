@@ -77,6 +77,11 @@ DigiKey lists several packaging options, the one that can actually ship your qua
 lowest total cost is chosen — a reel with a lower unit price but a 5,000-piece minimum is not a
 better way to buy 500.
 
+**Stays inside TrustedParts' rate limits without being asked.** They meter in parts rather than
+requests, across four sliding windows at once, and the app counts against all four before a request
+goes out. A long BOM paces itself and says so while it waits, instead of collecting 429s or looking
+like it has hung.
+
 **Looks each part up once, across every BOM.** Load five boards that share a decoupling capacitor
 and it is quoted once, on whichever BOM you analyze first; the others report it as already covered
 rather than paying for the lookup again. The same part on two lines of one BOM becomes a single
@@ -487,6 +492,43 @@ python3 bom.py my-bom.csv --lead-time lead-times.xlsx
 
 The same table is also a **Lead times** sheet inside the main `-o report.xlsx` workbook, so one
 export carries everything.
+
+### Rate limits
+
+TrustedParts meters in **parts, not requests**, over four sliding windows at the same time:
+
+| Window | Allowance |
+| --- | --- |
+| 10 seconds | 50 parts |
+| 1 minute | 150 parts |
+| 1 hour | 2,000 parts |
+| 24 hours | 20,000 parts |
+
+A request carries up to 50 parts, so one full request spends an entire ten-second allowance. The
+app claims the parts before the call goes out rather than apologising for a 429 afterwards, and
+waits when that is what it takes. Sliding windows, not fixed buckets: a burst at 0:09 and another
+at 0:11 is 100 parts in three seconds, which is twice what was granted.
+
+What that means in practice:
+
+- **Cached parts cost nothing.** Only what actually goes over the wire is counted, so re-running a
+  BOM you have already analyzed spends no allowance at all.
+- **A long BOM paces itself and says so.** The progress line reads
+  *"150 of 500 queries — TrustedParts allows 50 parts per 10 seconds — waiting 7 seconds"*, which
+  is the difference between waiting and killing a run that looks stuck — and killing it only makes
+  the limit worse.
+- **A long wait is reported, not held.** The ten-second and one-minute windows are ordinary pacing
+  and worth waiting out. An hour is not, so past `TRUSTEDPARTS_RATE_MAX_WAIT` (90 seconds by
+  default) the affected lines come back saying which limit was reached and when to retry. Those
+  answers are not cached, so the next run picks them up.
+- **The ledger survives a restart.** The hour and day windows outlive a single run, so spending is
+  written beside the part cache. An allowance that a restart hands back is not an allowance.
+- **`/api/health` reports what is left** in each window, so a 5,000-part BOM can be sized up before
+  it is started.
+
+The limits are in `.env` as `TRUSTEDPARTS_RATE_WINDOWS`; change them only if TrustedParts tell you
+your account has different ones. A malformed value falls back to the published limits rather than
+removing them.
 
 ### The alternates column
 

@@ -27,6 +27,7 @@ from bomlib.digikey import DigiKeyClient  # noqa: E402
 from bomlib.lookup import LookupService, summarize_bom  # noqa: E402
 from bomlib.normalize import MATCH_EXACT, MATCH_MODES  # noqa: E402
 from bomlib.mouser import MouserClient  # noqa: E402
+from bomlib import trustedparts as trustedparts_module  # noqa: E402
 from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.report import (  # noqa: E402
     WRITERS,
@@ -624,6 +625,12 @@ def build_service(args):
         distributors=[d.strip() for d in str(os.environ.get('TRUSTEDPARTS_DISTRIBUTORS') or '').split(',') if d.strip()],
         in_stock_only=str(os.environ.get('TRUSTEDPARTS_IN_STOCK_ONLY', '')).strip().lower() in ('1', 'true', 'yes'),
         use_cached_data=str(os.environ.get('TRUSTEDPARTS_USE_CACHED_DATA', '')).strip().lower() in ('1', 'true', 'yes'),
+        # The hour and day windows outlive a single CLI run, so the ledger is
+        # kept beside the part cache and follows the same opt-out.
+        limiter=trustedparts_module.limiter_from_env(
+            default_store=None if os.environ.get('CACHE_FILE') == 'none'
+            else os.path.join(BASE_DIR, '.cache', 'trustedparts-rate.json')),
+        max_wait=trustedparts_module.max_wait_from_env(),
     )
 
     # Nexar is both a supplier column and, separately, where --alternatives

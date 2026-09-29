@@ -20,9 +20,16 @@ Spec: POST https://api.trustedparts.com/v2/search, key in the X-Api-Key header.
 """
 
 import json
+import os
 import re
 
 from .http_client import HttpError, request_json
+from .ratelimit import (
+    SlidingWindowLimiter,
+    describe_span,
+    describe_wait,
+    parse_windows,
+)
 from .normalize import (
     Lifecycle,
     NoMatch,
@@ -45,10 +52,47 @@ ATTRIBUTION_HOME = SITE
 # The API accepts up to 50 search queries per request.
 MAX_QUERIES_PER_REQUEST = 50
 
+# TrustedParts meters in parts, not requests, over four windows at once. A full
+# 50-part request therefore spends a whole ten-second allowance in one call,
+# which is why the limiter counts parts and is asked before the call goes out.
+RATE_WINDOWS = [
+    (10, 50),
+    (60, 150),
+    (3600, 2000),
+    (86400, 20000),
+]
+
+
+def limiter_from_env(env=None, default_store=None):
+    """One limiter for the process, configured from the environment.
+
+    The hour and day windows outlive a run, so the ledger is written beside the
+    part cache: a daily allowance that a restart hands back is not an allowance.
+    """
+    env = env if env is not None else os.environ
+    windows = parse_windows(env.get('TRUSTEDPARTS_RATE_WINDOWS'), RATE_WINDOWS)
+
+    store = env.get('TRUSTEDPARTS_RATE_FILE')
+    if store is None:
+        store = default_store
+    if str(store or '').strip().lower() == 'none':
+        store = None
+
+    return SlidingWindowLimiter(windows, name=SUPPLIER, store=store)
+
+
+def max_wait_from_env(env=None, default=90.0):
+    env = env if env is not None else os.environ
+    try:
+        return max(0.0, float(env.get('TRUSTEDPARTS_RATE_MAX_WAIT') or default))
+    except ValueError:
+        return default
+
 
 class TrustedPartsClient:
     def __init__(self, api_key=None, currency='USD', country='US', language='en',
-                 user_agent=None, distributors=None, in_stock_only=False, use_cached_data=False):
+                 user_agent=None, distributors=None, in_stock_only=False,
+                 use_cached_data=False, limiter=None, max_wait=None):
         self.api_key = api_key
         self.currency = currency or 'USD'
         self.country = country or 'US'
@@ -58,11 +102,33 @@ class TrustedPartsClient:
         self.distributors = [d for d in (distributors or []) if d]
         self.in_stock_only = bool(in_stock_only)
         self.use_cached_data = bool(use_cached_data)
+        self.limiter = limiter if limiter is not None else SlidingWindowLimiter(
+            RATE_WINDOWS, name=SUPPLIER)
+        # How long a request may sit waiting for an allowance before the parts
+        # it carries are reported as rate-limited instead. The ten-second and
+        # one-minute windows are ordinary pacing and worth waiting out; an hour
+        # is not something to hold a progress bar against.
+        self.max_wait = 90.0 if max_wait is None else max_wait
+        # Set by LookupService so a wait can be reported rather than looking
+        # like the run has hung.
+        self.on_wait = None
 
     id = 'trustedparts'
     name = SUPPLIER
-    # Signals to LookupService that this client prefers batched lookups.
-    batch_size = MAX_QUERIES_PER_REQUEST
+
+    @property
+    def batch_size(self):
+        """Never ask for more parts than the tightest window can grant."""
+        ceiling = self.limiter.ceiling if self.limiter else MAX_QUERIES_PER_REQUEST
+        return max(1, min(MAX_QUERIES_PER_REQUEST, ceiling or MAX_QUERIES_PER_REQUEST))
+
+    def _note_wait(self, seconds, window):
+        """Say that the run is pacing itself rather than stalled."""
+        if not self.on_wait:
+            return
+        span, limit = window if window else (0, 0)
+        self.on_wait(seconds, '%s allows %d parts per %s — waiting %s'
+                     % (SUPPLIER, limit, describe_span(span), describe_wait(seconds)))
 
     @property
     def configured(self):
@@ -87,6 +153,11 @@ class TrustedPartsClient:
 
         if not queries:
             return {}
+
+        # Claimed before the call, not apologised for after a 429.
+        if self.limiter is not None:
+            self.limiter.reserve(len(queries), max_wait=self.max_wait,
+                                 on_wait=self._note_wait)
 
         body = {
             'Queries': queries,

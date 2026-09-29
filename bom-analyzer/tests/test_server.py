@@ -283,6 +283,23 @@ class ScreeningTests(unittest.TestCase):
         self.assertFalse(server.nexar.configured)
         self.assertNotIn('nexar', [c.id for c in server.lookup_service.clients])
 
+    def test_health_reports_what_is_left_of_the_metered_allowance(self):
+        # Unconfigured in this run, so there is nothing to meter and the field
+        # says so rather than inventing a full allowance.
+        data = call('/api/health')['data']
+        self.assertIn('rateLimits', data)
+        self.assertIsNone(data['rateLimits']['trustedparts'])
+
+        original = server.trustedparts.api_key
+        server.trustedparts.api_key = 'k'
+        try:
+            windows = call('/api/health')['data']['rateLimits']['trustedparts']
+        finally:
+            server.trustedparts.api_key = original
+        self.assertEqual([w['limit'] for w in windows], [50, 150, 2000, 20000])
+        self.assertEqual([w['window'] for w in windows],
+                         ['10 seconds', '1 minute', '1 hour', '24 hours'])
+
     def test_health_says_whether_bom_alternates_are_looked_up(self):
         self.assertIs(call('/api/health')['data']['lookupAlternates'], True)
 
@@ -850,3 +867,23 @@ class LeadTimeEndpointTests(unittest.TestCase):
         disposition = result['headers']['Content-Disposition']
         self.assertNotIn('"', disposition[len('attachment; filename='):].strip('"'))
         self.assertNotIn('/', disposition)
+
+
+class RateLimitProgressTests(unittest.TestCase):
+    """A paced run has to look different from a stalled one."""
+
+    def test_ordinary_progress_is_throttled_to_a_readable_rate(self):
+        self.assertTrue(server.should_send_progress({'completed': 1, 'total': 10}, 0.0, 1.0))
+        self.assertFalse(server.should_send_progress({'completed': 2, 'total': 10}, 1.0, 1.05))
+
+    def test_the_last_event_always_lands(self):
+        self.assertTrue(server.should_send_progress({'completed': 10, 'total': 10}, 1.0, 1.01))
+
+    def test_a_waiting_notice_is_never_throttled_away(self):
+        # There is one per wait and it arrives right behind the event that
+        # filled the window, so the interval would swallow exactly the message
+        # that explains the silence.
+        waiting = {'completed': 3, 'total': 10,
+                   'waiting': {'supplier': 'TrustedParts', 'seconds': 4.0,
+                               'message': 'waiting 4 seconds'}}
+        self.assertTrue(server.should_send_progress(waiting, 1.0, 1.001))

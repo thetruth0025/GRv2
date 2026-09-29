@@ -837,9 +837,14 @@
           ' (' + expected + ' queries)…';
       } else if (event === 'progress') {
         entry.percent = data.total ? Math.round((data.completed / data.total) * 100) : 0;
+        // A supplier pacing itself against a published rate limit is not a
+        // stalled run, and saying so is the difference between waiting and
+        // killing it — which only makes the limit worse.
         entry.progress = data.completed + ' of ' + data.total + ' queries — ' +
-          data.apiCalls + ' live, ' + data.cacheHits + ' cached' +
-          (data.errors ? ', ' + data.errors + ' failed' : '');
+          (data.waiting
+            ? data.waiting.message
+            : data.apiCalls + ' live, ' + data.cacheHits + ' cached' +
+              (data.errors ? ', ' + data.errors + ' failed' : ''));
       } else if (event === 'done') {
         finishAnalysis(entry, data);
         return;

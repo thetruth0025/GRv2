@@ -33,6 +33,7 @@ from bomlib.lookup import LookupService, summarize_bom  # noqa: E402
 from bomlib.normalize import MATCH_EXACT, MATCH_MODES  # noqa: E402
 from bomlib.mouser import MouserClient  # noqa: E402
 from bomlib import trustedparts as tp_module  # noqa: E402
+from bomlib import trustedparts as trustedparts_module  # noqa: E402
 from bomlib.trustedparts import TrustedPartsClient  # noqa: E402
 from bomlib.prepare import normalize_mpn, parse_prefixes, prepare_lines  # noqa: E402
 from bomlib import leadtime as leadtime_module  # noqa: E402
@@ -119,6 +120,12 @@ mouser = MouserClient(
     match_mode=MPN_MATCH,
 )
 
+# The ledger lives beside the part cache and follows the same opt-out, since
+# both are "what this machine has already done".
+_rate_file = os.environ.get('CACHE_FILE')
+_rate_store = None if _rate_file == 'none' else os.path.join(
+    BASE_DIR, '.cache', 'trustedparts-rate.json')
+
 trustedparts = TrustedPartsClient(
     api_key=os.environ.get('TRUSTEDPARTS_API_KEY'),
     currency=os.environ.get('TRUSTEDPARTS_CURRENCY') or os.environ.get('DIGIKEY_CURRENCY'),
@@ -128,6 +135,8 @@ trustedparts = TrustedPartsClient(
     distributors=[d.strip() for d in str(os.environ.get('TRUSTEDPARTS_DISTRIBUTORS') or '').split(',') if d.strip()],
     in_stock_only=_bool_env('TRUSTEDPARTS_IN_STOCK_ONLY'),
     use_cached_data=_bool_env('TRUSTEDPARTS_USE_CACHED_DATA'),
+    limiter=trustedparts_module.limiter_from_env(default_store=_rate_store),
+    max_wait=trustedparts_module.max_wait_from_env(),
 )
 
 # Nexar wears two hats. As a supplier it is an aggregator like TrustedParts,
@@ -162,6 +171,26 @@ lookup_service = LookupService(
     concurrency=_int_env('LOOKUP_CONCURRENCY', 3),
     include_alternates=LOOKUP_ALTERNATES,
 )
+
+
+# Progress fires once per supplier lookup, which is faster than a browser can
+# usefully repaint.
+PROGRESS_INTERVAL = 0.12
+
+
+def should_send_progress(progress, last_sent, now, interval=PROGRESS_INTERVAL):
+    """Whether this progress event is worth a frame on the wire.
+
+    A notice that a supplier's rate limit is being waited out is never
+    throttled. There is one per wait, it arrives right behind the event that
+    filled the window — so the interval would swallow exactly it — and it is
+    the only thing standing between a paced run and something that looks hung.
+    """
+    if progress.get('waiting'):
+        return True
+    if progress.get('completed') == progress.get('total'):
+        return True
+    return now - last_sent > interval
 
 
 def _download_name(label, suffix='-report.xlsx'):
@@ -273,6 +302,12 @@ class Handler(BaseHTTPRequestHandler):
                 'ignorePrefixes': IGNORE_PREFIXES,
                 'mpnMatch': MPN_MATCH,
                 'lookupAlternates': LOOKUP_ALTERNATES,
+                # What is left of TrustedParts' metered allowance, so a big
+                # BOM can be sized up before it is started rather than after.
+                'rateLimits': {
+                    'trustedparts': trustedparts.limiter.snapshot()
+                    if trustedparts.configured and trustedparts.limiter else None,
+                },
                 'dmsms': {
                     'statuses': list(dmsms_module.DMSMS_STATUSES),
                     'defaultSelected': list(dmsms_module.DEFAULT_SELECTED_STATUSES),
@@ -710,14 +745,12 @@ class Handler(BaseHTTPRequestHandler):
             'excluded': len(excluded or []),
         })
 
-        # Progress fires once per supplier lookup, which is faster than the
-        # client can usefully repaint; throttle to a readable rate.
         last_sent = [0.0]
 
         def on_progress(progress):
             import time
             now = time.time()
-            if progress['completed'] == progress['total'] or now - last_sent[0] > 0.12:
+            if should_send_progress(progress, last_sent[0], now):
                 last_sent[0] = now
                 send('progress', progress)
 

@@ -136,6 +136,30 @@ class LookupService:
         stats = {'apiCalls': 0, 'cacheHits': 0, 'errors': 0, 'lookups': len(job_list), 'completed': 0}
         lock = threading.Lock()
 
+        def note_waiting(client, seconds, message):
+            """A paced run is not a stalled one, and has to look different.
+
+            Without this a supplier's rate limit is a progress bar that stops
+            moving, which is indistinguishable from a hang — and the first
+            thing anyone does about a hang is kill it and try again, which
+            makes the limit worse.
+            """
+            with lock:
+                progress = {
+                    'completed': stats['completed'],
+                    'total': len(job_list),
+                    'supplier': client.name,
+                    'mpn': None,
+                    'apiCalls': stats['apiCalls'],
+                    'cacheHits': stats['cacheHits'],
+                    'errors': stats['errors'],
+                    'waiting': {'supplier': client.name,
+                                'seconds': round(seconds, 1),
+                                'message': message},
+                }
+            if on_progress:
+                on_progress(progress)
+
         def note_progress(client, part):
             with lock:
                 stats['completed'] += 1
@@ -150,6 +174,12 @@ class LookupService:
                 }
             if on_progress:
                 on_progress(progress)
+
+        for client in self.clients:
+            if hasattr(client, 'on_wait'):
+                client.on_wait = (
+                    lambda seconds, message, client=client: note_waiting(client, seconds, message)
+                )
 
         def run_batch(batch):
             """One request covering several parts, for aggregators that accept
