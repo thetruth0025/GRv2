@@ -593,6 +593,41 @@ def allocate_stock(offers, quantity):
     return plan
 
 
+def recommended_offer(row):
+    """The offer the verdict points at, or the first one that answered.
+
+    The recommended supplier already balances soonest against cheapest among
+    the soonest, so anything needing "the offer for this line" takes that one
+    rather than deciding again.
+    """
+    comparison = row.get('comparison') or {}
+    wanted = comparison.get('recommendedSupplier')
+    fallback = None
+    for offer in (row.get('offers') or {}).values():
+        if not offer or not offer.get('found'):
+            continue
+        if offer.get('supplier') == wanted:
+            return offer
+        if fallback is None:
+            fallback = offer
+    return fallback
+
+
+def manufacturer_of(row):
+    """Who makes the part: the BOM if it said, the supplier that matched it if not.
+
+    The BOM's own column wins, because an engineer wrote it and it names the
+    part that was specified. Most BOMs carry no such column though, and every
+    supplier names the manufacturer of the part it matched — so reading only
+    the BOM's column throws away an answer already in hand.
+    """
+    named = str(row.get('manufacturer') or '').strip()
+    if named:
+        return named
+    offer = recommended_offer(row)
+    return (offer or {}).get('manufacturer') or None
+
+
 def compare_offers(offers, quantity):
     """Cross-supplier verdict for one BOM line: who wins on price, on lead time,
     on stock, and what the line's overall risk is."""

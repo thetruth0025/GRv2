@@ -1263,7 +1263,8 @@
 
     var meta = [];
     if (row.reference) meta.push('<span class="refdes">' + esc(row.reference) + '</span>');
-    if (row.manufacturer) meta.push(esc(row.manufacturer));
+    var maker = manufacturerOf(row);
+    if (maker) meta.push(esc(maker));
     if (row.description) meta.push(esc(row.description));
 
     var cells = suppliers.map(function (supplier) {
@@ -1588,6 +1589,21 @@
       '</div></div></div>';
   }
 
+  // Who makes the part, from the BOM if it said and the supplier if not.
+  // Mirrors manufacturer_of() in bomlib/report.py: most BOMs carry no
+  // manufacturer column, and every supplier names the manufacturer of the part
+  // it matched, so leaving it blank throws away an answer already in hand.
+  function manufacturerOf(row) {
+    if (row.manufacturer) return row.manufacturer;
+    var offer = recommendedOffer(row);
+    if (!offer) {
+      Object.keys(row.offers).forEach(function (id) {
+        if (!offer && row.offers[id] && row.offers[id].found) offer = row.offers[id];
+      });
+    }
+    return (offer && offer.manufacturer) || '';
+  }
+
   // ── CSV export ───────────────────────────────────────────────────────────
 
   function exportCsv() {
@@ -1612,7 +1628,8 @@
 
     var lines = [header];
     visibleRows().forEach(function (row) {
-      var record = [row.row, row.mpn, row.quantity, row.reference, row.manufacturer, row.description];
+      var record = [row.row, row.mpn, row.quantity, row.reference,
+        manufacturerOf(row), row.description];
       suppliers.forEach(function (supplier) {
         var offer = row.offers[supplier.id];
         if (!offer || !offer.found) {

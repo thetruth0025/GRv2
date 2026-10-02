@@ -11,7 +11,7 @@ import os
 import re
 
 from . import leadtime as leadtime_module
-from .normalize import format_lead_time
+from .normalize import format_lead_time, manufacturer_of, recommended_offer
 from .prepare import DUPLICATE, FLAGGED, IGNORED, MERGED
 from .xlsx_writer import (
     Cell,
@@ -95,7 +95,7 @@ def build_rows(result, summary, styled=False):
             cell(row.get('mpn')),
             cell(row.get('quantity'), STYLE_INT),
             cell(row.get('reference')),
-            cell(row.get('manufacturer')),
+            cell(manufacturer_of(row)),
             cell(row.get('description')),
         ]
 
@@ -669,13 +669,7 @@ def build_parts_rows(result, summary, styled=False):
         comparison = row['comparison']
         if styled:
             cell = banded_cell(LEAD_FILL.get(bands[index]))
-        # The recommended supplier is the one to price: it already balances
-        # "soonest" against "cheapest among the soonest".
-        chosen = None
-        for offer in row['offers'].values():
-            if offer and offer.get('found') and offer.get('supplier') == comparison.get('recommendedSupplier'):
-                chosen = offer
-                break
+        chosen = recommended_offer(row)
 
         lead = '—'
         if chosen:
@@ -700,7 +694,7 @@ def build_parts_rows(result, summary, styled=False):
         plan = comparison.get('allocation') or {}
         split = bool(plan.get('splitRequired')) and not plan.get('shortfall')
         record.extend([
-            cell(row.get('manufacturer')),
+            cell(manufacturer_of(row)),
             cell(row.get('description')),
             cell('%d suppliers, split' % plan['suppliers'] if split
                  else (comparison.get('recommendedSupplier') or '—')),

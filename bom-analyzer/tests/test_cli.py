@@ -1036,3 +1036,80 @@ class SplitOrderSheetTests(unittest.TestCase):
         rows = build_split_rows(result)
         self.assertIn('15 of 200 covered — 185 still to find',
                       rows[1][rows[0].index('Notes')])
+
+
+class ManufacturerColumnTests(unittest.TestCase):
+    """Who makes the part has to reach the export for every part found.
+
+    Most BOMs carry no manufacturer column, and every supplier names the
+    manufacturer of the part it matched — so reading only the BOM's column left
+    the export blank when the answer was already in hand.
+    """
+
+    def result(self, line, clients=None):
+        return analyze([line], clients=clients)
+
+    def manufacturers(self, result, summary):
+        from bomlib.report import build_lead_rows, build_parts_rows, build_rows
+        from bomlib import leadtime
+        out = {}
+        for name, rows in (('Parts', build_parts_rows(result, summary)),
+                           ('Full comparison', build_rows(result, summary)),
+                           ('Lead times', build_lead_rows(leadtime.build_report(result)))):
+            header = rows[0]
+            out[name] = rows[1][header.index('Manufacturer')]
+        return out
+
+    def test_the_supplier_fills_it_in_when_the_bom_has_no_column(self):
+        result, summary = self.result({'row': 1, 'mpn': 'ABC123', 'quantity': 10})
+        self.assertEqual(set(self.manufacturers(result, summary).values()), {'Acme'})
+
+    def test_the_boms_own_column_still_wins(self):
+        # An engineer wrote it, and it is the part that was specified.
+        result, summary = self.result(
+            {'row': 1, 'mpn': 'ABC123', 'quantity': 10, 'manufacturer': 'Yageo'})
+        self.assertEqual(set(self.manufacturers(result, summary).values()), {'Yageo'})
+
+    def test_a_blank_bom_cell_is_not_treated_as_an_answer(self):
+        result, summary = self.result(
+            {'row': 1, 'mpn': 'ABC123', 'quantity': 10, 'manufacturer': '   '})
+        self.assertEqual(set(self.manufacturers(result, summary).values()), {'Acme'})
+
+    def test_a_part_nobody_carries_has_nothing_to_borrow(self):
+        result, summary = self.result(
+            {'row': 1, 'mpn': 'NOPE', 'quantity': 1},
+            clients=[StubSupplier('digikey', 'DigiKey', 0.10, found=False)])
+        self.assertEqual(set(self.manufacturers(result, summary).values()), {None})
+
+    def test_it_comes_from_the_supplier_the_verdict_points_at(self):
+        from bomlib.report import manufacturer_of
+        # Mouser is in stock and cheaper, so it is the recommended supplier and
+        # its name for the manufacturer is the one that travels.
+        result, _ = self.result({'row': 1, 'mpn': 'ABC123', 'quantity': 10}, clients=[
+            StubSupplier('digikey', 'DigiKey', 0.90, stock=0, lead='20 Weeks'),
+            StubSupplier('mouser', 'Mouser', 0.10, stock=9000),
+        ])
+        row = result['rows'][0]
+        row['offers']['digikey']['manufacturer'] = 'Texas Instruments'
+        row['offers']['mouser']['manufacturer'] = 'TI'
+        self.assertEqual(row['comparison']['recommendedSupplier'], 'Mouser')
+        self.assertEqual(manufacturer_of(row), 'TI')
+
+    def test_a_supplier_that_answered_fills_it_in_even_with_no_recommendation(self):
+        from bomlib.report import manufacturer_of
+        row = {'mpn': 'ABC123', 'comparison': {},
+               'offers': {'digikey': {'supplier': 'DigiKey', 'found': True,
+                                      'manufacturer': 'Acme'}}}
+        self.assertEqual(manufacturer_of(row), 'Acme')
+
+    def test_the_workbook_really_carries_it(self):
+        from bomlib.report import build_workbook_sheets
+        from bomlib.spreadsheet import parse_xlsx
+        from bomlib.xlsx_writer import write_xlsx
+        result, summary = self.result({'row': 1, 'mpn': 'ABC123', 'quantity': 10})
+        buffer = io.BytesIO()
+        write_xlsx(buffer, build_workbook_sheets(result, summary))
+        data = buffer.getvalue()
+        for sheet in ('Parts', 'Full comparison', 'Lead times'):
+            table = parse_xlsx(data, sheet)
+            self.assertEqual(table[1][table[0].index('Manufacturer')], 'Acme', sheet)

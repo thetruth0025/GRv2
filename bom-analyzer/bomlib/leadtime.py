@@ -12,7 +12,7 @@ report reads as a worklist: the parts nobody carries first, then the long ones,
 then everything that is simply fine.
 """
 
-from .normalize import format_lead_time
+from .normalize import format_lead_time, manufacturer_of
 
 # Three weeks and eight weeks, in days. A part quoted inside three weeks is
 # treated as quick alongside stock on hand: the band exists to separate "order
@@ -164,7 +164,7 @@ def summarize_row(row, suppliers):
         'row': row.get('row'),
         'mpn': row.get('mpn'),
         'quantity': row.get('quantity'),
-        'manufacturer': row.get('manufacturer'),
+        'manufacturer': manufacturer_of(row),
         'description': row.get('description'),
         'reference': row.get('reference'),
         'band': band,

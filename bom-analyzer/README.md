@@ -71,6 +71,11 @@ of them, and neither is a part nobody stocks but everybody can order in a fortni
 **Works out how many to order from each supplier.** Four suppliers holding 80 each cover a need for
 200 between them; the tool says who to buy how many from, and what the split costs.
 
+**Names the manufacturer even when your BOM does not.** Most BOMs carry no manufacturer column,
+and every supplier names the maker of the part it matched — so the exports fill it in from whichever
+supplier the verdict points at. A manufacturer your BOM *does* name always wins: an engineer wrote
+it, and it names the part that was specified.
+
 **Prices what you would actually buy.** Minimum order quantities and packaging multiples are
 applied before pricing, and the correct price break is used for the resulting quantity. Where
 DigiKey lists several packaging options, the one that can actually ship your quantity for the
