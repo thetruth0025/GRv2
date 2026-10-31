@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.38.2"
+__version__ = "2.39.0"
 
 import argparse
 import datetime
@@ -4829,6 +4829,147 @@ def export_cable_labels(paths, out_path) -> tuple:
     return Path(out_path), len(all_rows), len(files_with)
 
 
+# ---------------------------------------------------------------------------
+# Compare two revisions of a BOM
+# ---------------------------------------------------------------------------
+#
+# Load two revisions of the same BOM and report what changed: parts added,
+# removed, quantity changed, or (for parts whose number begins ASY0/CBL0/DES0/
+# PCB0, which carry a REV appended to the part number, e.g. "DES01963-01 REVA")
+# the part revision changed. Parts are matched by their base part number (the
+# REV stripped off), so a revision change shows as a change, not add+remove.
+
+# Part number with its REV appended: "<base> REV<letter-or-dash>".
+_BOM_PN_REV_RE = re.compile(
+    r"^(?P<base>.*\S)\s+REV\s*(?P<rev>[-A-Za-z0-9]+)\s*$", re.IGNORECASE)
+# Part-number prefixes whose parts carry a revision.
+_REV_PART_PREFIXES = ("ASY0", "CBL0", "DES0", "PCB0")
+
+
+def _parse_pn_rev(pn: str):
+    """Split a part number into (base, rev). "DES01963-01 REVA" ->
+    ("DES01963-01", "A"); "SAS-571W" -> ("SAS-571W", "")."""
+    pn = (pn or "").strip()
+    m = _BOM_PN_REV_RE.match(pn)
+    if m:
+        return m.group("base").strip(), m.group("rev").strip().upper()
+    return pn, ""
+
+
+def _norm_bom_qty(q) -> str:
+    """Normalise a quantity for comparison (1 == 1.0)."""
+    q = (str(q) if q is not None else "").strip()
+    try:
+        fv = float(q)
+        return str(int(fv)) if fv == int(fv) else str(fv)
+    except ValueError:
+        return q
+
+
+def read_bom_parts(path) -> dict:
+    """Read a BOM (.xlsx or .vsdx) into {base_pn_upper: {base, rev, qty, desc}}
+    -- one entry per part in the parts list (title block / approval rows are
+    excluded). Works across every BOM sheet / embedded table in the file."""
+    out = {}
+    fmt = detect_format(path)
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return out
+
+    def add(rows, col_field, hrow):
+        pn_c = next((c for c, f in col_field.items() if f == "Part Number"),
+                    None)
+        if pn_c is None:
+            return
+        qty_c = next((c for c, f in col_field.items() if f == "Qty"), None)
+        desc_c = next((c for c, f in col_field.items()
+                       if f == "Description"), None)
+        for rn in _table_data_rownums(rows, col_field, hrow):
+            pn = (rows[rn].get(pn_c) or "").strip()
+            if not pn:
+                continue
+            base, rev = _parse_pn_rev(pn)
+            key = base.upper()
+            if key in out:
+                continue  # first occurrence wins
+            out[key] = {
+                "base": base, "rev": rev,
+                "qty": _norm_bom_qty(rows[rn].get(qty_c) if qty_c else ""),
+                "desc": (rows[rn].get(desc_c) or "").strip() if desc_c else "",
+            }
+
+    with z:
+        if fmt == "xlsx":
+            shared = _read_shared_strings(z)
+            for sid, _nm in excel_bom_sheets(path):
+                tbl = _excel_bom_table(z, sid, shared)
+                if tbl:
+                    add(*tbl)
+        elif fmt == "vsdx":
+            for member in _embedded_bom_members(z):
+                info = _embedded_bom_info(z.read(member))
+                if info:
+                    add(info["rows"], info["col_field"], info["header_row"])
+    return out
+
+
+def diff_boms(old_path, new_path) -> list:
+    """Compare two BOM revisions. Returns a list of change rows:
+    {part, change, old_qty, new_qty, old_rev, new_rev, desc}, ordered
+    Added, Removed, Qty changed, REV changed."""
+    old = read_bom_parts(old_path)
+    new = read_bom_parts(new_path)
+    added, removed, qtyc, revc = [], [], [], []
+    for key in set(old) | set(new):
+        a, b = old.get(key), new.get(key)
+        if a and not b:
+            removed.append({
+                "part": a["base"], "change": "Removed", "old_qty": a["qty"],
+                "new_qty": "", "old_rev": a["rev"], "new_rev": "",
+                "desc": a["desc"]})
+        elif b and not a:
+            added.append({
+                "part": b["base"], "change": "Added", "old_qty": "",
+                "new_qty": b["qty"], "old_rev": "", "new_rev": b["rev"],
+                "desc": b["desc"]})
+        else:
+            chg = []
+            if a["qty"] != b["qty"]:
+                chg.append("Qty changed")
+            if a["rev"] != b["rev"]:
+                chg.append("REV changed")
+            if not chg:
+                continue
+            row = {"part": b["base"], "change": " + ".join(chg),
+                   "old_qty": a["qty"], "new_qty": b["qty"],
+                   "old_rev": a["rev"], "new_rev": b["rev"],
+                   "desc": b["desc"] or a["desc"]}
+            (qtyc if "Qty changed" in chg else revc).append(row)
+    for bucket in (added, removed, qtyc, revc):
+        bucket.sort(key=lambda r: _natural_key(r["part"]))
+    return added + removed + qtyc + revc
+
+
+def export_bom_diff(old_path, new_path, out_path) -> tuple:
+    """Write the BOM revision comparison to an .xlsx. Returns
+    (out_path, rows, counts) where counts is {added, removed, qty, rev}."""
+    rows = diff_boms(old_path, new_path)
+    headers = ["Part Number", "Change", "Old Qty", "New Qty",
+               "Old REV", "New REV", "Description"]
+    keys = ["part", "change", "old_qty", "new_qty", "old_rev", "new_rev",
+            "desc"]
+    data = [[r.get(k, "") for k in keys] for r in rows]
+    write_simple_xlsx(out_path, headers, data, sheet_name="BOM Comparison")
+    counts = {
+        "added": sum(1 for r in rows if r["change"] == "Added"),
+        "removed": sum(1 for r in rows if r["change"] == "Removed"),
+        "qty": sum(1 for r in rows if "Qty changed" in r["change"]),
+        "rev": sum(1 for r in rows if "REV changed" in r["change"]),
+    }
+    return Path(out_path), len(rows), counts
+
+
 def generate_change_summary(records, summary_path, run_dt=None) -> Path:
     """Write an HTML before/after change-review document.
 
@@ -6952,6 +7093,22 @@ def launch_gui() -> int:
                        self.open_extract_labels, kind="green").pack(side="left")
             self.labels_status = ttk.Label(lblf, text="")
             self.labels_status.pack(anchor="w", padx=10, pady=(0, 6))
+
+            cmpf = ttk.LabelFrame(
+                tab_parts, text="Compare two BOM revisions → Excel")
+            cmpf.pack(fill="x", padx=8, pady=(0, 8))
+            ttk.Label(
+                cmpf, wraplength=900, justify="left",
+                text="Pick an older and a newer revision of the same BOM "
+                "(.xlsx or .vsdx) and export what changed — parts added, "
+                "removed, quantity changed, or part REV changed.").pack(
+                fill="x", padx=8, pady=(8, 2))
+            cmp_row = ttk.Frame(cmpf)
+            cmp_row.pack(fill="x", padx=8, pady=(0, 6))
+            self._rbtn(cmp_row, "Compare BOM revisions...",
+                       self.open_compare_boms, kind="green").pack(side="left")
+            self.compare_status = ttk.Label(cmpf, text="")
+            self.compare_status.pack(anchor="w", padx=10, pady=(0, 6))
 
             # Tab 3 -- Approve & Revise.
             tab_appr = ttk.Frame(self.nb)
@@ -9389,6 +9546,115 @@ def launch_gui() -> int:
                      f"file(s) -> {path.name}")
             self._open_path(str(path))
 
+        # -- compare two BOM revisions -------------------------------------
+        @staticmethod
+        def _rev_sort_key(path):
+            """Order files by the revision letter in the name (REV- first)."""
+            try:
+                _op, old, _new, _st = revision_output_path(path)
+            except Exception:  # noqa: BLE001
+                old = None
+            if old == "-":
+                return 0
+            if old and len(old) == 1 and old.isalpha():
+                return ord(old.upper()) - 64
+            return 99
+
+        def open_compare_boms(self):
+            pal = self.palette
+            boms = [f for f in self.files
+                    if detect_format(f) in ("xlsx", "vsdx")]
+            win = tk.Toplevel(self.root)
+            win.title("Compare BOM revisions")
+            win.transient(self.root)
+            win.grab_set()
+            win.geometry("660x250")
+            win.resizable(False, False)
+            win.configure(bg=pal["bg"])
+            ttk.Label(
+                win, wraplength=520, justify="left",
+                text="Choose the older and newer revision of the same BOM. "
+                "Pick from the loaded files, or Browse for a file.").pack(
+                fill="x", padx=14, pady=(12, 8))
+
+            state = {"old": tk.StringVar(), "new": tk.StringVar()}
+            name_to_path = {Path(f).name: f for f in boms}
+            # Default order: oldest revision -> older box, newest -> newer box.
+            ordered = sorted(boms, key=self._rev_sort_key)
+            if len(ordered) >= 2:
+                state["old"].set(Path(ordered[0]).name)
+                state["new"].set(Path(ordered[-1]).name)
+
+            def picker(parent, label, var):
+                row = ttk.Frame(parent)
+                row.pack(fill="x", padx=14, pady=4)
+                ttk.Label(row, text=label, width=16).pack(side="left")
+                cb = ttk.Combobox(row, textvariable=var, width=40,
+                                  values=list(name_to_path.keys()),
+                                  state="readonly")
+                cb.pack(side="left", padx=(4, 6))
+
+                def browse():
+                    p = filedialog.askopenfilename(
+                        title=f"Choose the {label.lower()}",
+                        filetypes=[("BOM files", "*.xlsx *.vsdx"),
+                                   ("Excel", "*.xlsx"), ("Visio", "*.vsdx")])
+                    if p:
+                        name_to_path[Path(p).name] = p
+                        cb["values"] = list(name_to_path.keys())
+                        var.set(Path(p).name)
+
+                self._rbtn(row, "Browse...", browse, radius=10).pack(
+                    side="left")
+
+            picker(win, "Older revision:", state["old"])
+            picker(win, "Newer revision:", state["new"])
+            status = ttk.Label(win, text="", foreground=pal["muted"],
+                               wraplength=520, justify="left")
+            status.pack(fill="x", padx=14, pady=(6, 2))
+
+            def run_compare():
+                o = name_to_path.get(state["old"].get())
+                n = name_to_path.get(state["new"].get())
+                if not o or not n:
+                    status.configure(text="Pick both revisions first.")
+                    return
+                if o == n:
+                    status.configure(text="Pick two different files.")
+                    return
+                default = f"BOM_diff_{Path(o).stem}_vs_{Path(n).stem}.xlsx"[:80]
+                out = filedialog.asksaveasfilename(
+                    title="Save BOM comparison as", defaultextension=".xlsx",
+                    initialdir=self.out_dir or str(Path(n).parent),
+                    initialfile="BOM_Comparison.xlsx",
+                    filetypes=[("Excel workbook", "*.xlsx")])
+                if not out:
+                    return
+                try:
+                    path, rows, counts = export_bom_diff(o, n, out)
+                except Exception as exc:  # noqa: BLE001
+                    messagebox.showerror(
+                        "Compare BOMs", f"Couldn't compare:\n{exc}")
+                    return
+                summary = (f"{counts['added']} added, {counts['removed']} "
+                           f"removed, {counts['qty']} qty changed, "
+                           f"{counts['rev']} REV changed")
+                self.compare_status.configure(text=f"{summary} → {path.name}")
+                self.log(f"BOM comparison: {summary} -> {path.name}")
+                win.destroy()
+                if rows == 0:
+                    messagebox.showinfo(
+                        "Compare BOMs",
+                        "No differences found between the two revisions.")
+                self._open_path(str(path))
+
+            btns = ttk.Frame(win)
+            btns.pack(fill="x", padx=14, pady=(8, 14))
+            self._rbtn(btns, "Compare → Excel", run_compare,
+                       kind="green").pack(side="right")
+            self._rbtn(btns, "Cancel", win.destroy).pack(
+                side="right", padx=6)
+
         # -- remembered settings + presets ---------------------------------
         def _collect_prefs(self) -> dict:
             return {
@@ -9550,6 +9816,7 @@ def launch_gui() -> int:
             self.remove_status.configure(text="")
             self.add_status.configure(text="")
             self.labels_status.configure(text="")
+            self.compare_status.configure(text="")
             self._clear_out_dir()
             self.show_step(1)
             self.log(

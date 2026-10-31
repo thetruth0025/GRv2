@@ -216,6 +216,24 @@ and a **Label Type** column when any caption carries a "Label Type: …"). The
 header row is bold and colored. Sheets without labels, and the
 specification/legend sheets, are skipped.
 
+### Compare two BOM revisions (→ Excel)
+
+On the **Parts** tab, **Compare BOM revisions…** loads two revisions of the
+same BOM (`.xlsx` or `.vsdx`, even one of each) and exports what changed to
+Excel. Parts are matched by part number (the appended REV stripped off), so a
+revision change shows as a *change*, not a remove + add. It reports:
+
+- **Added** / **Removed** parts;
+- **Qty changed** (Old Qty → New Qty);
+- **REV changed** — for parts whose number begins **ASY0 / CBL0 / DES0 / PCB0**
+  and carries a REV on the part number (e.g. `DES01963-01 REVA`), Old REV → New
+  REV.
+
+Output columns: **Part Number · Change · Old Qty · New Qty · Old REV · New REV ·
+Description**, with a bold colored header. Title-block / approval rows are
+ignored. The older/newer revision is pre-selected from the REV in each file
+name; you can swap them or Browse for a file.
+
 ### Excel: find & edit BOM rows
 
 For Excel bill-of-materials sheets, you can edit a part's whole row, not just
