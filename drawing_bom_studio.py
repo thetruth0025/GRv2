@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.39.0"
+__version__ = "2.39.1"
 
 import argparse
 import datetime
@@ -4951,6 +4951,52 @@ def diff_boms(old_path, new_path) -> list:
     return added + removed + qtyc + revc
 
 
+def _filename_rev_letter(path) -> str:
+    """The revision letter in a file name ("A", "B", "-" for REV-), or ""."""
+    try:
+        _op, old, _new, _st = revision_output_path(path)
+    except Exception:  # noqa: BLE001
+        old = None
+    return old or ""
+
+
+def _bom_assembly_name(path) -> str:
+    """The assembly a BOM is for: its BOM sheet/table name (e.g. ASY00798-01),
+    preferring a name that looks like an assembly number, else the file stem."""
+    try:
+        fmt = detect_format(path)
+        if fmt == "xlsx":
+            sheets = excel_bom_sheets(path)
+        elif fmt == "vsdx":
+            sheets = visio_parts_sheets(path)
+        else:
+            sheets = []
+        names = [(nm or "").strip() for _sid, nm in sheets if (nm or "").strip()]
+        for nm in names:
+            if re.match(r"^[A-Za-z]{2,4}\d{3,}", nm):  # assembly-like
+                return nm
+        if names:
+            return names[0]
+    except Exception:  # noqa: BLE001
+        pass
+    return Path(path).stem
+
+
+def bom_diff_titles(old_path, new_path) -> tuple:
+    """Suggested (default_filename, sheet_name) for a BOM comparison, built from
+    the assembly number and the two revisions, so the file need not be renamed.
+    e.g. ("ASY00798-01 BOM REVA vs REVB.xlsx", "ASY00798-01 A vs B")."""
+    asy = _bom_assembly_name(new_path) or _bom_assembly_name(old_path) or "BOM"
+    o = _filename_rev_letter(old_path)
+    n = _filename_rev_letter(new_path)
+    rev = lambda r: f"REV{r}" if r else "REV?"  # noqa: E731
+    fname = re.sub(r'[\\/:*?"<>|]', "-",
+                   f"{asy} BOM {rev(o)} vs {rev(n)}.xlsx")
+    sheet = re.sub(r"[\[\]:*?/\\]", " ",
+                   f"{asy} {o or '?'} vs {n or '?'}")[:31].strip()
+    return fname, sheet
+
+
 def export_bom_diff(old_path, new_path, out_path) -> tuple:
     """Write the BOM revision comparison to an .xlsx. Returns
     (out_path, rows, counts) where counts is {added, removed, qty, rev}."""
@@ -4960,7 +5006,8 @@ def export_bom_diff(old_path, new_path, out_path) -> tuple:
     keys = ["part", "change", "old_qty", "new_qty", "old_rev", "new_rev",
             "desc"]
     data = [[r.get(k, "") for k in keys] for r in rows]
-    write_simple_xlsx(out_path, headers, data, sheet_name="BOM Comparison")
+    _fname, sheet_name = bom_diff_titles(old_path, new_path)
+    write_simple_xlsx(out_path, headers, data, sheet_name=sheet_name)
     counts = {
         "added": sum(1 for r in rows if r["change"] == "Added"),
         "removed": sum(1 for r in rows if r["change"] == "Removed"),
@@ -9622,11 +9669,11 @@ def launch_gui() -> int:
                 if o == n:
                     status.configure(text="Pick two different files.")
                     return
-                default = f"BOM_diff_{Path(o).stem}_vs_{Path(n).stem}.xlsx"[:80]
+                default_name = bom_diff_titles(o, n)[0]
                 out = filedialog.asksaveasfilename(
                     title="Save BOM comparison as", defaultextension=".xlsx",
                     initialdir=self.out_dir or str(Path(n).parent),
-                    initialfile="BOM_Comparison.xlsx",
+                    initialfile=default_name,
                     filetypes=[("Excel workbook", "*.xlsx")])
                 if not out:
                     return
