@@ -232,7 +232,24 @@ revision change shows as a *change*, not a remove + add. It reports:
 Output columns: **Part Number · Change · Old Qty · New Qty · Old REV · New REV ·
 Description**, with a bold colored header. Title-block / approval rows are
 ignored. The older/newer revision is pre-selected from the REV in each file
-name; you can swap them or Browse for a file.
+name; you can swap them or Browse for a file. The output file name and sheet
+name carry the assembly number and the two revisions (e.g. `ASY00798-01 BOM
+REVA vs REVB.xlsx`), so there's no renaming to do.
+
+#### Cable drawings — per-sheet comparison
+
+When **both** chosen files are Visio cable drawings (`.vsdx`), the comparison
+switches to a **sheet-by-sheet** view of each sheet's BOM table at the bottom
+of the sheet. It reports only **Added**, **Removed**, and **Qty changed**
+parts (no REV tracking), attributing every change to the sheet it happened on
+(e.g. `P0001`). Parts are matched by part number; rows whose part number is a
+placeholder (wires that read *See Specifications*, etc.) are matched by their
+description so they don't collapse together.
+
+Output columns: **Sheet · Part Number · Description · Change · Old Qty · New
+Qty**, with a bold colored header, grouped by sheet. The output name carries
+the drawing number and revisions (e.g. `CBL00040-01 CABLE BOM REVC vs
+REVD.xlsx`).
 
 ### Excel: find & edit BOM rows
 

@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.39.1"
+__version__ = "2.40.0"
 
 import argparse
 import datetime
@@ -5017,6 +5017,181 @@ def export_bom_diff(old_path, new_path, out_path) -> tuple:
     return Path(out_path), len(rows), counts
 
 
+# ---------------------------------------------------------------------------
+# Compare two revisions of a Visio cable drawing -- per-sheet BOM tables
+# ---------------------------------------------------------------------------
+#
+# A cable drawing is a multi-sheet Visio file; every sheet carries its own BOM
+# table at the bottom. This comparison looks ONLY at those per-sheet tables and
+# reports, for each sheet, which parts were Added, Removed, or had their Qty
+# changed between the old and new revision (no REV tracking here). Sheets are
+# matched by sheet name (e.g. "P0001"), so a change is attributed to the sheet
+# it happened on.
+
+# Part-number values that aren't real part numbers (wires read "See
+# Specifications", etc.), so such rows are keyed by their description instead.
+_BOM_PLACEHOLDER_PN = {"see specifications", "see spec", "see specs",
+                       "-", "--", "n/a", "na", "none", "tbd", ""}
+
+
+def _bom_qty_col(col_field: dict):
+    """The column letter holding quantity/length (header varies: "Qty",
+    "QTY/Length", "Qty/Length", ...), or None."""
+    # Exact "Qty" first, then any field mentioning qty/quantity/length.
+    for want in ("qty",):
+        for c, f in col_field.items():
+            if (f or "").strip().lower() == want:
+                return c
+    for c, f in col_field.items():
+        fl = (f or "").strip().lower()
+        if "qty" in fl or "quantity" in fl or "length" in fl:
+            return c
+    return None
+
+
+def _visio_sheet_part_key(pn: str, desc: str) -> str:
+    """A stable identity for a BOM row. Use the part number when it's a real
+    one; otherwise fall back to the description (so wires that all read
+    "See Specifications" don't collapse into a single row)."""
+    pn = (pn or "").strip()
+    if pn and pn.lower() not in _BOM_PLACEHOLDER_PN:
+        return "PN:" + pn.upper()
+    return "DESC:" + (desc or "").strip().upper()
+
+
+def read_visio_sheet_boms(path) -> dict:
+    """Read every sheet's BOM table in a Visio cable drawing into
+    {sheet_name: {key: {pn, desc, qty, item}}}. Title-block/approval rows are
+    excluded. Sheets with no readable table are skipped."""
+    out: dict = {}
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return out
+    with z:
+        for member, page in visio_parts_sheets(path):
+            info = _embedded_bom_info(z.read(member))
+            if not info:
+                continue
+            rows, col_field, hrow = (info["rows"], info["col_field"],
+                                     info["header_row"])
+            pn_c = next((c for c, f in col_field.items()
+                         if f == "Part Number"), None)
+            desc_c = next((c for c, f in col_field.items()
+                           if f == "Description"), None)
+            item_c = next((c for c, f in col_field.items()
+                           if f == "Item"), None)
+            qty_c = _bom_qty_col(col_field)
+            if pn_c is None and desc_c is None:
+                continue
+            sheet = (page or member).strip() or member
+            parts = out.setdefault(sheet, {})
+            for rn in _table_data_rownums(rows, col_field, hrow):
+                row = rows.get(rn, {})
+                pn = (row.get(pn_c) or "").strip() if pn_c else ""
+                desc = (row.get(desc_c) or "").strip() if desc_c else ""
+                if not pn and not desc:
+                    continue
+                key = _visio_sheet_part_key(pn, desc)
+                if key in parts:
+                    continue  # first occurrence on the sheet wins
+                parts[key] = {
+                    "pn": pn, "desc": desc,
+                    "qty": _norm_bom_qty(row.get(qty_c) if qty_c else ""),
+                    "item": (row.get(item_c) or "").strip() if item_c else "",
+                }
+    return out
+
+
+def diff_visio_sheet_boms(old_path, new_path) -> list:
+    """Compare two cable-drawing revisions sheet by sheet. Returns a list of
+    change rows {sheet, part, desc, change, old_qty, new_qty}, grouped by sheet
+    (natural order) and within a sheet ordered Added, Removed, Qty changed.
+    Only part add/remove and quantity changes are reported."""
+    old = read_visio_sheet_boms(old_path)
+    new = read_visio_sheet_boms(new_path)
+    results = []
+    for sheet in sorted(set(old) | set(new), key=_natural_key):
+        o = old.get(sheet, {})
+        n = new.get(sheet, {})
+        added, removed, qtyc = [], [], []
+        for key in set(o) | set(n):
+            a, b = o.get(key), n.get(key)
+            if a and not b:
+                removed.append({
+                    "sheet": sheet, "part": a["pn"] or a["desc"],
+                    "desc": a["desc"], "change": "Removed",
+                    "old_qty": a["qty"], "new_qty": ""})
+            elif b and not a:
+                added.append({
+                    "sheet": sheet, "part": b["pn"] or b["desc"],
+                    "desc": b["desc"], "change": "Added",
+                    "old_qty": "", "new_qty": b["qty"]})
+            elif a["qty"] != b["qty"]:
+                qtyc.append({
+                    "sheet": sheet, "part": b["pn"] or b["desc"],
+                    "desc": b["desc"] or a["desc"], "change": "Qty changed",
+                    "old_qty": a["qty"], "new_qty": b["qty"]})
+        for bucket in (added, removed, qtyc):
+            bucket.sort(key=lambda r: _natural_key(r["part"]))
+        results += added + removed + qtyc
+    return results
+
+
+def _visio_drawing_name(path) -> str:
+    """The cable-drawing number for naming the output, from the file name
+    (e.g. "CBL00040-01") else the first sheet name else the file stem."""
+    stem = Path(path).stem
+    m = re.search(r"[A-Za-z]{2,4}\d{3,}(?:-\d+)?", stem)
+    if m:
+        return m.group(0)
+    try:
+        sheets = visio_parts_sheets(path)
+        for _m, nm in sheets:
+            nm = (nm or "").strip()
+            if nm:
+                return nm
+    except Exception:  # noqa: BLE001
+        pass
+    return stem
+
+
+def visio_sheet_diff_titles(old_path, new_path) -> tuple:
+    """Suggested (default_filename, sheet_name) for a cable-drawing comparison,
+    built from the drawing number and the two revisions, so the output need not
+    be renamed. e.g. ("CBL00040-01 CABLE BOM REVC vs REVD.xlsx",
+    "CBL00040-01 C vs D")."""
+    name = _visio_drawing_name(new_path) or _visio_drawing_name(old_path) or \
+        "CABLE"
+    o = _filename_rev_letter(old_path)
+    n = _filename_rev_letter(new_path)
+    rev = lambda r: f"REV{r}" if r else "REV?"  # noqa: E731
+    fname = re.sub(r'[\\/:*?"<>|]', "-",
+                   f"{name} CABLE BOM {rev(o)} vs {rev(n)}.xlsx")
+    sheet = re.sub(r"[\[\]:*?/\\]", " ",
+                   f"{name} {o or '?'} vs {n or '?'}")[:31].strip()
+    return fname, sheet
+
+
+def export_visio_sheet_bom_diff(old_path, new_path, out_path) -> tuple:
+    """Write the per-sheet cable-drawing BOM comparison to an .xlsx. Returns
+    (out_path, rows, counts) where counts is {added, removed, qty, sheets}."""
+    rows = diff_visio_sheet_boms(old_path, new_path)
+    headers = ["Sheet", "Part Number", "Description", "Change",
+               "Old Qty", "New Qty"]
+    keys = ["sheet", "part", "desc", "change", "old_qty", "new_qty"]
+    data = [[r.get(k, "") for k in keys] for r in rows]
+    _fname, sheet_name = visio_sheet_diff_titles(old_path, new_path)
+    write_simple_xlsx(out_path, headers, data, sheet_name=sheet_name)
+    counts = {
+        "added": sum(1 for r in rows if r["change"] == "Added"),
+        "removed": sum(1 for r in rows if r["change"] == "Removed"),
+        "qty": sum(1 for r in rows if r["change"] == "Qty changed"),
+        "sheets": len({r["sheet"] for r in rows}),
+    }
+    return Path(out_path), len(rows), counts
+
+
 def generate_change_summary(records, summary_path, run_dt=None) -> Path:
     """Write an HTML before/after change-review document.
 
@@ -9615,13 +9790,15 @@ def launch_gui() -> int:
             win.title("Compare BOM revisions")
             win.transient(self.root)
             win.grab_set()
-            win.geometry("660x250")
+            win.geometry("660x300")
             win.resizable(False, False)
             win.configure(bg=pal["bg"])
             ttk.Label(
                 win, wraplength=520, justify="left",
                 text="Choose the older and newer revision of the same BOM. "
-                "Pick from the loaded files, or Browse for a file.").pack(
+                "Pick from the loaded files, or Browse for a file.\n"
+                "Two Visio cable drawings are compared sheet by sheet "
+                "(each sheet's bottom BOM table).").pack(
                 fill="x", padx=14, pady=(12, 8))
 
             state = {"old": tk.StringVar(), "new": tk.StringVar()}
@@ -9669,7 +9846,14 @@ def launch_gui() -> int:
                 if o == n:
                     status.configure(text="Pick two different files.")
                     return
-                default_name = bom_diff_titles(o, n)[0]
+                # Two Visio cable drawings -> per-sheet BOM comparison;
+                # otherwise the flat (whole-BOM) comparison.
+                per_sheet = (detect_format(o) == "vsdx"
+                             and detect_format(n) == "vsdx")
+                if per_sheet:
+                    default_name = visio_sheet_diff_titles(o, n)[0]
+                else:
+                    default_name = bom_diff_titles(o, n)[0]
                 out = filedialog.asksaveasfilename(
                     title="Save BOM comparison as", defaultextension=".xlsx",
                     initialdir=self.out_dir or str(Path(n).parent),
@@ -9678,14 +9862,24 @@ def launch_gui() -> int:
                 if not out:
                     return
                 try:
-                    path, rows, counts = export_bom_diff(o, n, out)
+                    if per_sheet:
+                        path, rows, counts = export_visio_sheet_bom_diff(
+                            o, n, out)
+                    else:
+                        path, rows, counts = export_bom_diff(o, n, out)
                 except Exception as exc:  # noqa: BLE001
                     messagebox.showerror(
                         "Compare BOMs", f"Couldn't compare:\n{exc}")
                     return
-                summary = (f"{counts['added']} added, {counts['removed']} "
-                           f"removed, {counts['qty']} qty changed, "
-                           f"{counts['rev']} REV changed")
+                if per_sheet:
+                    summary = (f"{counts['added']} added, "
+                               f"{counts['removed']} removed, "
+                               f"{counts['qty']} qty changed "
+                               f"across {counts['sheets']} sheet(s)")
+                else:
+                    summary = (f"{counts['added']} added, {counts['removed']} "
+                               f"removed, {counts['qty']} qty changed, "
+                               f"{counts['rev']} REV changed")
                 self.compare_status.configure(text=f"{summary} → {path.name}")
                 self.log(f"BOM comparison: {summary} -> {path.name}")
                 win.destroy()
