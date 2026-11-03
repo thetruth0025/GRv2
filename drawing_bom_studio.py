@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.40.0"
+__version__ = "2.41.0"
 
 import argparse
 import datetime
@@ -5105,36 +5105,63 @@ def read_visio_sheet_boms(path) -> dict:
 
 def diff_visio_sheet_boms(old_path, new_path) -> list:
     """Compare two cable-drawing revisions sheet by sheet. Returns a list of
-    change rows {sheet, part, desc, change, old_qty, new_qty}, grouped by sheet
-    (natural order) and within a sheet ordered Added, Removed, Qty changed.
-    Only part add/remove and quantity changes are reported."""
+    change rows {cable, part, desc, change, old_qty, new_qty}, grouped by cable
+    (natural order) and within a cable ordered Added, Removed, Qty changed.
+
+    Each change is attributed to a *cable*: the drawing number with the sheet
+    name appended (e.g. "CBL00040-01-P0001"). When a whole sheet appears or
+    disappears between revisions, that is reported as a cable Added / Removed
+    (a header row), followed by all of that sheet's parts. Only part
+    add/remove and quantity changes are reported (no REV tracking)."""
     old = read_visio_sheet_boms(old_path)
     new = read_visio_sheet_boms(new_path)
+    drawing = (_visio_drawing_name(new_path) or _visio_drawing_name(old_path)
+               or "").strip()
+
+    def cable_id(sheet):
+        return f"{drawing}-{sheet}" if drawing else sheet
+
     results = []
     for sheet in sorted(set(old) | set(new), key=_natural_key):
         o = old.get(sheet, {})
         n = new.get(sheet, {})
+        cid = cable_id(sheet)
+        whole_sheet_added = bool(n) and not o
+        whole_sheet_removed = bool(o) and not n
         added, removed, qtyc = [], [], []
         for key in set(o) | set(n):
             a, b = o.get(key), n.get(key)
             if a and not b:
                 removed.append({
-                    "sheet": sheet, "part": a["pn"] or a["desc"],
+                    "cable": cid, "part": a["pn"] or a["desc"],
                     "desc": a["desc"], "change": "Removed",
                     "old_qty": a["qty"], "new_qty": ""})
             elif b and not a:
                 added.append({
-                    "sheet": sheet, "part": b["pn"] or b["desc"],
+                    "cable": cid, "part": b["pn"] or b["desc"],
                     "desc": b["desc"], "change": "Added",
                     "old_qty": "", "new_qty": b["qty"]})
             elif a["qty"] != b["qty"]:
                 qtyc.append({
-                    "sheet": sheet, "part": b["pn"] or b["desc"],
+                    "cable": cid, "part": b["pn"] or b["desc"],
                     "desc": b["desc"] or a["desc"], "change": "Qty changed",
                     "old_qty": a["qty"], "new_qty": b["qty"]})
         for bucket in (added, removed, qtyc):
             bucket.sort(key=lambda r: _natural_key(r["part"]))
-        results += added + removed + qtyc
+        if whole_sheet_added:
+            results.append({
+                "cable": cid, "part": "", "change": "Cable added",
+                "desc": f"Entire cable added ({len(added)} part(s))",
+                "old_qty": "", "new_qty": ""})
+            results += added
+        elif whole_sheet_removed:
+            results.append({
+                "cable": cid, "part": "", "change": "Cable removed",
+                "desc": f"Entire cable removed ({len(removed)} part(s))",
+                "old_qty": "", "new_qty": ""})
+            results += removed
+        else:
+            results += added + removed + qtyc
     return results
 
 
@@ -5175,11 +5202,12 @@ def visio_sheet_diff_titles(old_path, new_path) -> tuple:
 
 def export_visio_sheet_bom_diff(old_path, new_path, out_path) -> tuple:
     """Write the per-sheet cable-drawing BOM comparison to an .xlsx. Returns
-    (out_path, rows, counts) where counts is {added, removed, qty, sheets}."""
+    (out_path, rows, counts) where counts is {added, removed, qty,
+    cables_added, cables_removed, cables}."""
     rows = diff_visio_sheet_boms(old_path, new_path)
-    headers = ["Sheet", "Part Number", "Description", "Change",
+    headers = ["Cable", "Part Number", "Description", "Change",
                "Old Qty", "New Qty"]
-    keys = ["sheet", "part", "desc", "change", "old_qty", "new_qty"]
+    keys = ["cable", "part", "desc", "change", "old_qty", "new_qty"]
     data = [[r.get(k, "") for k in keys] for r in rows]
     _fname, sheet_name = visio_sheet_diff_titles(old_path, new_path)
     write_simple_xlsx(out_path, headers, data, sheet_name=sheet_name)
@@ -5187,7 +5215,10 @@ def export_visio_sheet_bom_diff(old_path, new_path, out_path) -> tuple:
         "added": sum(1 for r in rows if r["change"] == "Added"),
         "removed": sum(1 for r in rows if r["change"] == "Removed"),
         "qty": sum(1 for r in rows if r["change"] == "Qty changed"),
-        "sheets": len({r["sheet"] for r in rows}),
+        "cables_added": sum(1 for r in rows if r["change"] == "Cable added"),
+        "cables_removed": sum(1 for r in rows
+                              if r["change"] == "Cable removed"),
+        "cables": len({r["cable"] for r in rows}),
     }
     return Path(out_path), len(rows), counts
 
@@ -9874,8 +9905,12 @@ def launch_gui() -> int:
                 if per_sheet:
                     summary = (f"{counts['added']} added, "
                                f"{counts['removed']} removed, "
-                               f"{counts['qty']} qty changed "
-                               f"across {counts['sheets']} sheet(s)")
+                               f"{counts['qty']} qty changed")
+                    if counts['cables_added'] or counts['cables_removed']:
+                        summary += (f" ({counts['cables_added']} cable(s) "
+                                    f"added, {counts['cables_removed']} "
+                                    f"removed)")
+                    summary += f" across {counts['cables']} cable(s)"
                 else:
                     summary = (f"{counts['added']} added, {counts['removed']} "
                                f"removed, {counts['qty']} qty changed, "

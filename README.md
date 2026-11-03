@@ -239,15 +239,20 @@ REVA vs REVB.xlsx`), so there's no renaming to do.
 #### Cable drawings — per-sheet comparison
 
 When **both** chosen files are Visio cable drawings (`.vsdx`), the comparison
-switches to a **sheet-by-sheet** view of each sheet's BOM table at the bottom
-of the sheet. It reports only **Added**, **Removed**, and **Qty changed**
-parts (no REV tracking), attributing every change to the sheet it happened on
-(e.g. `P0001`). Parts are matched by part number; rows whose part number is a
-placeholder (wires that read *See Specifications*, etc.) are matched by their
-description so they don't collapse together.
+switches to a **per-cable** view of each sheet's BOM table at the bottom of the
+sheet. It reports only **Added**, **Removed**, and **Qty changed** parts (no
+REV tracking), attributing every change to the **cable** it happened on — the
+drawing number with the sheet name appended, e.g. `CBL00040-01-P0001`. Parts
+are matched by part number; rows whose part number is a placeholder (wires that
+read *See Specifications*, etc.) are matched by their description so they don't
+collapse together.
 
-Output columns: **Sheet · Part Number · Description · Change · Old Qty · New
-Qty**, with a bold colored header, grouped by sheet. The output name carries
+If a whole sheet appears or disappears between revisions, that is flagged as a
+**cable added** / **cable removed** (a header row), followed by all of that
+sheet's parts.
+
+Output columns: **Cable · Part Number · Description · Change · Old Qty · New
+Qty**, with a bold colored header, grouped by cable. The output name carries
 the drawing number and revisions (e.g. `CBL00040-01 CABLE BOM REVC vs
 REVD.xlsx`).
 
