@@ -47,7 +47,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.41.0"
+__version__ = "2.42.0"
 
 import argparse
 import datetime
@@ -4651,6 +4651,49 @@ def _visio_sheet_cable_labels(page_xml: str, drawing_no: str):
     return cable, labels
 
 
+def _visio_sheet_cable_description(page_xml: str, sheet_name: str) -> str:
+    """The cable description printed at the top-center of a cable sheet -- the
+    text box directly above the sheet-name box (e.g. "P0001") and the "Length:"
+    box. Returns the description text, or "" if none is found."""
+    ns, cells, _ = _visio_leaf_cells(page_xml)
+    cc = [c for c in cells if c["text"] and c["x"] is not None
+          and c["y"] is not None]
+    if not cc:
+        return ""
+    sn = (sheet_name or "").strip().lower()
+    is_len = lambda t: bool(re.match(r"\s*length\s*[:\-]", t.strip(), re.I))  # noqa: E731
+
+    # Anchor on the sheet-name box (its text == the sheet name); failing that,
+    # the "Length:" box. The description sits just above whichever we find.
+    anchor = None
+    if sn:
+        anchor = next((c for c in cc if c["text"].strip().lower() == sn), None)
+    if anchor is None:
+        anchor = next((c for c in cc if is_len(c["text"])), None)
+    if anchor is None:
+        return ""
+
+    ax, aw, ay = anchor["x"], (anchor["w"] or 0.3), anchor["y"]
+    best, bd = None, None
+    for c in cc:
+        if c is anchor:
+            continue
+        t = c["text"].strip()
+        if (sn and t.lower() == sn) or is_len(t):
+            continue  # skip the sheet-name and length boxes themselves
+        # Same center column as the anchor, directly above it.
+        if abs(c["x"] - ax) > max(aw, c["w"] or 0.3) * 0.9:
+            continue
+        dy = c["y"] - ay  # strictly above (higher Y)
+        if dy <= 0.02 or dy > 3.0:
+            continue
+        if bd is None or dy < bd:
+            bd, best = dy, c
+    if not best:
+        return ""
+    return re.sub(r"\s+", " ", best["text"].replace("\r", " ")).strip()
+
+
 def _split_label_type(caption: str):
     """Split a label caption into (label, label_type). If the caption contains
     "Label Type: <text>" (any separator, any case), the text after it becomes
@@ -5103,18 +5146,42 @@ def read_visio_sheet_boms(path) -> dict:
     return out
 
 
+def read_visio_sheet_descriptions(path) -> dict:
+    """{sheet_name: cable_description} from the top-of-sheet description box on
+    each page of a Visio cable drawing. Sheets with no description are omitted."""
+    out = {}
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return out
+    with z:
+        for member, sheet in _visio_page_names(z).items():
+            try:
+                xml = z.read(member).decode("utf-8", "replace")
+            except KeyError:
+                continue
+            desc = _visio_sheet_cable_description(xml, sheet)
+            if desc:
+                out[(sheet or "").strip()] = desc
+    return out
+
+
 def diff_visio_sheet_boms(old_path, new_path) -> list:
     """Compare two cable-drawing revisions sheet by sheet. Returns a list of
     change rows {cable, part, desc, change, old_qty, new_qty}, grouped by cable
-    (natural order) and within a cable ordered Added, Removed, Qty changed.
+    (natural order) and within a cable ordered Description changed, Added,
+    Removed, Qty changed.
 
     Each change is attributed to a *cable*: the drawing number with the sheet
     name appended (e.g. "CBL00040-01-P0001"). When a whole sheet appears or
     disappears between revisions, that is reported as a cable Added / Removed
-    (a header row), followed by all of that sheet's parts. Only part
-    add/remove and quantity changes are reported (no REV tracking)."""
+    (a header row), followed by all of that sheet's parts. A change to the
+    cable description at the top of a sheet is reported as "Description
+    changed". Part changes are limited to add/remove and quantity (no REV)."""
     old = read_visio_sheet_boms(old_path)
     new = read_visio_sheet_boms(new_path)
+    old_desc = read_visio_sheet_descriptions(old_path)
+    new_desc = read_visio_sheet_descriptions(new_path)
     drawing = (_visio_drawing_name(new_path) or _visio_drawing_name(old_path)
                or "").strip()
 
@@ -5161,7 +5228,16 @@ def diff_visio_sheet_boms(old_path, new_path) -> list:
                 "old_qty": "", "new_qty": ""})
             results += removed
         else:
-            results += added + removed + qtyc
+            # Cable description at the top of the sheet changed?
+            od = (old_desc.get(sheet) or "").strip()
+            nd = (new_desc.get(sheet) or "").strip()
+            desc_rows = []
+            if (od or nd) and od != nd:
+                desc_rows.append({
+                    "cable": cid, "part": "", "change": "Description changed",
+                    "desc": f'"{od}" → "{nd}"',
+                    "old_qty": "", "new_qty": ""})
+            results += desc_rows + added + removed + qtyc
     return results
 
 
@@ -5215,6 +5291,7 @@ def export_visio_sheet_bom_diff(old_path, new_path, out_path) -> tuple:
         "added": sum(1 for r in rows if r["change"] == "Added"),
         "removed": sum(1 for r in rows if r["change"] == "Removed"),
         "qty": sum(1 for r in rows if r["change"] == "Qty changed"),
+        "desc": sum(1 for r in rows if r["change"] == "Description changed"),
         "cables_added": sum(1 for r in rows if r["change"] == "Cable added"),
         "cables_removed": sum(1 for r in rows
                               if r["change"] == "Cable removed"),
@@ -9905,7 +9982,8 @@ def launch_gui() -> int:
                 if per_sheet:
                     summary = (f"{counts['added']} added, "
                                f"{counts['removed']} removed, "
-                               f"{counts['qty']} qty changed")
+                               f"{counts['qty']} qty changed, "
+                               f"{counts['desc']} description changed")
                     if counts['cables_added'] or counts['cables_removed']:
                         summary += (f" ({counts['cables_added']} cable(s) "
                                     f"added, {counts['cables_removed']} "

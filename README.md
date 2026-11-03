@@ -249,7 +249,9 @@ collapse together.
 
 If a whole sheet appears or disappears between revisions, that is flagged as a
 **cable added** / **cable removed** (a header row), followed by all of that
-sheet's parts.
+sheet's parts. A change to the **cable description** at the top of a sheet (the
+title text above the sheet-name and *Length:* boxes) is reported as
+**Description changed**, showing the old → new text.
 
 Output columns: **Cable · Part Number · Description · Change · Old Qty · New
 Qty**, with a bold colored header, grouped by cable. The output name carries
