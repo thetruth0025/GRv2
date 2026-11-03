@@ -258,6 +258,22 @@ Qty**, with a bold colored header, grouped by cable. The output name carries
 the drawing number and revisions (e.g. `CBL00040-01 CABLE BOM REVC vs
 REVD.xlsx`).
 
+### Split sheets into bundled PDFs (Visio)
+
+On the **Parts** tab, **Split sheets to PDFs…** exports each individual cable
+sheet of a Visio drawing as its **own PDF**. The two specification sheets —
+**Cable Assembly Specifications** and **RF Cable Assembly Specifications** — are
+always placed **before** the sheet in each bundle, in that order. Every file is
+named after the cable: the drawing number with the sheet name appended, e.g.
+`CBL00040-01-P0001.pdf`.
+
+Pick a destination folder; one PDF is written per cable sheet (P0001, R0001,
+…). The title page, the spec sheets themselves, and the background frame are
+not split out on their own. Rendering uses the installed Microsoft Visio when
+available (best fidelity, falling back to LibreOffice); the pages are then
+reordered and bundled with **pypdf** (`pip install pypdf` — the launcher and
+build scripts install it automatically).
+
 ### Excel: find & edit BOM rows
 
 For Excel bill-of-materials sheets, you can edit a part's whole row, not just

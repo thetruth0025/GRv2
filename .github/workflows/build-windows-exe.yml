@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install PyInstaller
-        run: pip install pyinstaller pillow tkinterdnd2
+        run: pip install pyinstaller pillow tkinterdnd2 pypdf
 
       - name: Build the EXE
         run: pyinstaller --onefile --windowed --name DrawingBOMStudio --icon robot_icon.ico --collect-all tkinterdnd2 drawing_bom_studio.py

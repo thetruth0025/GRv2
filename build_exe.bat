@@ -21,7 +21,7 @@ where %PY% >nul 2>nul || (
 )
 
 echo Installing PyInstaller (if not already present)...
-%PY% -m pip install --upgrade pyinstaller pillow tkinterdnd2 || (
+%PY% -m pip install --upgrade pyinstaller pillow tkinterdnd2 pypdf || (
     echo Failed to install PyInstaller. Check your internet connection.
     pause
     exit /b 1

@@ -43,11 +43,13 @@ Requirements:
         - Windows:  https://www.libreoffice.org/download/
         - macOS:    brew install --cask libreoffice  (or the .dmg)
         - Linux:    sudo apt install libreoffice   (or your package manager)
+    * pypdf (only needed to split Visio sheets into bundled PDFs):
+        pip install pypdf
 """
 
 from __future__ import annotations
 
-__version__ = "2.42.0"
+__version__ = "2.43.0"
 
 import argparse
 import datetime
@@ -4363,6 +4365,44 @@ def _visio_page_names(zin: zipfile.ZipFile) -> dict:
     return out
 
 
+def _visio_pages_in_order(zin: zipfile.ZipFile) -> list:
+    """[{name, part, background}] for every page, in the document (tab/export)
+    order in which pages.xml lists them. ``background`` is True for a Visio
+    background page (``Background="1"``). When a drawing is exported to PDF the
+    foreground pages come first, in this order (background pages composite
+    behind them in Visio, or trail at the end with LibreOffice)."""
+    try:
+        pages = zin.read("visio/pages/pages.xml").decode("utf-8", "replace")
+        rels = zin.read(
+            "visio/pages/_rels/pages.xml.rels"
+        ).decode("utf-8", "replace")
+    except (KeyError, OSError):
+        return []
+    rid_target = {}
+    for rel in re.finditer(r"<Relationship\b[^>]*>", rels):
+        idm = re.search(r'''Id=["']([^"']+)["']''', rel.group(0))
+        tm = re.search(r'''Target=["']([^"']+)["']''', rel.group(0))
+        if idm and tm:
+            rid_target[idm.group(1)] = tm.group(1)
+    out = []
+    for pm in re.finditer(r"<Page\b[^>]*>.*?</Page>|<Page\b[^>]*/>", pages,
+                          re.DOTALL):
+        block = pm.group(0)
+        open_tag = block[:block.index(">") + 1]
+        nm = re.search(r'''\bName=["']([^"']*)["']''', open_tag)
+        bg = re.search(r'''\bBackground=["']([^"']+)["']''', open_tag)
+        rm = re.search(r'''r:id=["']([^"']+)["']''', block)
+        part = None
+        if rm and rm.group(1) in rid_target:
+            part = _resolve_part("visio/pages", rid_target[rm.group(1)])
+        out.append({
+            "name": _xml_unescape(nm.group(1)) if nm else "",
+            "part": part,
+            "background": bool(bg and bg.group(1) == "1"),
+        })
+    return out
+
+
 def _visio_frame_page_parts(zin: zipfile.ZipFile) -> set:
     """Page parts (visio/pages/pageN.xml) that act as a shared background
     'frame' / title block: Visio background pages (``Background="1"``), pages
@@ -5298,6 +5338,126 @@ def export_visio_sheet_bom_diff(old_path, new_path, out_path) -> tuple:
         "cables": len({r["cable"] for r in rows}),
     }
     return Path(out_path), len(rows), counts
+
+
+# ---------------------------------------------------------------------------
+# Split a Visio cable drawing into per-sheet PDFs (spec sheets bundled first)
+# ---------------------------------------------------------------------------
+#
+# Each individual cable sheet becomes its own PDF, with the two specification
+# sheets placed *before* the sheet in the bundle. Every file is named after the
+# cable (the drawing number with the sheet name appended, e.g.
+# "CBL00040-01-P0001.pdf").
+
+# The specification sheets bundled -- in this order -- ahead of each sheet.
+_SPLIT_SPEC_SHEETS = ("Cable Assembly Specifications",
+                      "RF Cable Assembly Specifications")
+
+
+def _is_cable_sheet_name(name: str) -> bool:
+    """A sheet name that looks like an individual cable sheet (P0001, R0001,
+    W12, ...) rather than a title/spec/frame page."""
+    return bool(re.match(r"^[A-Za-z]{1,4}\d{2,}[A-Za-z0-9-]*$",
+                         (name or "").strip()))
+
+
+def plan_visio_sheet_split(path) -> dict:
+    """Plan splitting a Visio cable drawing into per-sheet PDF bundles.
+    Returns {drawing, foreground_order, specs_present, specs_missing,
+    bundles}, where each bundle is {sheet, cable, pages, indices}: the spec
+    sheets present (in canonical order) then the sheet, with ``indices`` the
+    0-based page positions in a full-document PDF export."""
+    out = {"drawing": "", "foreground_order": [], "specs_present": [],
+           "specs_missing": [], "bundles": []}
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return out
+    with z:
+        order = _visio_pages_in_order(z)
+    foreground = [p["name"] for p in order
+                  if not p["background"] and (p["name"] or "").strip()]
+    out["foreground_order"] = foreground
+    idx = {nm: i for i, nm in enumerate(foreground)}
+    drawing = _visio_drawing_name(path)
+    out["drawing"] = drawing
+
+    lower = {nm.lower(): nm for nm in foreground}
+    specs = []
+    for want in _SPLIT_SPEC_SHEETS:
+        actual = lower.get(want.lower())
+        if actual:
+            specs.append(actual)
+        else:
+            out["specs_missing"].append(want)
+    out["specs_present"] = specs
+
+    for nm in foreground:
+        if nm in specs or not _is_cable_sheet_name(nm):
+            continue  # skip spec sheets, the title page, etc.
+        pages = specs + [nm]
+        out["bundles"].append({
+            "sheet": nm,
+            "cable": f"{drawing}-{nm}" if drawing else nm,
+            "pages": pages,
+            "indices": [idx[p] for p in pages],
+        })
+    return out
+
+
+def export_visio_sheet_bundles(path, out_dir, exporter=None,
+                               on_progress=None) -> tuple:
+    """Split a Visio cable drawing into one PDF per cable sheet, each bundling
+    the specification sheets (in order) ahead of the sheet. Returns
+    (written, warnings) where written = [(pdf_path, cable_name), ...]."""
+    plan = plan_visio_sheet_split(path)
+    bundles = plan["bundles"]
+    warnings = []
+    if plan["specs_missing"]:
+        warnings.append("Specification sheet(s) not found, so they can't be "
+                        "bundled: " + ", ".join(plan["specs_missing"]))
+    if not bundles:
+        return [], (warnings or ["No individual cable sheets were found to "
+                                 "split."])
+    try:
+        from pypdf import PdfReader, PdfWriter
+    except ImportError as exc:
+        raise RuntimeError(
+            "Splitting sheets into PDFs needs the 'pypdf' package. Install it "
+            "with:  pip install pypdf") from exc
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        # Render the whole drawing once; foreground pages come first, in
+        # document order (see _visio_pages_in_order).
+        full, _engine, note = export_pdf(path, td, exporter)
+        if note:
+            warnings.append(note)
+        reader = PdfReader(str(full))
+        npages = len(reader.pages)
+        nfg = len(plan["foreground_order"])
+        if npages < nfg:
+            raise RuntimeError(
+                f"The rendered PDF has {npages} page(s) but the drawing has "
+                f"{nfg} sheet(s) -- can't map sheets to pages reliably.")
+        for b in bundles:
+            writer = PdfWriter()
+            for i in b["indices"]:
+                writer.add_page(reader.pages[i])
+            safe = re.sub(r'[\\/:*?"<>|]', "-", b["cable"]).strip()
+            op = out_dir / ((safe or b["sheet"]) + ".pdf")
+            with open(op, "wb") as fh:
+                writer.write(fh)
+            written.append((op, b["cable"]))
+            if on_progress:
+                try:
+                    on_progress(b["cable"])
+                except Exception:  # noqa: BLE001
+                    pass
+    return written, warnings
 
 
 def generate_change_summary(records, summary_path, run_dt=None) -> Path:
@@ -7439,6 +7599,23 @@ def launch_gui() -> int:
                        self.open_compare_boms, kind="green").pack(side="left")
             self.compare_status = ttk.Label(cmpf, text="")
             self.compare_status.pack(anchor="w", padx=10, pady=(0, 6))
+
+            splf = ttk.LabelFrame(
+                tab_parts, text="Split sheets into bundled PDFs (Visio)")
+            splf.pack(fill="x", padx=8, pady=(0, 8))
+            ttk.Label(
+                splf, wraplength=900, justify="left",
+                text="Export each cable sheet of a Visio drawing as its own "
+                "PDF, with the “Cable Assembly Specifications” and “RF Cable "
+                "Assembly Specifications” sheets placed before it. Each file "
+                "is named after the cable (e.g. CBL00040-01-P0001.pdf).").pack(
+                fill="x", padx=8, pady=(8, 2))
+            spl_row = ttk.Frame(splf)
+            spl_row.pack(fill="x", padx=8, pady=(0, 6))
+            self._rbtn(spl_row, "Split sheets to PDFs...",
+                       self.open_split_sheets, kind="green").pack(side="left")
+            self.split_status = ttk.Label(splf, text="")
+            self.split_status.pack(anchor="w", padx=10, pady=(0, 6))
 
             # Tab 3 -- Approve & Revise.
             tab_appr = ttk.Frame(self.nb)
@@ -9876,6 +10053,76 @@ def launch_gui() -> int:
                      f"file(s) -> {path.name}")
             self._open_path(str(path))
 
+        # -- split sheets into bundled PDFs --------------------------------
+        def open_split_sheets(self):
+            vsdx = [f for f in self.files if detect_format(f) == "vsdx"]
+            if not vsdx:
+                messagebox.showinfo(
+                    "Split sheets",
+                    "Add at least one Visio (.vsdx) cable drawing first.")
+                return
+            out_dir = filedialog.askdirectory(
+                title="Choose a folder for the split PDFs",
+                initialdir=self.out_dir or str(Path(vsdx[0]).parent))
+            if not out_dir:
+                return
+            prefer_native = self.native_pdf_var.get()
+            self.split_status.configure(
+                text="Splitting sheets into PDFs… this can take a moment.")
+            self.log(f"Split sheets: starting for {len(vsdx)} file(s) "
+                     f"-> {out_dir}")
+
+            def work():
+                exporter = None
+                if prefer_native and native_pdf_available():
+                    try:
+                        exporter = NativePdfExporter()
+                    except Exception as exc:  # noqa: BLE001
+                        self.root.after(
+                            0, self.log,
+                            f"Split sheets: native Visio unavailable ({exc}); "
+                            "using LibreOffice.")
+                        exporter = None
+                total, warns, errs = 0, [], []
+                try:
+                    for f in vsdx:
+                        try:
+                            written, w = export_visio_sheet_bundles(
+                                f, out_dir, exporter)
+                            total += len(written)
+                            warns += w
+                            for op, _cable in written:
+                                self.root.after(0, self.log,
+                                                 f"  wrote {op.name}")
+                        except Exception as exc:  # noqa: BLE001
+                            errs.append(f"{Path(f).name}: {exc}")
+                finally:
+                    if exporter is not None:
+                        try:
+                            exporter.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                def finish():
+                    for wmsg in dict.fromkeys(warns):
+                        self.log("Split sheets note: " + wmsg)
+                    if errs:
+                        self.split_status.configure(
+                            text=f"{total} PDF(s); {len(errs)} file(s) failed.")
+                        messagebox.showerror(
+                            "Split sheets",
+                            "Some files could not be split:\n\n"
+                            + "\n".join(errs))
+                    else:
+                        self.split_status.configure(
+                            text=f"{total} PDF(s) → {out_dir}")
+                    self.log(f"Split sheets: {total} PDF(s) written.")
+                    if total:
+                        self._open_path(out_dir)
+                self.root.after(0, finish)
+
+            threading.Thread(target=work, daemon=True).start()
+
         # -- compare two BOM revisions -------------------------------------
         @staticmethod
         def _rev_sort_key(path):
@@ -10171,6 +10418,7 @@ def launch_gui() -> int:
             self.add_status.configure(text="")
             self.labels_status.configure(text="")
             self.compare_status.configure(text="")
+            self.split_status.configure(text="")
             self._clear_out_dir()
             self.show_step(1)
             self.log(
