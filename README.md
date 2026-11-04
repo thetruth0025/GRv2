@@ -267,9 +267,19 @@ always placed **before** the sheet in each bundle, in that order. Every file is
 named after the cable: the drawing number with the sheet name appended, e.g.
 `CBL00040-01-P0001.pdf`.
 
-Pick a destination folder; one PDF is written per cable sheet (P0001, R0001,
-…). The title page, the spec sheets themselves, and the background frame are
-not split out on their own. Rendering uses the installed Microsoft Visio when
+Pick a destination folder; one PDF is written per cable sheet. Cable sheets are
+recognized by name — **P####, R####, C#### or W####** — and may carry a
+suffix:
+
+- **`-ALT`** (an alternate sheet) gets its own bundle, like any other sheet.
+- **`-BOM`** marks a sheet that only carries another sheet's BOM table (drawn on
+  the next sheet because it didn't fit). It is **not** split out on its own —
+  it's folded into the bundle of the like-named sheet (e.g. `P0001-BOM` is added
+  right after `P0001`, so `CBL00040-01-P0001.pdf` holds the two spec sheets,
+  `P0001`, then `P0001-BOM`).
+
+The title page, the spec sheets themselves, and the background frame are not
+split out on their own. Rendering uses the installed Microsoft Visio when
 available (best fidelity, falling back to LibreOffice); the pages are then
 reordered and bundled with **pypdf** (`pip install pypdf` — the launcher and
 build scripts install it automatically).

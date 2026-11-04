@@ -49,7 +49,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.43.0"
+__version__ = "2.44.0"
 
 import argparse
 import datetime
@@ -5347,17 +5347,25 @@ def export_visio_sheet_bom_diff(old_path, new_path, out_path) -> tuple:
 # Each individual cable sheet becomes its own PDF, with the two specification
 # sheets placed *before* the sheet in the bundle. Every file is named after the
 # cable (the drawing number with the sheet name appended, e.g.
-# "CBL00040-01-P0001.pdf").
+# "CBL00040-01-P0001.pdf"). Cable sheets are named P####, R####, C#### or
+# W#### and may carry a "-ALT" (an alternate sheet, its own bundle) or "-BOM"
+# (a BOM continuation of the like-named sheet -- it rolls into that sheet's
+# bundle, right after it, rather than getting a PDF of its own) suffix.
 
 # The specification sheets bundled -- in this order -- ahead of each sheet.
 _SPLIT_SPEC_SHEETS = ("Cable Assembly Specifications",
                       "RF Cable Assembly Specifications")
 
+# A trailing "-BOM" marks a sheet that just carries another sheet's BOM table
+# (drawn on the next sheet because it didn't fit on the first).
+_BOM_SHEET_SUFFIX_RE = re.compile(r"\s*-\s*BOM\s*$", re.IGNORECASE)
+
 
 def _is_cable_sheet_name(name: str) -> bool:
     """A sheet name that looks like an individual cable sheet (P0001, R0001,
-    W12, ...) rather than a title/spec/frame page."""
-    return bool(re.match(r"^[A-Za-z]{1,4}\d{2,}[A-Za-z0-9-]*$",
+    C0007, W12, P0001-ALT, P0001-BOM, ...) rather than a title/spec/frame
+    page."""
+    return bool(re.match(r"^[A-Za-z]{1,4}\d{2,}[A-Za-z0-9 _-]*$",
                          (name or "").strip()))
 
 
@@ -5365,8 +5373,9 @@ def plan_visio_sheet_split(path) -> dict:
     """Plan splitting a Visio cable drawing into per-sheet PDF bundles.
     Returns {drawing, foreground_order, specs_present, specs_missing,
     bundles}, where each bundle is {sheet, cable, pages, indices}: the spec
-    sheets present (in canonical order) then the sheet, with ``indices`` the
-    0-based page positions in a full-document PDF export."""
+    sheets present (in canonical order), the sheet, then its "-BOM"
+    continuation sheet if there is one; ``indices`` are the 0-based page
+    positions in a full-document PDF export."""
     out = {"drawing": "", "foreground_order": [], "specs_present": [],
            "specs_missing": [], "bundles": []}
     try:
@@ -5392,10 +5401,30 @@ def plan_visio_sheet_split(path) -> dict:
             out["specs_missing"].append(want)
     out["specs_present"] = specs
 
-    for nm in foreground:
-        if nm in specs or not _is_cable_sheet_name(nm):
-            continue  # skip spec sheets, the title page, etc.
-        pages = specs + [nm]
+    cable_sheets = [nm for nm in foreground
+                    if nm not in specs and _is_cable_sheet_name(nm)]
+    # Base sheets (no "-BOM") a continuation could attach to.
+    base_lower = {nm.lower() for nm in cable_sheets
+                  if not _BOM_SHEET_SUFFIX_RE.search(nm)}
+    # base sheet name (lower) -> its "-BOM" continuation sheet.
+    bom_cont = {}
+    for nm in cable_sheets:
+        if _BOM_SHEET_SUFFIX_RE.search(nm):
+            base = _BOM_SHEET_SUFFIX_RE.sub("", nm).strip()
+            if base.lower() in base_lower:
+                bom_cont[base.lower()] = nm
+
+    for nm in cable_sheets:
+        # A "-BOM" continuation whose base sheet is present isn't its own
+        # bundle -- it's folded into that base sheet's bundle below.
+        if _BOM_SHEET_SUFFIX_RE.search(nm):
+            base = _BOM_SHEET_SUFFIX_RE.sub("", nm).strip()
+            if base.lower() in base_lower:
+                continue
+        pages = list(specs) + [nm]
+        cont = bom_cont.get(nm.lower())
+        if cont and cont != nm:
+            pages.append(cont)  # the BOM-continuation sheet, right after it
         out["bundles"].append({
             "sheet": nm,
             "cable": f"{drawing}-{nm}" if drawing else nm,
