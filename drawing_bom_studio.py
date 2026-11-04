@@ -49,7 +49,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.46.0"
+__version__ = "2.46.1"
 
 import argparse
 import datetime
@@ -5520,10 +5520,12 @@ def export_visio_sheet_bundles(path, out_dir, exporter=None,
 # the two specification sheets by their title text, so the same bundling rules
 # apply (spec sheets first, "-BOM" continuations folded into their base sheet).
 
-# A cable-sheet name as it reads on the page: P0001, R0001, C0007, W12, and
-# optionally a "-ALT" / "-BOM" suffix (hyphen, underscore or space separator).
-_PDF_CABLE_TOKEN_RE = re.compile(
-    r"\b[A-Za-z]{1,4}\d{2,}(?:[ _-](?:ALT|BOM))?\b", re.IGNORECASE)
+# A full cable-sheet name as it reads on the page: a P0001/R0001/C0007/W12
+# style base, plus any number of "-<suffix>" parts (hyphen or underscore), so
+# "P0001", "P0001-1", "P0001-1LED", "P0001-BOM" and "P0001-1-BOM" are each
+# captured whole and treated as distinct sheets.
+_PDF_SHEET_NAME_RE = re.compile(
+    r"[A-Za-z]{1,4}\d{2,}(?:[-_][A-Za-z0-9]+)*", re.IGNORECASE)
 
 
 def _pdf_page_fragments(page) -> tuple:
@@ -5562,23 +5564,43 @@ def _pdf_page_fragments(page) -> tuple:
 
 def _pdf_sheet_and_description(frags, height, width) -> tuple:
     """Find a page's (sheet_name, description). The sheet name is the top-most
-    fragment that is a cable token; the description is the horizontally-centered
-    fragment just above it (the title text over the sheet-name / Length boxes).
-    Returns (None, "") when no sheet name is present (spec/title pages)."""
+    fragment that is a whole cable-sheet name (joined with a right-adjacent
+    "-suffix" fragment when the name was split); the description is the
+    horizontally-centered fragment just above it (the title text over the
+    sheet-name / Length boxes). Returns (None, "") for spec/title pages."""
     if not frags:
         return None, ""
     cutoff = height * 0.78 if height else None
     top = [f for f in frags if cutoff is None or f[2] >= cutoff]
-    # Sheet name: highest fragment in the top band that is a cable token.
+    top_by_y = sorted(top, key=lambda e: -e[2])
+    # Sheet name: highest top-band fragment that *is* a full sheet name.
     name = None
-    for s, x, y, cx in sorted(top, key=lambda e: -e[2]):
-        m = _PDF_CABLE_TOKEN_RE.search(s)
-        if m and len(m.group(0)) >= len(s) - 2:  # the fragment *is* the token
-            name = (m.group(0).strip(), y)
+    for s, x, y, cx in top_by_y:
+        st = s.strip()
+        if _PDF_SHEET_NAME_RE.fullmatch(st):
+            name = (st, x, y, cx)
             break
     if name is None:
+        # Fall back: a fragment that starts with a sheet name (allow a stray
+        # trailing char), in case of odd punctuation.
+        for s, x, y, cx in top_by_y:
+            st = s.strip()
+            m = _PDF_SHEET_NAME_RE.match(st)
+            if m and m.end() >= len(st) - 1:
+                name = (m.group(0), x, y, cx)
+                break
+    if name is None:
         return None, ""
-    token, ny = name
+    token, nx, ny, ncx = name
+    # If the name was split, join a right-adjacent "-suffix" fragment on the
+    # same line (e.g. "P0001" + "-1LED").
+    right_edge = 2 * ncx - nx
+    for s, x, y, cx in top:
+        st = s.strip()
+        if (abs(y - ny) <= 3 and 0 <= x - right_edge <= 60
+                and re.fullmatch(r"[-_][A-Za-z0-9]+", st)):
+            token = token + st
+            break
     page_center = (width / 2.0) if width else None
     tol = (width * 0.20) if width else None
     best, bd = "", None
@@ -5590,7 +5612,7 @@ def _pdf_sheet_and_description(frags, height, width) -> tuple:
             continue  # must be horizontally centered (not a corner note)
         low = s.lower()
         if (low.startswith("for reference") or "unclassified" in low
-                or _PDF_CABLE_TOKEN_RE.fullmatch(s)
+                or _PDF_SHEET_NAME_RE.fullmatch(s.strip())
                 or re.match(r"\s*length\s*[:\-]", low)):
             continue
         if bd is None or dy < bd:
@@ -5621,9 +5643,10 @@ def plan_pdf_sheet_split(pdf_path) -> dict:
     """Plan splitting an exported PDF into per-sheet bundles by reading the
     sheet name at the top of each page and the specification-sheet titles.
     Returns {drawing, page_count, specs_present, specs_missing, bundles}, each
-    bundle {sheet, cable, indices} with the spec pages first, then the sheet,
-    then any "-BOM" continuation page(s). A repeated sheet name (a continuation
-    whose header still reads the base name) is folded in the same way."""
+    bundle {sheet, cable, indices} with the spec pages first, then the sheet.
+    Every distinct sheet name is its own bundle; a sheet whose name ends in
+    "-BOM" is the only thing merged, and only into the sheet whose name equals
+    it with the trailing "-BOM" removed (exact match)."""
     out = {"drawing": "", "page_count": 0, "specs_present": [],
            "specs_missing": [], "revision": "", "bundles": []}
     from pypdf import PdfReader
@@ -5661,43 +5684,36 @@ def plan_pdf_sheet_split(pdf_path) -> dict:
     else:
         out["specs_missing"].append("RF Cable Assembly Specifications")
 
-    def base_of(name):
-        return _BOM_SHEET_SUFFIX_RE.sub("", name).strip()
-
-    by_base = {}   # base name (lower) -> bundle dict
     bundles = []
-    # First the base (non-"-BOM") sheets, in page order. A repeated base token
-    # is a continuation and is appended rather than starting a new bundle.
+    by_name = {}   # full sheet name (lower) -> its bundle, for "-BOM" attach
+    # Every non-"-BOM" sheet is its own bundle -- distinct names (P0001,
+    # P0001-1, P0001-1LED, ...) never merge.
     for i, nm, desc in cable_pages:
         if _BOM_SHEET_SUFFIX_RE.search(nm):
             continue
-        key = base_of(nm).lower()
-        if key in by_base:
-            by_base[key]["indices"].append(i)
-        else:
-            b = {"sheet": nm,
-                 "cable": f"{drawing}-{nm}" if drawing else nm,
-                 "revision": revision,
-                 "description": desc,
-                 "indices": [i]}
-            by_base[key] = b
-            bundles.append(b)
-    # Then "-BOM" continuation pages, folded into their base (or their own
-    # bundle if the base sheet isn't in the PDF).
+        b = {"sheet": nm,
+             "cable": f"{drawing}-{nm}" if drawing else nm,
+             "revision": revision,
+             "description": desc,
+             "indices": [i]}
+        bundles.append(b)
+        by_name.setdefault(nm.lower(), b)   # first wins, for -BOM attach
+    # A "-BOM" sheet is folded only into the sheet whose name equals it with
+    # the trailing "-BOM" removed (exact match); otherwise it's its own bundle.
     for i, nm, desc in cable_pages:
         if not _BOM_SHEET_SUFFIX_RE.search(nm):
             continue
-        key = base_of(nm).lower()
-        if key in by_base:
-            by_base[key]["indices"].append(i)
+        base = _BOM_SHEET_SUFFIX_RE.sub("", nm).strip()
+        tgt = by_name.get(base.lower())
+        if tgt is not None:
+            tgt["indices"].append(i)
         else:
-            b = {"sheet": nm,
-                 "cable": f"{drawing}-{nm}" if drawing else nm,
-                 "revision": revision,
-                 "description": desc,
-                 "indices": [i]}
-            by_base[key] = b
-            bundles.append(b)
+            bundles.append({
+                "sheet": nm,
+                "cable": f"{drawing}-{nm}" if drawing else nm,
+                "revision": revision,
+                "description": desc,
+                "indices": [i]})
     # Spec sheets lead every bundle.
     for b in bundles:
         b["indices"] = list(specs) + b["indices"]
