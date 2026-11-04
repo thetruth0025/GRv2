@@ -276,7 +276,9 @@ suffix:
   the next sheet because it didn't fit). It is **not** split out on its own —
   it's folded into the bundle of the like-named sheet (e.g. `P0001-BOM` is added
   right after `P0001`, so `CBL00040-01-P0001.pdf` holds the two spec sheets,
-  `P0001`, then `P0001-BOM`).
+  `P0001`, then `P0001-BOM`). The separator before `BOM` can be a hyphen,
+  underscore or space, in any mix — `P0001-BOM`, `P0001_BOM`, `P0001 BOM` and
+  `P0001 - BOM` are all recognized.
 
 The title page, the spec sheets themselves, and the background frame are not
 split out on their own. Rendering uses the installed Microsoft Visio when

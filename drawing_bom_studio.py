@@ -49,7 +49,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.44.0"
+__version__ = "2.44.1"
 
 import argparse
 import datetime
@@ -5356,9 +5356,11 @@ def export_visio_sheet_bom_diff(old_path, new_path, out_path) -> tuple:
 _SPLIT_SPEC_SHEETS = ("Cable Assembly Specifications",
                       "RF Cable Assembly Specifications")
 
-# A trailing "-BOM" marks a sheet that just carries another sheet's BOM table
-# (drawn on the next sheet because it didn't fit on the first).
-_BOM_SHEET_SUFFIX_RE = re.compile(r"\s*-\s*BOM\s*$", re.IGNORECASE)
+# A trailing "BOM" marks a sheet that just carries another sheet's BOM table
+# (drawn on the next sheet because it didn't fit on the first). The separator
+# may be a hyphen, underscore or space (any mix), e.g. "P0001-BOM",
+# "P0001_BOM", "P0001 BOM" or "P0001 - BOM".
+_BOM_SHEET_SUFFIX_RE = re.compile(r"[\s_-]+BOM\s*$", re.IGNORECASE)
 
 
 def _is_cable_sheet_name(name: str) -> bool:
