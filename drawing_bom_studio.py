@@ -49,7 +49,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.45.0"
+__version__ = "2.46.0"
 
 import argparse
 import datetime
@@ -5363,6 +5363,19 @@ _SPLIT_SPEC_SHEETS = ("Cable Assembly Specifications",
 _BOM_SHEET_SUFFIX_RE = re.compile(r"[\s_-]+BOM\s*$", re.IGNORECASE)
 
 
+def _bundle_pdf_name(cable: str, revision: str, description: str) -> str:
+    """The output file name for a split bundle, following the convention
+    CABLE NAME_REVISION_CABLE DESCRIPTION_CABLE_DRAWING (all caps), e.g.
+    "CBL00040-01-P0001_D_AC POWER ENTRY_CABLE_DRAWING.pdf". Empty revision or
+    description segments are dropped so there are no doubled underscores."""
+    segs = [s.strip() for s in (cable, revision, description) if (s or "").strip()]
+    segs.append("CABLE_DRAWING")
+    name = "_".join(segs).upper()
+    name = re.sub(r'[\\/:*?"<>|]', "-", name)       # illegal on Windows
+    name = re.sub(r"\s+", " ", name).strip()
+    return name + ".pdf"
+
+
 def _is_cable_sheet_name(name: str) -> bool:
     """A sheet name that looks like an individual cable sheet (P0001, R0001,
     C0007, W12, P0001-ALT, P0001-BOM, ...) rather than a title/spec/frame
@@ -5392,6 +5405,9 @@ def plan_visio_sheet_split(path) -> dict:
     idx = {nm: i for i, nm in enumerate(foreground)}
     drawing = _visio_drawing_name(path)
     out["drawing"] = drawing
+    revision = _filename_rev_letter(path)
+    out["revision"] = revision
+    descriptions = read_visio_sheet_descriptions(path)
 
     lower = {nm.lower(): nm for nm in foreground}
     specs = []
@@ -5430,6 +5446,8 @@ def plan_visio_sheet_split(path) -> dict:
         out["bundles"].append({
             "sheet": nm,
             "cable": f"{drawing}-{nm}" if drawing else nm,
+            "revision": revision,
+            "description": descriptions.get(nm, ""),
             "pages": pages,
             "indices": [idx[p] for p in pages],
         })
@@ -5478,8 +5496,8 @@ def export_visio_sheet_bundles(path, out_dir, exporter=None,
             writer = PdfWriter()
             for i in b["indices"]:
                 writer.add_page(reader.pages[i])
-            safe = re.sub(r'[\\/:*?"<>|]', "-", b["cable"]).strip()
-            op = out_dir / ((safe or b["sheet"]) + ".pdf")
+            op = out_dir / _bundle_pdf_name(
+                b["cable"], b.get("revision", ""), b.get("description", ""))
             with open(op, "wb") as fh:
                 writer.write(fh)
             written.append((op, b["cable"]))
@@ -5508,43 +5526,77 @@ _PDF_CABLE_TOKEN_RE = re.compile(
     r"\b[A-Za-z]{1,4}\d{2,}(?:[ _-](?:ALT|BOM))?\b", re.IGNORECASE)
 
 
-def _pdf_page_texts(page) -> tuple:
-    """(top_text, all_text) for a PDF page: ``top_text`` is just the fragments
-    in the top ~20% of the page (where the sheet name sits), ``all_text`` is
-    everything. Falls back to plain text extraction if positions aren't
+def _pdf_page_fragments(page) -> tuple:
+    """(fragments, all_text, height, width) for a PDF page, where fragments is
+    a list of (text, x, y, center_x): the start x/baseline y in PDF points and
+    an estimated horizontal center (so centered titles can be recognized
+    regardless of length). Falls back to plain text when positions aren't
     available."""
     frags = []
 
     def _vis(text, cm, tm, font_dict, font_size):
         s = (text or "").strip()
-        if s:
-            frags.append((s, tm[5]))
+        if not s:
+            return
+        x = tm[4]
+        # Rough text width: chars * ~0.5 em * effective font size.
+        size = float(font_size or 0) * abs(float(tm[0]) or 1)
+        width = len(s) * 0.5 * size
+        frags.append((s, x, tm[5], x + width / 2.0))
 
     try:
         page.extract_text(visitor_text=_vis)
     except Exception:  # noqa: BLE001
         frags = []
-    all_text = " ".join(s for s, _ in frags)
     if frags:
-        try:
-            h = float(page.mediabox.height) or 0
-        except Exception:  # noqa: BLE001
-            h = 0
-        cutoff = h * 0.80 if h else -1
-        top = " ".join(s for s, y in sorted(frags, key=lambda e: -e[1])
-                       if y >= cutoff)
+        all_text = " ".join(f[0] for f in frags)
     else:
-        # No positions -- use the whole page text for both.
         all_text = page.extract_text() or ""
-        top = all_text
-    return top, all_text
+    try:
+        h = float(page.mediabox.height) or 0
+        w = float(page.mediabox.width) or 0
+    except Exception:  # noqa: BLE001
+        h = w = 0
+    return frags, all_text, h, w
 
 
-def _pdf_cable_token(top_text: str):
-    """The sheet-name token (e.g. "P0001", "P0001-BOM") found in a page's top
-    text, or None."""
-    m = _PDF_CABLE_TOKEN_RE.search(top_text or "")
-    return m.group(0).strip() if m else None
+def _pdf_sheet_and_description(frags, height, width) -> tuple:
+    """Find a page's (sheet_name, description). The sheet name is the top-most
+    fragment that is a cable token; the description is the horizontally-centered
+    fragment just above it (the title text over the sheet-name / Length boxes).
+    Returns (None, "") when no sheet name is present (spec/title pages)."""
+    if not frags:
+        return None, ""
+    cutoff = height * 0.78 if height else None
+    top = [f for f in frags if cutoff is None or f[2] >= cutoff]
+    # Sheet name: highest fragment in the top band that is a cable token.
+    name = None
+    for s, x, y, cx in sorted(top, key=lambda e: -e[2]):
+        m = _PDF_CABLE_TOKEN_RE.search(s)
+        if m and len(m.group(0)) >= len(s) - 2:  # the fragment *is* the token
+            name = (m.group(0).strip(), y)
+            break
+    if name is None:
+        return None, ""
+    token, ny = name
+    page_center = (width / 2.0) if width else None
+    tol = (width * 0.20) if width else None
+    best, bd = "", None
+    for s, x, y, cx in frags:
+        dy = y - ny
+        if dy <= 1 or dy > 70:
+            continue  # must sit just above the sheet-name box
+        if page_center is not None and abs(cx - page_center) > tol:
+            continue  # must be horizontally centered (not a corner note)
+        low = s.lower()
+        if (low.startswith("for reference") or "unclassified" in low
+                or _PDF_CABLE_TOKEN_RE.fullmatch(s)
+                or re.match(r"\s*length\s*[:\-]", low)):
+            continue
+        if bd is None or dy < bd:
+            bd, best = dy, s
+    desc = re.sub(r"\s+", " ", best).strip()
+    return token, desc
 
 
 def _drawing_name_from_pdf(path, reader) -> str:
@@ -5573,21 +5625,22 @@ def plan_pdf_sheet_split(pdf_path) -> dict:
     then any "-BOM" continuation page(s). A repeated sheet name (a continuation
     whose header still reads the base name) is folded in the same way."""
     out = {"drawing": "", "page_count": 0, "specs_present": [],
-           "specs_missing": [], "bundles": []}
+           "specs_missing": [], "revision": "", "bundles": []}
     from pypdf import PdfReader
     reader = PdfReader(str(pdf_path))
     out["page_count"] = len(reader.pages)
     out["drawing"] = drawing = _drawing_name_from_pdf(pdf_path, reader)
+    out["revision"] = revision = _filename_rev_letter(pdf_path)
 
     # Classify every page: a cable sheet (by its top token), a spec sheet (by
     # title), or other (title page, frame, ...).
-    cable_pages = []            # [(index, sheet_name)] in page order
+    cable_pages = []            # [(index, sheet_name, description)] in order
     cable_spec_idx = rf_spec_idx = None
     for i, page in enumerate(reader.pages):
-        top, allt = _pdf_page_texts(page)
-        token = _pdf_cable_token(top)
+        frags, allt, h, w = _pdf_page_fragments(page)
+        token, desc = _pdf_sheet_and_description(frags, h, w)
         if token:
-            cable_pages.append((i, token))
+            cable_pages.append((i, token, desc))
             continue
         low = allt.lower()
         if rf_spec_idx is None and "rf cable assembly specifications" in low:
@@ -5615,7 +5668,7 @@ def plan_pdf_sheet_split(pdf_path) -> dict:
     bundles = []
     # First the base (non-"-BOM") sheets, in page order. A repeated base token
     # is a continuation and is appended rather than starting a new bundle.
-    for i, nm in cable_pages:
+    for i, nm, desc in cable_pages:
         if _BOM_SHEET_SUFFIX_RE.search(nm):
             continue
         key = base_of(nm).lower()
@@ -5624,12 +5677,14 @@ def plan_pdf_sheet_split(pdf_path) -> dict:
         else:
             b = {"sheet": nm,
                  "cable": f"{drawing}-{nm}" if drawing else nm,
+                 "revision": revision,
+                 "description": desc,
                  "indices": [i]}
             by_base[key] = b
             bundles.append(b)
     # Then "-BOM" continuation pages, folded into their base (or their own
     # bundle if the base sheet isn't in the PDF).
-    for i, nm in cable_pages:
+    for i, nm, desc in cable_pages:
         if not _BOM_SHEET_SUFFIX_RE.search(nm):
             continue
         key = base_of(nm).lower()
@@ -5638,6 +5693,8 @@ def plan_pdf_sheet_split(pdf_path) -> dict:
         else:
             b = {"sheet": nm,
                  "cable": f"{drawing}-{nm}" if drawing else nm,
+                 "revision": revision,
+                 "description": desc,
                  "indices": [i]}
             by_base[key] = b
             bundles.append(b)
@@ -5677,8 +5734,8 @@ def export_pdf_sheet_bundles(pdf_path, out_dir) -> tuple:
         writer = PdfWriter()
         for i in b["indices"]:
             writer.add_page(reader.pages[i])
-        safe = re.sub(r'[\\/:*?"<>|]', "-", b["cable"]).strip()
-        op = out_dir / ((safe or b["sheet"]) + ".pdf")
+        op = out_dir / _bundle_pdf_name(
+            b["cable"], b.get("revision", ""), b.get("description", ""))
         with open(op, "wb") as fh:
             writer.write(fh)
         written.append((op, b["cable"]))

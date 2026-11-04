@@ -267,9 +267,13 @@ always placed **before** the sheet in each bundle, in that order. Every file is
 named after the cable: the drawing number with the sheet name appended, e.g.
 `CBL00040-01-P0001.pdf`.
 
-Pick a destination folder; one PDF is written per cable sheet. Cable sheets are
-recognized by name — **P####, R####, C#### or W####** — and may carry a
-suffix:
+Pick a destination folder; one PDF is written per cable sheet. Each file is
+named with the convention **`CABLE NAME_REVISION_CABLE DESCRIPTION_CABLE_DRAWING`**
+(all caps), e.g. `CBL00040-01-P0001_D_AC POWER ENTRY_CABLE_DRAWING.pdf` — where
+the cable name is the drawing number plus the sheet name, the revision is read
+from the drawing's file name, and the description is the title text at the top
+of the sheet. Cable sheets are recognized by name — **P####, R####, C#### or
+W####** — and may carry a suffix:
 
 - **`-ALT`** (an alternate sheet) gets its own bundle, like any other sheet.
 - **`-BOM`** marks a sheet that only carries another sheet's BOM table (drawn on
