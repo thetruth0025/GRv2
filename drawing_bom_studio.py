@@ -49,7 +49,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.46.2"
+__version__ = "2.47.0"
 
 import argparse
 import datetime
@@ -5365,15 +5365,67 @@ _BOM_SHEET_SUFFIX_RE = re.compile(r"[\s_-]+BOM\s*$", re.IGNORECASE)
 
 def _bundle_pdf_name(cable: str, revision: str, description: str) -> str:
     """The output file name for a split bundle, following the convention
-    CABLE NAME_REVISION_CABLE DESCRIPTION_CABLE_DRAWING (all caps), e.g.
-    "CBL00040-01-P0001_D_AC POWER ENTRY_CABLE_DRAWING.pdf". Empty revision or
+    CABLE NAME_REVx_CABLE DESCRIPTION_CABLE_DRAWING (all caps), e.g.
+    "CBL00040-01-P0001_REVD_AC POWER ENTRY_CABLE_DRAWING.pdf". ``revision`` is
+    the bare letter/number (e.g. "D"); it is shown as "REVD". Empty revision or
     description segments are dropped so there are no doubled underscores."""
-    segs = [s.strip() for s in (cable, revision, description) if (s or "").strip()]
+    rev = (revision or "").strip()
+    rev_seg = f"REV{rev}" if rev else ""
+    segs = [s.strip() for s in (cable, rev_seg, description)
+            if (s or "").strip()]
     segs.append("CABLE_DRAWING")
     name = "_".join(segs).upper()
     name = re.sub(r'[\\/:*?"<>|]', "-", name)       # illegal on Windows
     name = re.sub(r"\s+", " ", name).strip()
     return name + ".pdf"
+
+
+def _revision_near_label(items) -> str:
+    """Given a list of (text, x, y) boxes, return the single letter/number that
+    sits closest to a "REV"/"Revision" label (the title-block revision), or ""
+    if there's no REV label or nothing plausible near it."""
+    labels = [(x, y) for (t, x, y) in items
+              if x is not None and y is not None and _is_rev_label(t or "")]
+    if not labels:
+        return ""
+    best, bd = "", None
+    for t, x, y in items:
+        if x is None or y is None:
+            continue
+        st = (t or "").strip()
+        if _is_rev_label(st) or not re.fullmatch(r"[A-Za-z0-9]{1,2}|-", st):
+            continue
+        for lx, ly in labels:
+            d = (x - lx) ** 2 + (y - ly) ** 2
+            if bd is None or d < bd:
+                bd, best = d, st
+    return best
+
+
+def _visio_title_block_revision(path) -> str:
+    """The current revision letter/number from a Visio drawing's title block
+    (the box next to the "REV" label, lower-right), or "". Frame/background
+    pages -- where the shared title block usually lives -- are checked first."""
+    try:
+        z = zipfile.ZipFile(path)
+    except (zipfile.BadZipFile, OSError):
+        return ""
+    with z:
+        pages = [n for n in z.namelist() if _PAGE_NAME_RE.search(n.lower())]
+        frame = _visio_frame_page_parts(z)
+        ordered = ([p for p in pages if p in frame]
+                   + [p for p in pages if p not in frame])
+        for part in ordered:
+            try:
+                xml = z.read(part).decode("utf-8", "replace")
+            except KeyError:
+                continue
+            _ns, cells, _mx = _visio_leaf_cells(xml)
+            rv = _revision_near_label(
+                [(c["text"], c["x"], c["y"]) for c in cells])
+            if rv:
+                return rv
+    return ""
 
 
 def _is_cable_sheet_name(name: str) -> bool:
@@ -5405,7 +5457,7 @@ def plan_visio_sheet_split(path) -> dict:
     idx = {nm: i for i, nm in enumerate(foreground)}
     drawing = _visio_drawing_name(path)
     out["drawing"] = drawing
-    revision = _filename_rev_letter(path)
+    revision = _visio_title_block_revision(path) or _filename_rev_letter(path)
     out["revision"] = revision
     descriptions = read_visio_sheet_descriptions(path)
 
@@ -5621,6 +5673,12 @@ def _pdf_sheet_and_description(frags, height, width) -> tuple:
     return token, desc
 
 
+def _pdf_revision(frags) -> str:
+    """The title-block revision on a PDF page: the single letter/number nearest
+    a "REV" label (bottom-right), or ""."""
+    return _revision_near_label([(s, x, y) for (s, x, y, cx) in frags])
+
+
 def _drawing_name_from_pdf(path, reader) -> str:
     """The drawing number for naming, from the PDF file name (e.g.
     "CBL00040-01") or, failing that, scanned from the first few pages."""
@@ -5653,14 +5711,17 @@ def plan_pdf_sheet_split(pdf_path) -> dict:
     reader = PdfReader(str(pdf_path))
     out["page_count"] = len(reader.pages)
     out["drawing"] = drawing = _drawing_name_from_pdf(pdf_path, reader)
-    out["revision"] = revision = _filename_rev_letter(pdf_path)
 
     # Classify every page: a cable sheet (by its top token), a spec sheet (by
-    # title), or other (title page, frame, ...).
+    # title), or other (title page, frame, ...). Also read the revision from
+    # the bottom-right "REV" box (the first page that has one).
     cable_pages = []            # [(index, sheet_name, description)] in order
     cable_spec_idx = rf_spec_idx = None
+    revision = ""
     for i, page in enumerate(reader.pages):
         frags, allt, h, w = _pdf_page_fragments(page)
+        if not revision:
+            revision = _pdf_revision(frags)
         token, desc = _pdf_sheet_and_description(frags, h, w)
         if token:
             cable_pages.append((i, token, desc))
@@ -5671,6 +5732,11 @@ def plan_pdf_sheet_split(pdf_path) -> dict:
         elif (cable_spec_idx is None
               and "cable assembly specifications" in low):
             cable_spec_idx = i
+
+    # Fall back to the revision in the file name if no "REV" box was read.
+    if not revision:
+        revision = _filename_rev_letter(pdf_path)
+    out["revision"] = revision
 
     specs = []
     if cable_spec_idx is not None:
