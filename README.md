@@ -281,10 +281,20 @@ suffix:
   `P0001 - BOM` are all recognized.
 
 The title page, the spec sheets themselves, and the background frame are not
-split out on their own. Rendering uses the installed Microsoft Visio when
-available (best fidelity, falling back to LibreOffice); the pages are then
-reordered and bundled with **pypdf** (`pip install pypdf` — the launcher and
-build scripts install it automatically).
+split out on their own.
+
+**Split a PDF (recommended) or a .vsdx.** Visio's embedded (OLE) BOM tables
+often don't render when a drawing is converted to PDF by anything other than
+Visio itself — they come out as a blank *OLE* box. So the best workflow is to
+**export the drawing to a PDF from Visio first** (where the BOMs render), then
+point this tool at that PDF. When splitting a PDF, sheets are matched by the
+sheet name printed at the top of each page (P####, R####, C####, W####, with
+any `-ALT`/`-BOM` suffix) and the spec sheets by their title text, so all the
+same bundling rules apply — including folding `-BOM` continuation pages into
+their base sheet. A `.vsdx` can still be split directly (rendered via Microsoft
+Visio when available, else LibreOffice), but its embedded BOMs may not appear.
+Either way the pages are reordered and bundled with **pypdf** (`pip install
+pypdf` — the launcher and build scripts install it automatically).
 
 ### Excel: find & edit BOM rows
 
