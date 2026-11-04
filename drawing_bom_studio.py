@@ -49,7 +49,7 @@ Requirements:
 
 from __future__ import annotations
 
-__version__ = "2.46.1"
+__version__ = "2.46.2"
 
 import argparse
 import datetime
@@ -5563,44 +5563,44 @@ def _pdf_page_fragments(page) -> tuple:
 
 
 def _pdf_sheet_and_description(frags, height, width) -> tuple:
-    """Find a page's (sheet_name, description). The sheet name is the top-most
-    fragment that is a whole cable-sheet name (joined with a right-adjacent
-    "-suffix" fragment when the name was split); the description is the
-    horizontally-centered fragment just above it (the title text over the
-    sheet-name / Length boxes). Returns (None, "") for spec/title pages."""
+    """Find a page's (sheet_name, description). The sheet name is read off the
+    top-most line that begins with a cable-sheet base (P0001, R0001, ...),
+    concatenating that line's fragments left-to-right so a name split by the
+    PDF exporter (e.g. "P0001" + "-1LED") is reconstructed whole. The
+    description is the horizontally-centered fragment just above it. Returns
+    (None, "") for spec/title pages."""
     if not frags:
         return None, ""
     cutoff = height * 0.78 if height else None
     top = [f for f in frags if cutoff is None or f[2] >= cutoff]
     top_by_y = sorted(top, key=lambda e: -e[2])
-    # Sheet name: highest top-band fragment that *is* a full sheet name.
-    name = None
+    base_re = re.compile(r"^[A-Za-z]{1,4}\d{2,}", re.IGNORECASE)
+    # The sheet-name line: the highest top-band fragment that starts with a
+    # cable-sheet base. (The description and the "UNCLASSIFIED" banner don't.)
+    anchor = None
     for s, x, y, cx in top_by_y:
-        st = s.strip()
-        if _PDF_SHEET_NAME_RE.fullmatch(st):
-            name = (st, x, y, cx)
+        if base_re.match(s.strip()):
+            anchor = (x, y, cx)
             break
-    if name is None:
-        # Fall back: a fragment that starts with a sheet name (allow a stray
-        # trailing char), in case of odd punctuation.
-        for s, x, y, cx in top_by_y:
-            st = s.strip()
-            m = _PDF_SHEET_NAME_RE.match(st)
-            if m and m.end() >= len(st) - 1:
-                name = (m.group(0), x, y, cx)
-                break
-    if name is None:
+    if anchor is None:
         return None, ""
-    token, nx, ny, ncx = name
-    # If the name was split, join a right-adjacent "-suffix" fragment on the
-    # same line (e.g. "P0001" + "-1LED").
-    right_edge = 2 * ncx - nx
-    for s, x, y, cx in top:
-        st = s.strip()
-        if (abs(y - ny) <= 3 and 0 <= x - right_edge <= 60
-                and re.fullmatch(r"[-_][A-Za-z0-9]+", st)):
-            token = token + st
+    nx, ny, ncx = anchor
+    # Rebuild the full name from that baseline, left-to-right, starting at the
+    # base fragment and appending contiguous fragments (stop at a big x-gap, so
+    # unrelated text further along the line isn't swallowed).
+    same_line = sorted(
+        [f for f in top if abs(f[2] - ny) <= 5 and f[1] >= nx - 1],
+        key=lambda e: e[1])
+    joined, prev_end = "", None
+    for s, x, y, cx in same_line:
+        if prev_end is not None and (x - prev_end) > 30:
             break
+        joined += s.strip()
+        prev_end = 2 * cx - x  # estimated right edge of this fragment
+    m = _PDF_SHEET_NAME_RE.match(joined)
+    token = m.group(0) if m else joined
+    if not token:
+        return None, ""
     page_center = (width / 2.0) if width else None
     tol = (width * 0.20) if width else None
     best, bd = "", None
