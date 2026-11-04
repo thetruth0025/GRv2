@@ -6,18 +6,25 @@ REM ============================================================
 setlocal
 cd /d "%~dp0"
 
+REM Optional extras, installed one at a time so a package with no build for
+REM your Python version (often tkinterdnd2 on a brand-new Python) can't stop
+REM the others from installing. pypdf powers "Split sheets into PDFs"; Pillow
+REM draws the mascot; tkinterdnd2 adds drag-and-drop. All are optional.
 REM Prefer the Windows "py" launcher, then fall back to "python".
 where py >nul 2>nul
 if %errorlevel%==0 (
-    REM Optional extras: Pillow (mascot) + tkinterdnd2 (drag-and-drop).
-    py -m pip install --quiet --disable-pip-version-check pillow tkinterdnd2 pypdf >nul 2>nul
+    py -m pip install --quiet --disable-pip-version-check pypdf >nul 2>nul
+    py -m pip install --quiet --disable-pip-version-check pillow >nul 2>nul
+    py -m pip install --quiet --disable-pip-version-check tkinterdnd2 >nul 2>nul
     py "%~dp0drawing_bom_studio.py"
     goto :end
 )
 
 where python >nul 2>nul
 if %errorlevel%==0 (
-    python -m pip install --quiet --disable-pip-version-check pillow tkinterdnd2 pypdf >nul 2>nul
+    python -m pip install --quiet --disable-pip-version-check pypdf >nul 2>nul
+    python -m pip install --quiet --disable-pip-version-check pillow >nul 2>nul
+    python -m pip install --quiet --disable-pip-version-check tkinterdnd2 >nul 2>nul
     python "%~dp0drawing_bom_studio.py"
     goto :end
 )

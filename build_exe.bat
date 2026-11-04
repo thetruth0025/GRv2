@@ -20,16 +20,45 @@ where %PY% >nul 2>nul || (
     exit /b 1
 )
 
-echo Installing PyInstaller (if not already present)...
-%PY% -m pip install --upgrade pyinstaller pillow tkinterdnd2 pypdf || (
-    echo Failed to install PyInstaller. Check your internet connection.
+echo Updating pip...
+%PY% -m pip install --upgrade pip setuptools wheel >nul 2>nul
+
+REM --- PyInstaller is REQUIRED to build the EXE. -------------------------
+echo Installing PyInstaller...
+%PY% -m pip install --upgrade pyinstaller || (
+    echo.
+    echo  Could not install PyInstaller. Check your internet connection and
+    echo  that pip is up to date, then run this file again.
     pause
     exit /b 1
 )
 
+REM --- Optional dependencies: install each on its own so one that has no
+REM     build for your Python version can't block the others. ------------
+echo Installing pypdf (for "Split sheets into PDFs")...
+%PY% -m pip install --upgrade pypdf || echo   NOTE: pypdf did not install -- the "Split sheets to PDFs" feature will be unavailable.
+
+echo Installing Pillow (for the robot mascot art)...
+%PY% -m pip install --upgrade pillow || echo   NOTE: Pillow did not install -- the mascot art will be skipped.
+
+echo Installing tkinterdnd2 (for drag-and-drop)...
+set "DND="
+%PY% -m pip install --upgrade tkinterdnd2 >nul 2>nul && %PY% -c "import tkinterdnd2" >nul 2>nul && set "DND=1"
+if defined DND (
+    echo   Drag-and-drop: enabled.
+) else (
+    echo   NOTE: tkinterdnd2 has no build for this Python version -- building
+    echo         without drag-and-drop. The "Add file..." buttons still work.
+)
+
+REM Only ask PyInstaller to bundle tkinterdnd2 when it is actually installed;
+REM otherwise "--collect-all tkinterdnd2" would fail the build.
+set "COLLECT="
+if defined DND set "COLLECT=--collect-all tkinterdnd2"
+
 echo.
 echo Building the EXE...
-%PY% -m PyInstaller --onefile --windowed --name DrawingBOMStudio --icon robot_icon.ico --collect-all tkinterdnd2 drawing_bom_studio.py || (
+%PY% -m PyInstaller --onefile --windowed --name DrawingBOMStudio --icon robot_icon.ico %COLLECT% drawing_bom_studio.py || (
     echo Build failed.
     pause
     exit /b 1
